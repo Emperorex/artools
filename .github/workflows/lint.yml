@@ -1,0 +1,70 @@
+name: Lint
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  html-lint:
+    name: HTML lint
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: '18'
+
+      - name: Install htmlhint
+        run: npm install -g htmlhint
+
+      - name: Run htmlhint
+        run: |
+          echo "Running htmlhint..."
+          # allow git ls-files to fail without stopping the step
+          set +e
+          files=$(git ls-files '*.html')
+          set -e
+          if [ -z "${files}" ]; then
+            echo "No HTML files found, skipping htmlhint."
+            exit 0
+          fi
+          # Run htmlhint on the matched HTML files
+          htmlhint ${files}
+
+  python-lint:
+    name: Python lint (ruff)
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: [ '3.10', '3.11' ]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install ruff
+        run: python -m pip install --upgrade pip && pip install ruff
+
+      - name: Run ruff
+        run: |
+          echo "Running ruff..."
+          # allow git ls-files to fail without stopping the step
+          set +e
+          files=$(git ls-files '*.py')
+          set -e
+          if [ -z "${files}" ]; then
+            echo "No Python files found, skipping ruff."
+            exit 0
+          fi
+          # Run ruff against the repository (ruff will respect config files if present)
+          ruff check .
+

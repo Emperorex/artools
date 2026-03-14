@@ -1,0 +1,24 @@
+# CODEOWNERS file
+# For information about the file format see:
+# https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-features/customizing-your-repository/about-code-owners
+#
+# Syntax: <pattern> <owner> [<owner> ...]
+# Owners can be individual users (@username) or teams within an organization (@org/team-name).
+# Patterns are matched from top to bottom — the last matching pattern takes precedence.
+#
+# EXAMPLES:
+#  # Make the docs team the owner of everything under docs/
+#  docs/ @your-org/docs-team
+#  # Make all JavaScript files owned by the frontend team
+#  *.js @your-org/frontend-team
+#  # Make files in the scripts/ directory owned by an individual
+#  scripts/* @your-github-username
+#
+# -----------------------------------------------------------------------------
+# Recommended: replace the placeholder handles below with real GitHub usernames or
+# organization team slugs for your repository (for example: @my-org/core-team).
+# -----------------------------------------------------------------------------
+
+* @Emperorex
+
+# End of CODEOWNERS

@@ -1,5 +1,5 @@
 # dnipro-tech
-Repository for testing purposes
+Repository for testing purposes (pet-projects, tools etc.)
 
 
-Ukraine, 2024
+Ukraine, 2024-2026

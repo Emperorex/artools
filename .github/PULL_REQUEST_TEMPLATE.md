@@ -35,16 +35,8 @@ Summary of changes:
 
 <!-- Provide clear steps to reproduce/test this PR. Include commands, sample inputs, and expected outputs. -->
 
-1. 
-2. 
-3. 
-
 # Screenshots / Logs (optional)
 
 <!-- If this change affects UI, add screenshots or animated GIFs. For backend changes, include relevant logs or sample output. -->
 
-# Notes for maintainers
-
-- Replace placeholder checkboxes or example text before merging where appropriate.
-- If this PR requires multiple reviewers, mention teams or individuals in the description.
-
+# Notes

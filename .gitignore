@@ -43,6 +43,10 @@ venv/
 env/
 .venv/
 
+# Rust/Cargo artifacts
+/target/
+Cargo.lock
+
 # Coverage / test output
 .coverage
 coverage/

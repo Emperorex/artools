@@ -68,3 +68,23 @@ jobs:
           # Run ruff against the repository (ruff will respect config files if present)
           ruff check .
 
+  rust-lint:
+    name: Rust lint (clippy & fmt)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: tools/arfind
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - name: Check code formatting
+        run: cargo fmt --check
+
+      - name: Run clippy linter
+        run: cargo clippy -- -D warnings

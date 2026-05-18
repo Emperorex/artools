@@ -3,23 +3,19 @@ use std::{
     fs,
     path::PathBuf,
     sync::{
-        atomic::{AtomicUsize, Ordering},
         Arc,
+        atomic::{AtomicUsize, Ordering},
     },
     thread,
     time::{Duration, Instant},
 };
 
 use clap::Parser;
-use crossbeam_channel::{unbounded, Sender};
+use crossbeam_channel::{Sender, unbounded};
 use glob::Pattern;
 
 /// Default directories to ignore
-const DEFAULT_IGNORES: &[&str] = &[
-    ".git",
-    "node_modules",
-    "__pycache__",
-];
+const DEFAULT_IGNORES: &[&str] = &[".git", "node_modules", "__pycache__"];
 
 /// CLI arguments
 #[derive(Parser, Debug)]
@@ -60,13 +56,11 @@ struct Task {
 fn main() {
     let args = Args::parse();
 
-    let mut ignore_dirs: HashSet<String> =
-        DEFAULT_IGNORES.iter().map(|s| s.to_string()).collect();
+    let mut ignore_dirs: HashSet<String> = DEFAULT_IGNORES.iter().map(|s| s.to_string()).collect();
 
     ignore_dirs.extend(args.ignore);
 
-    let pattern = Pattern::new(&args.name)
-        .expect("Invalid glob pattern");
+    let pattern = Pattern::new(&args.name).expect("Invalid glob pattern");
 
     let start_time = Instant::now();
 
@@ -90,9 +84,18 @@ fn main() {
     // Статистика виводиться тільки якщо передано прапорець --debug або -d
     if args.debug {
         eprintln!("\n=== Search Statistics ===");
-        eprintln!("Files checked:         {}", total_files.load(Ordering::Relaxed));
-        eprintln!("Directories checked:   {}", total_dirs.load(Ordering::Relaxed));
-        eprintln!("Matches found:         {}", matched_count.load(Ordering::Relaxed));
+        eprintln!(
+            "Files checked:         {}",
+            total_files.load(Ordering::Relaxed)
+        );
+        eprintln!(
+            "Directories checked:   {}",
+            total_dirs.load(Ordering::Relaxed)
+        );
+        eprintln!(
+            "Matches found:         {}",
+            matched_count.load(Ordering::Relaxed)
+        );
         eprintln!("Execution time:        {:.2?}", duration);
         eprintln!("\n");
     }

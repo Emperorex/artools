@@ -53,6 +53,21 @@ struct Task {
     depth: usize,
 }
 
+/// Shared configuration and filters for the search
+struct SearchConfig {
+    pattern: Pattern,
+    ignore_dirs: HashSet<String>,
+    max_depth: Option<usize>,
+}
+
+/// Shared atomic counters for runtime statistics
+#[derive(Clone)]
+struct SearchStats {
+    total_files: Arc<AtomicUsize>,
+    total_dirs: Arc<AtomicUsize>,
+    matched_count: Arc<AtomicUsize>,
+}
+
 fn main() {
     let args = Args::parse();
 
@@ -62,55 +77,43 @@ fn main() {
 
     let pattern = Pattern::new(&args.name).expect("Invalid glob pattern");
 
+    let config = Arc::new(SearchConfig {
+        pattern,
+        ignore_dirs,
+        max_depth: args.max_depth,
+    });
+
+    let stats = SearchStats {
+        total_files: Arc::new(AtomicUsize::new(0)),
+        total_dirs: Arc::new(AtomicUsize::new(0)),
+        matched_count: Arc::new(AtomicUsize::new(0)),
+    };
+
     let start_time = Instant::now();
 
-    let total_files = Arc::new(AtomicUsize::new(0));
-    let total_dirs = Arc::new(AtomicUsize::new(0));
-    let matched_count = Arc::new(AtomicUsize::new(0));
-
-    parallel_find(
-        PathBuf::from(args.path),
-        pattern,
-        args.jobs,
-        ignore_dirs,
-        args.max_depth,
-        Arc::clone(&total_files),
-        Arc::clone(&total_dirs),
-        Arc::clone(&matched_count),
-    );
+    parallel_find(PathBuf::from(args.path), args.jobs, config, stats.clone());
 
     let duration = start_time.elapsed();
 
-    // Статистика виводиться тільки якщо передано прапорець --debug або -d
     if args.debug {
         eprintln!("\n=== Search Statistics ===");
         eprintln!(
             "Files checked:         {}",
-            total_files.load(Ordering::Relaxed)
+            stats.total_files.load(Ordering::Relaxed)
         );
         eprintln!(
             "Directories checked:   {}",
-            total_dirs.load(Ordering::Relaxed)
+            stats.total_dirs.load(Ordering::Relaxed)
         );
         eprintln!(
             "Matches found:         {}",
-            matched_count.load(Ordering::Relaxed)
+            stats.matched_count.load(Ordering::Relaxed)
         );
         eprintln!("Execution time:        {:.2?}", duration);
-        eprintln!("\n");
     }
 }
 
-fn parallel_find(
-    root: PathBuf,
-    pattern: Pattern,
-    workers: usize,
-    ignore_dirs: HashSet<String>,
-    max_depth: Option<usize>,
-    total_files: Arc<AtomicUsize>,
-    total_dirs: Arc<AtomicUsize>,
-    matched_count: Arc<AtomicUsize>,
-) {
+fn parallel_find(root: PathBuf, workers: usize, config: Arc<SearchConfig>, stats: SearchStats) {
     let (task_tx, task_rx) = unbounded::<Task>();
     let (output_tx, output_rx) = unbounded::<PathBuf>();
 
@@ -130,13 +133,9 @@ fn parallel_find(
         let task_tx = task_tx.clone();
         let output_tx = output_tx.clone();
 
-        let ignore_dirs = ignore_dirs.clone();
-        let pattern = pattern.clone();
+        let config = Arc::clone(&config);
+        let stats = stats.clone();
         let active_tasks = Arc::clone(&active_tasks);
-
-        let total_files = Arc::clone(&total_files);
-        let total_dirs = Arc::clone(&total_dirs);
-        let matched_count = Arc::clone(&matched_count);
 
         let handle = thread::spawn(move || {
             loop {
@@ -150,18 +149,7 @@ fn parallel_find(
                     }
                 };
 
-                scan_directory(
-                    task,
-                    &pattern,
-                    &ignore_dirs,
-                    max_depth,
-                    &task_tx,
-                    &output_tx,
-                    &active_tasks,
-                    &total_files,
-                    &total_dirs,
-                    &matched_count,
-                );
+                scan_directory(task, &config, &task_tx, &output_tx, &active_tasks, &stats);
 
                 active_tasks.fetch_sub(1, Ordering::SeqCst);
             }
@@ -184,22 +172,18 @@ fn parallel_find(
 
 fn scan_directory(
     task: Task,
-    pattern: &Pattern,
-    ignore_dirs: &HashSet<String>,
-    max_depth: Option<usize>,
+    config: &SearchConfig,
     task_tx: &Sender<Task>,
     output_tx: &Sender<PathBuf>,
     active_tasks: &AtomicUsize,
-    total_files: &AtomicUsize,
-    total_dirs: &AtomicUsize,
-    matched_count: &AtomicUsize,
+    stats: &SearchStats,
 ) {
     let entries = match fs::read_dir(&task.path) {
         Ok(entries) => entries,
         Err(_) => return,
     };
 
-    total_dirs.fetch_add(1, Ordering::Relaxed);
+    stats.total_dirs.fetch_add(1, Ordering::Relaxed);
 
     for entry in entries.flatten() {
         let path = entry.path();
@@ -212,20 +196,20 @@ fn scan_directory(
         let is_dir = path.is_dir();
 
         if !is_dir {
-            total_files.fetch_add(1, Ordering::Relaxed);
+            stats.total_files.fetch_add(1, Ordering::Relaxed);
         }
 
-        if pattern.matches(&file_name) {
-            matched_count.fetch_add(1, Ordering::Relaxed);
+        if config.pattern.matches(&file_name) {
+            stats.matched_count.fetch_add(1, Ordering::Relaxed);
             let _ = output_tx.send(path.clone());
         }
 
         if is_dir {
-            if ignore_dirs.contains(file_name.as_ref()) {
+            if config.ignore_dirs.contains(file_name.as_ref()) {
                 continue;
             }
 
-            if max_depth.map_or(true, |d| task.depth < d) {
+            if config.max_depth.is_none_or(|d| task.depth < d) {
                 active_tasks.fetch_add(1, Ordering::SeqCst);
 
                 let _ = task_tx.send(Task {

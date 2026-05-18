@@ -68,3 +68,36 @@ jobs:
           # Run ruff against the repository (ruff will respect config files if present)
           ruff check .
 
+  rust-lint:
+    name: Rust lint (clippy & fmt)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - name: Run fmt and clippy on all tools
+        run: |
+          echo "Scanning for Rust projects in tools/..."
+          
+          # Знаходимо всі папки в tools/, де є Cargo.toml
+          for cargo_toml in tools/*/Cargo.toml; do
+            # Перевіряємо, чи файл дійсно існує (на випадок порожньої папки)
+            [ -e "$cargo_toml" ] || continue
+          
+            # Отримуємо шлях до папки проєкту (наприклад, tools/arfind)
+            project_dir=$(dirname "$cargo_toml")
+            echo "----------------------------------------"
+            echo "Linting Rust project in: $project_dir"
+            echo "----------------------------------------"
+          
+            # Запускаємо перевірку форматування
+            cargo fmt --manifest-path "$cargo_toml" --check
+          
+            # Запускаємо clippy, вказуючи шлях до конкретного маніфесту
+            cargo clippy --manifest-path "$cargo_toml" -- -D warnings
+          done

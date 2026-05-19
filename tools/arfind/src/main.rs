@@ -77,15 +77,16 @@ struct SearchStats {
 fn main() {
     let args = Args::parse();
 
-    // Validate the target type flag if provided
-    if let Some(ref t) = args.file_type {
-        if t != "f" && t != "d" {
-            eprintln!(
-                "error: Invalid type '{}'. Use 'f' for files or 'd' for directories.",
-                t
-            );
-            std::process::exit(1);
-        }
+    // Validate the target type flag if provided (collapsed nested if block for clippy)
+    if let Some(ref t) = args.file_type
+        && t != "f"
+        && t != "d"
+    {
+        eprintln!(
+            "error: Invalid type '{}'. Use 'f' for files or 'd' for directories.",
+            t
+        );
+        std::process::exit(1);
     }
 
     let mut ignore_dirs: HashSet<String> = DEFAULT_IGNORES.iter().map(|s| s.to_string()).collect();

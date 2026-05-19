@@ -58,6 +58,7 @@ struct SearchConfig {
     pattern: Pattern,
     ignore_dirs: HashSet<String>,
     max_depth: Option<usize>,
+    debug: bool,
 }
 
 /// Shared atomic counters for runtime statistics
@@ -81,6 +82,7 @@ fn main() {
         pattern,
         ignore_dirs,
         max_depth: args.max_depth,
+        debug: args.debug,
     });
 
     let stats = SearchStats {
@@ -178,12 +180,19 @@ fn scan_directory(
     active_tasks: &AtomicUsize,
     stats: &SearchStats,
 ) {
+    // Increment directory counter since the traversal attempt is active
+    stats.total_dirs.fetch_add(1, Ordering::Relaxed);
+
     let entries = match fs::read_dir(&task.path) {
         Ok(entries) => entries,
-        Err(_) => return,
+        Err(err) => {
+            // Print error to stderr only if debug flag is active
+            if config.debug {
+                eprintln!("arfind: {}: {}", task.path.display(), err);
+            }
+            return; // Safely skip unauthorized directories
+        }
     };
-
-    stats.total_dirs.fetch_add(1, Ordering::Relaxed);
 
     for entry in entries.flatten() {
         let path = entry.path();

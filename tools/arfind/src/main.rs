@@ -11,6 +11,7 @@ use std::{
 };
 
 use clap::Parser;
+use colored::Colorize;
 use crossbeam_channel::{Sender, unbounded};
 use glob::Pattern;
 
@@ -74,6 +75,12 @@ struct SearchStats {
     matched_count: Arc<AtomicUsize>,
 }
 
+/// Output item representing a match with its type metadata
+struct MatchResult {
+    path: PathBuf,
+    is_dir: bool,
+}
+
 fn main() {
     let args = Args::parse();
 
@@ -83,8 +90,12 @@ fn main() {
         && t != "d"
     {
         eprintln!(
-            "error: Invalid type '{}'. Use 'f' for files or 'd' for directories.",
-            t
+            "{}",
+            format!(
+                "error: Invalid type '{}'. Use 'f' for files or 'd' for directories.",
+                t
+            )
+            .red()
         );
         std::process::exit(1);
     }
@@ -116,18 +127,23 @@ fn main() {
     let duration = start_time.elapsed();
 
     if args.debug {
-        eprintln!("\n=== Search Statistics ===");
+        eprintln!("{}", "\n=== Search Statistics ===".yellow().bold());
         eprintln!(
             "Files checked:         {}",
-            stats.total_files.load(Ordering::Relaxed)
+            stats.total_files.load(Ordering::Relaxed).to_string().cyan()
         );
         eprintln!(
             "Directories checked:   {}",
-            stats.total_dirs.load(Ordering::Relaxed)
+            stats.total_dirs.load(Ordering::Relaxed).to_string().cyan()
         );
         eprintln!(
             "Matches found:         {}",
-            stats.matched_count.load(Ordering::Relaxed)
+            stats
+                .matched_count
+                .load(Ordering::Relaxed)
+                .to_string()
+                .green()
+                .bold()
         );
         eprintln!("Execution time:        {:.2?}", duration);
     }
@@ -135,7 +151,8 @@ fn main() {
 
 fn parallel_find(root: PathBuf, workers: usize, config: Arc<SearchConfig>, stats: SearchStats) {
     let (task_tx, task_rx) = unbounded::<Task>();
-    let (output_tx, output_rx) = unbounded::<PathBuf>();
+    // Updated to pass MatchResult instead of plain PathBuf to preserve color metadata
+    let (output_tx, output_rx) = unbounded::<MatchResult>();
 
     let active_tasks = Arc::new(AtomicUsize::new(1));
 
@@ -181,8 +198,13 @@ fn parallel_find(root: PathBuf, workers: usize, config: Arc<SearchConfig>, stats
     drop(task_tx);
     drop(output_tx);
 
-    for path in output_rx {
-        println!("{}", path.display());
+    // Apply colors natively based on the type of result discovered
+    for item in output_rx {
+        if item.is_dir {
+            println!("{}", item.path.display().to_string().blue().bold());
+        } else {
+            println!("{}", item.path.display());
+        }
     }
 
     for handle in handles {
@@ -194,7 +216,7 @@ fn scan_directory(
     task: Task,
     config: &SearchConfig,
     task_tx: &Sender<Task>,
-    output_tx: &Sender<PathBuf>,
+    output_tx: &Sender<MatchResult>,
     active_tasks: &AtomicUsize,
     stats: &SearchStats,
 ) {
@@ -204,7 +226,8 @@ fn scan_directory(
         Ok(entries) => entries,
         Err(err) => {
             if config.debug {
-                eprintln!("arfind: {}: {}", task.path.display(), err);
+                let err_msg = format!("arfind: {}: {}", task.path.display(), err).red();
+                eprintln!("{}", err_msg);
             }
             return;
         }
@@ -234,7 +257,10 @@ fn scan_directory(
 
             if type_matches {
                 stats.matched_count.fetch_add(1, Ordering::Relaxed);
-                let _ = output_tx.send(path.clone());
+                let _ = output_tx.send(MatchResult {
+                    path: path.clone(),
+                    is_dir,
+                });
             }
         }
 

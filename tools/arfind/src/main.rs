@@ -41,6 +41,10 @@ struct Args {
     #[arg(long)]
     ignore: Vec<String>,
 
+    /// Filter by type: f (file) or d (directory)
+    #[arg(short = 't', long)]
+    file_type: Option<String>,
+
     /// Show search statistics
     #[arg(short, long)]
     debug: bool,
@@ -58,6 +62,7 @@ struct SearchConfig {
     pattern: Pattern,
     ignore_dirs: HashSet<String>,
     max_depth: Option<usize>,
+    file_type: Option<String>,
     debug: bool,
 }
 
@@ -72,6 +77,17 @@ struct SearchStats {
 fn main() {
     let args = Args::parse();
 
+    // Validate the target type flag if provided
+    if let Some(ref t) = args.file_type {
+        if t != "f" && t != "d" {
+            eprintln!(
+                "error: Invalid type '{}'. Use 'f' for files or 'd' for directories.",
+                t
+            );
+            std::process::exit(1);
+        }
+    }
+
     let mut ignore_dirs: HashSet<String> = DEFAULT_IGNORES.iter().map(|s| s.to_string()).collect();
 
     ignore_dirs.extend(args.ignore);
@@ -82,6 +98,7 @@ fn main() {
         pattern,
         ignore_dirs,
         max_depth: args.max_depth,
+        file_type: args.file_type,
         debug: args.debug,
     });
 
@@ -180,17 +197,15 @@ fn scan_directory(
     active_tasks: &AtomicUsize,
     stats: &SearchStats,
 ) {
-    // Increment directory counter since the traversal attempt is active
     stats.total_dirs.fetch_add(1, Ordering::Relaxed);
 
     let entries = match fs::read_dir(&task.path) {
         Ok(entries) => entries,
         Err(err) => {
-            // Print error to stderr only if debug flag is active
             if config.debug {
                 eprintln!("arfind: {}: {}", task.path.display(), err);
             }
-            return; // Safely skip unauthorized directories
+            return;
         }
     };
 
@@ -208,9 +223,18 @@ fn scan_directory(
             stats.total_files.fetch_add(1, Ordering::Relaxed);
         }
 
+        // Check filename glob pattern first
         if config.pattern.matches(&file_name) {
-            stats.matched_count.fetch_add(1, Ordering::Relaxed);
-            let _ = output_tx.send(path.clone());
+            // Check object type filter constraint
+            let type_matches = match &config.file_type {
+                Some(t) => (t == "f" && !is_dir) || (t == "d" && is_dir),
+                None => true,
+            };
+
+            if type_matches {
+                stats.matched_count.fetch_add(1, Ordering::Relaxed);
+                let _ = output_tx.send(path.clone());
+            }
         }
 
         if is_dir {

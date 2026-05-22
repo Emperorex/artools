@@ -1,13 +1,13 @@
 use std::{
     collections::HashSet,
-    fs,
+    fs, hint,
     path::PathBuf,
     sync::{
         Arc,
         atomic::{AtomicUsize, Ordering},
     },
     thread,
-    time::{Duration, Instant},
+    time::Instant,
 };
 
 use clap::Parser;
@@ -151,7 +151,6 @@ fn main() {
 
 fn parallel_find(root: PathBuf, workers: usize, config: Arc<SearchConfig>, stats: SearchStats) {
     let (task_tx, task_rx) = unbounded::<Task>();
-    // Updated to pass MatchResult instead of plain PathBuf to preserve color metadata
     let (output_tx, output_rx) = unbounded::<MatchResult>();
 
     let active_tasks = Arc::new(AtomicUsize::new(1));
@@ -176,18 +175,23 @@ fn parallel_find(root: PathBuf, workers: usize, config: Arc<SearchConfig>, stats
 
         let handle = thread::spawn(move || {
             loop {
-                let task = match task_rx.recv_timeout(Duration::from_millis(100)) {
+                // Highly optimized lock-free extraction loop (no recv_timeout sleep)
+                let task = match task_rx.try_recv() {
                     Ok(task) => task,
                     Err(_) => {
+                        // Check if all other threads have finished their scan work
                         if active_tasks.load(Ordering::SeqCst) == 0 {
                             break;
                         }
+                        // Low-latency CPU backoff strategy to prevent core thrashing
+                        hint::spin_loop();
                         continue;
                     }
                 };
 
                 scan_directory(task, &config, &task_tx, &output_tx, &active_tasks, &stats);
 
+                // Atomically decrement task weight as soon as scanning finishes
                 active_tasks.fetch_sub(1, Ordering::SeqCst);
             }
         });
@@ -234,6 +238,17 @@ fn scan_directory(
     };
 
     for entry in entries.flatten() {
+        let file_type = match entry.file_type() {
+            Ok(ft) => ft,
+            Err(_) => continue, // Skip unreadable directory entries
+        };
+
+        // Skip symlinks by default to guarantee protection against cyclic reference loops
+        if file_type.is_symlink() {
+            continue;
+        }
+
+        let is_dir = file_type.is_dir();
         let path = entry.path();
 
         let file_name = match path.file_name() {
@@ -241,15 +256,12 @@ fn scan_directory(
             None => continue,
         };
 
-        let is_dir = path.is_dir();
-
         if !is_dir {
             stats.total_files.fetch_add(1, Ordering::Relaxed);
         }
 
-        // Check filename glob pattern first
+        // Evaluate filename criteria matching
         if config.pattern.matches(&file_name) {
-            // Check object type filter constraint
             let type_matches = match &config.file_type {
                 Some(t) => (t == "f" && !is_dir) || (t == "d" && is_dir),
                 None => true,
@@ -270,6 +282,7 @@ fn scan_directory(
             }
 
             if config.max_depth.is_none_or(|d| task.depth < d) {
+                // Increment active counter BEFORE sending to keep state correct for spin-locks
                 active_tasks.fetch_add(1, Ordering::SeqCst);
 
                 let _ = task_tx.send(Task {

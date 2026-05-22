@@ -42,7 +42,7 @@ struct Args {
     #[arg(long)]
     ignore: Vec<String>,
 
-    /// Filter by type: f (file) or d (directory)
+    /// Filter by type: f (file), d (directory), or l (symlink)
     #[arg(short = 't', long)]
     file_type: Option<String>,
 
@@ -88,11 +88,12 @@ fn main() {
     if let Some(ref t) = args.file_type
         && t != "f"
         && t != "d"
+        && t != "l"
     {
         eprintln!(
             "{}",
             format!(
-                "error: Invalid type '{}'. Use 'f' for files or 'd' for directories.",
+                "error: Invalid type '{}'. Use 'f' for files, 'd' for directories, or 'l' for symlinks.",
                 t
             )
             .red()
@@ -243,11 +244,7 @@ fn scan_directory(
             Err(_) => continue, // Skip unreadable directory entries
         };
 
-        // Skip symlinks by default to guarantee protection against cyclic reference loops
-        if file_type.is_symlink() {
-            continue;
-        }
-
+        let is_symlink = file_type.is_symlink();
         let is_dir = file_type.is_dir();
         let path = entry.path();
 
@@ -256,14 +253,20 @@ fn scan_directory(
             None => continue,
         };
 
-        if !is_dir {
+        // Increment file counter only for actual regular files
+        if !is_dir && !is_symlink {
             stats.total_files.fetch_add(1, Ordering::Relaxed);
         }
 
         // Evaluate filename criteria matching
         if config.pattern.matches(&file_name) {
+            // Check object type filter constraint including symlinks
             let type_matches = match &config.file_type {
-                Some(t) => (t == "f" && !is_dir) || (t == "d" && is_dir),
+                Some(t) => {
+                    (t == "f" && !is_dir && !is_symlink)
+                        || (t == "d" && is_dir)
+                        || (t == "l" && is_symlink)
+                }
                 None => true,
             };
 
@@ -276,7 +279,8 @@ fn scan_directory(
             }
         }
 
-        if is_dir {
+        // Recurse into directories ONLY if they are not symlinks to guarantee cyclic path protection
+        if is_dir && !is_symlink {
             if config.ignore_dirs.contains(file_name.as_ref()) {
                 continue;
             }

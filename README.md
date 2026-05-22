@@ -55,7 +55,7 @@ Options:
   -j, --jobs <JOBS>       Number of worker threads [default: 4]
       --max-depth <DEPTH> Maximum recursion depth
       --ignore <IGNORE>   Additional directories to ignore
-  -t, --file-type <TYPE>  Filter by type: f (file) or d (directory)
+  -t, --file-type <TYPE>  Filter by type: f (file), d (directory), or l (symlink)
   -d, --debug             Show real-time errors and search statistics
   -V, --version           Print version information
   -h, --help              Print help information

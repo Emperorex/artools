@@ -1,0 +1,119 @@
+name: Manual Tool Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      tool_name:
+        description: 'Name of the tool to release (e.g., arfind)'
+        required: true
+        default: 'arfind'
+        type: string
+
+jobs:
+  build:
+    name: Build Binary
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+            artifact_suffix: linux-x86_64
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            artifact_suffix: macos-arm64
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      # Dynamic dependency caching based on user-selected tool path
+      - name: Rust Cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: "tools/${{ inputs.tool_name }}"
+
+      # musl-tools package required to produce statically linked Linux binaries
+      - name: Install Linux dependencies
+        if: matrix.os == 'ubuntu-latest'
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+
+      - name: Build Release Binary
+        run: |
+          cd tools/${{ inputs.tool_name }}
+          cargo build --release --target ${{ matrix.target }}
+
+      - name: Prepare Artifact
+        run: |
+          mkdir -p dist
+          cp tools/${{ inputs.tool_name }}/target/${{ matrix.target }}/release/${{ inputs.tool_name }} dist/${{ inputs.tool_name }}-${{ matrix.artifact_suffix }}
+
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ inputs.tool_name }}--${{ matrix.artifact_suffix }}
+          path: dist/${{ inputs.tool_name }}-${{ matrix.artifact_suffix }}
+
+  publish-release:
+    name: Publish GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          # Required for proper tag push back to the repository history
+          fetch-depth: 0
+
+      - name: Download All Artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      # Extract version metadata dynamically from Cargo.toml
+      - name: Extract version from Cargo.toml
+        id: get_version
+        run: |
+          VERSION=$(grep '^version' tools/${{ inputs.tool_name }}/Cargo.toml | head -n1 | cut -d '"' -f2)
+          echo "VERSION=$VERSION" >> $GITHUB_ENV
+          echo "TAG_NAME=${{ inputs.tool_name }}-v$VERSION" >> $GITHUB_ENV
+
+      # Generate and push a physical Git tag into the repository history
+      - name: Create and Push Git Tag
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@://github.com"
+          
+          # Check if the tag already exists to prevent pipeline crashes
+          if git rev-parse "${{ env.TAG_NAME }}" >/dev/null 2>&1; then
+            echo "Tag ${{ env.TAG_NAME }} already exists. Skipping tag creation."
+          else
+            echo "Creating tag ${{ env.TAG_NAME }}..."
+            git tag -a "${{ env.TAG_NAME }}" -m "Manual production release for ${{ inputs.tool_name }} v${{ env.VERSION }}"
+            git push origin "${{ env.TAG_NAME }}"
+          fi
+
+      # Publish official GitHub Release tied to the newly created tag
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.TAG_NAME }}
+          name: ${{ inputs.tool_name }} v${{ env.VERSION }}
+          body: |
+            ## Manual Release for `${{ inputs.tool_name }}`
+            Optimized production binaries generated via manual trigger.
+            
+            This release corresponds to the Git tag `../../tags/${{ env.TAG_NAME }}`.
+          files: |
+            dist/${{ inputs.tool_name }}-linux-x86_64
+            dist/${{ inputs.tool_name }}-macos-arm64
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

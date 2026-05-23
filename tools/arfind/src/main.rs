@@ -241,23 +241,21 @@ fn scan_directory(
 
         let is_symlink = file_type.is_symlink();
         let is_dir = file_type.is_dir();
-        let path = entry.path();
 
-        let file_name = match path.file_name() {
-            Some(name) => name.to_string_lossy(),
-            None => continue,
-        };
+        // OPTIMIZATION: Get the file name WITHOUT allocating a full PathBuf on the heap
+        let os_file_name = entry.file_name();
+        let file_name = os_file_name.to_string_lossy();
 
         if !config.hidden && file_name.starts_with('.') {
             continue;
         }
+
         if !is_dir && !is_symlink {
             stats.total_files.fetch_add(1, Ordering::Relaxed);
         }
 
         // Evaluate filename criteria matching
         if config.pattern.matches(&file_name) {
-            // Check object type filter constraint including symlinks
             let type_matches = match &config.file_type {
                 Some(t) => {
                     (t == "f" && !is_dir && !is_symlink)
@@ -269,25 +267,26 @@ fn scan_directory(
 
             if type_matches {
                 stats.matched_count.fetch_add(1, Ordering::Relaxed);
+
+                // LAZY ALLOCATION: Create PathBuf ONLY when we are 100% sure we want to output it
                 let _ = output_tx.send(MatchResult {
-                    path: path.clone(),
+                    path: entry.path(),
                     is_dir,
                 });
             }
         }
 
-        // Recurse into directories ONLY if they are not symlinks to guarantee cyclic path protection
         if is_dir && !is_symlink {
             if config.ignore_dirs.contains(file_name.as_ref()) {
                 continue;
             }
 
             if config.max_depth.is_none_or(|d| task.depth < d) {
-                // Increment active counter BEFORE sending to keep state correct for spin-locks
                 active_tasks.fetch_add(1, Ordering::SeqCst);
 
+                // LAZY ALLOCATION: Create PathBuf ONLY for directories we are actually going to traverse
                 let _ = task_tx.send(Task {
-                    path,
+                    path: entry.path(),
                     depth: task.depth + 1,
                 });
             }

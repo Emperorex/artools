@@ -43,10 +43,17 @@ jobs:
         if: matrix.os == 'ubuntu-latest'
         run: sudo apt-get update && sudo apt-get install -y musl-tools
 
+      # Build production binary
       - name: Build Release Binary
         run: |
           cd tools/${{ inputs.tool_name }}
           cargo build --release --target ${{ matrix.target }}
+
+      # Codesign macOS binary with ad-hoc signature to mitigate Gatekeeper kills
+      - name: Codesign macOS Binary
+        if: matrix.os == 'macos-latest'
+        run: |
+          codesign -s - "tools/${{ inputs.tool_name }}/target/${{ matrix.target }}/release/${{ inputs.tool_name }}"
 
       - name: Prepare Artifact
         run: |
@@ -69,7 +76,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
-          # Required for proper tag push back to the repository history
+          # Required for proper tag push and historical log diff analysis
           fetch-depth: 0
 
       - name: Download All Artifacts
@@ -101,17 +108,17 @@ jobs:
             git push origin "${{ env.TAG_NAME }}"
           fi
 
-      # Publish official GitHub Release tied to the newly created tag
+      # Publish official GitHub Release tied to the newly created tag with automated notes
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ env.TAG_NAME }}
           name: ${{ inputs.tool_name }} v${{ env.VERSION }}
           body: |
-            ## Manual Release for `${{ inputs.tool_name }}`
-            Optimized production binaries generated via manual trigger.
-            
-            This release corresponds to the Git tag `../../tags/${{ env.TAG_NAME }}`.
+            ## Manual Production Release for `${{ inputs.tool_name }}`
+            Optimized binaries generated successfully via on-demand workflow dispatch.
+          # Automatically generates notes containing the full commit history and contributors list
+          generate_release_notes: true
           files: |
             dist/${{ inputs.tool_name }}-linux-x86_64
             dist/${{ inputs.tool_name }}-macos-arm64

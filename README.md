@@ -56,22 +56,27 @@ Options:
       --max-depth <DEPTH> Maximum recursion depth
       --ignore <IGNORE>   Additional directories to ignore
   -t, --file-type <TYPE>  Filter by type: f (file), d (directory), or l (symlink)
+  -H, --hidden            Search hidden files and directories (disabled by default)
   -d, --debug             Show real-time errors and search statistics
   -V, --version           Print version information
   -h, --help              Print help information
 ```
 
+
 ### 🧪 Usage Examples
 
 ```bash
-# Find all Rust files in your home directory (highly parallel)
+# Find all Rust files in your home directory (highly parallel, skips hidden paths)
 arfind ~ -n "*.rs" -j 8
+
+# Find hidden environment files (.env) inside your current folder
+arfind . -n "*.env" -H
+
+# Find only symbolic links inside a system directory and display metrics
+arfind /usr -t l --debug
 
 # Find only directories matching "target" inside your current folder
 arfind . -n "target*" -t d
-
-# Search system bins, check exact operation metrics and restricted path locks
-arfind /usr -n "bash*" --debug
 ```
 
 ---

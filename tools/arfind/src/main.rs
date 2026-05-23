@@ -1,3 +1,7 @@
+use clap::Parser;
+use colored::Colorize;
+use crossbeam_channel::{Sender, unbounded};
+use glob::Pattern;
 use std::{
     collections::HashSet,
     fs, hint,
@@ -10,12 +14,6 @@ use std::{
     time::Instant,
 };
 
-use clap::Parser;
-use colored::Colorize;
-use crossbeam_channel::{Sender, unbounded};
-use glob::Pattern;
-
-/// Default directories to ignore
 const DEFAULT_IGNORES: &[&str] = &[".git", "node_modules", "__pycache__"];
 
 /// CLI arguments
@@ -45,8 +43,8 @@ struct Args {
     /// Filter by type: f (file), d (directory), or l (symlink)
     #[arg(short = 't', long)]
     file_type: Option<String>,
-
-    /// Show search statistics
+    #[arg(short = 'H', long)]
+    hidden: bool,
     #[arg(short, long)]
     debug: bool,
 }
@@ -64,6 +62,7 @@ struct SearchConfig {
     ignore_dirs: HashSet<String>,
     max_depth: Option<usize>,
     file_type: Option<String>,
+    hidden: bool,
     debug: bool,
 }
 
@@ -90,14 +89,7 @@ fn main() {
         && t != "d"
         && t != "l"
     {
-        eprintln!(
-            "{}",
-            format!(
-                "error: Invalid type '{}'. Use 'f' for files, 'd' for directories, or 'l' for symlinks.",
-                t
-            )
-            .red()
-        );
+        eprintln!("{}", format!("error: Invalid type '{}'. Use 'f' for files, 'd' for directories, or 'l' for symlinks.", t).red());
         std::process::exit(1);
     }
 
@@ -112,6 +104,7 @@ fn main() {
         ignore_dirs,
         max_depth: args.max_depth,
         file_type: args.file_type,
+        hidden: args.hidden,
         debug: args.debug,
     });
 
@@ -231,8 +224,10 @@ fn scan_directory(
         Ok(entries) => entries,
         Err(err) => {
             if config.debug {
-                let err_msg = format!("arfind: {}: {}", task.path.display(), err).red();
-                eprintln!("{}", err_msg);
+                eprintln!(
+                    "{}",
+                    format!("arfind: {}: {}", task.path.display(), err).red()
+                );
             }
             return;
         }
@@ -253,7 +248,9 @@ fn scan_directory(
             None => continue,
         };
 
-        // Increment file counter only for actual regular files
+        if !config.hidden && file_name.starts_with('.') {
+            continue;
+        }
         if !is_dir && !is_symlink {
             stats.total_files.fetch_add(1, Ordering::Relaxed);
         }

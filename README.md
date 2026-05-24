@@ -79,6 +79,25 @@ arfind /usr -t l --debug
 arfind . -n "target*" -t d
 ```
 
+## ⚙️ Analyzer Tool: `ardisk`
+
+`ardisk` is a high-speed parallel alternative to the classic `du` (Disk Usage) command. It scans the targeted directory using multiple threads and aggregates the sizes of all files, rolling up weights from deepest child folders up to the root directory.
+
+### 🚀 Key Features
+*   **Parallel Multi-Threaded Scanning:** Processes thousands of directories concurrently using lock-free architecture.
+*   **Bottom-Up Size Rollup:** Accurately propagates file weights from deep nested structures to parent folders completely in-memory.
+*   **Human-Readable Table:** Auto-aligns output and renders bytes elegantly into `KB`, `MB`, or `GB` metrics with color codes.
+*   **Scoped Top Reports:** Automatically isolates analysis within the target path, suppressing noisy global OS system roots (`/`, `/Users`).
+
+### 🧪 Usage Examples
+```bash
+# Analyze the current folder and display top 20 heaviest locations
+ardisk
+
+# Analyze your whole user home directory using 8 parallel cores with execution metrics
+ardisk ~ -j 8 --debug
+```
+
 ---
 
 ## 🛠️ Development & CI/CD

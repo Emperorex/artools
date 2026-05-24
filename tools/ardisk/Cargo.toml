@@ -1,0 +1,11 @@
+[package]
+name = "ardisk"
+version = "0.1.0"
+edition = "2024"
+authors = ["Artem Shemet"]
+description = "Fast parallel disk usage analyzer"
+
+[dependencies]
+clap = { version = "4.0", features = ["derive"] }
+crossbeam-channel = "0.5"
+colored = "2.1"

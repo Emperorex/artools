@@ -98,7 +98,7 @@ fn main() {
         if let Ok(rel_path) = path.strip_prefix(&target_path) {
             let current_depth = rel_path.components().count();
 
-            if args.max_depth.map_or(true, |max_d| current_depth <= max_d) {
+            if args.max_depth.is_none_or(|max_d| current_depth <= max_d) {
                 println!("{:>10}  {}", format_size(**size), path.display());
                 printed_count += 1;
             }

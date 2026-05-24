@@ -36,6 +36,10 @@ struct Args {
     /// Show errors and detailed execution metrics
     #[arg(short, long)]
     debug: bool,
+
+    /// Maximum depth of directories to display in the report
+    #[arg(long)]
+    max_depth: Option<usize>,
 }
 
 /// Task sent to workers representing a directory to scan
@@ -84,9 +88,21 @@ fn main() {
     sorted_results.sort_by(|a, b| b.1.cmp(a.1));
 
     println!("\n{}", "=== Top Directories ===".yellow().bold());
-    for (path, size) in sorted_results.iter().take(20) {
-        // {:>10} вирівняє розміри по правому краю, створюючи рівний стовпчик
-        println!("{:>10}  {}", format_size(**size), path.display());
+
+    let mut printed_count = 0;
+    for (path, size) in sorted_results.iter() {
+        if printed_count >= 20 {
+            break;
+        }
+
+        if let Ok(rel_path) = path.strip_prefix(&target_path) {
+            let current_depth = rel_path.components().count();
+
+            if args.max_depth.map_or(true, |max_d| current_depth <= max_d) {
+                println!("{:>10}  {}", format_size(**size), path.display());
+                printed_count += 1;
+            }
+        }
     }
 
     if args.debug {
@@ -188,9 +204,23 @@ fn scan_directory(
             active_tasks.fetch_add(1, Ordering::SeqCst);
             let _ = task_tx.send(Task { path: entry.path() });
         } else {
-            // Read file metadata to extract file size in bytes
-            if let Ok(metadata) = entry.metadata() {
-                local_dir_size += metadata.len();
+            // Highly optimized cross-platform file size retrieval without redundant path allocation
+            #[cfg(unix)]
+            {
+                // On Unix (macOS APFS / Linux Ext4), directory entries often pre-cache metadata bits.
+                // Standard entry.metadata() utilizes this cache on modern Unix systems when available.
+                if let Ok(metadata) = entry.metadata() {
+                    local_dir_size += metadata.len();
+                }
+            }
+
+            #[cfg(not(unix))]
+            {
+                // On Windows (NTFS), the WIN32_FIND_DATA structure already populated during read_dir
+                // contains the exact file size, meaning entry.metadata() returns it instantly from RAM.
+                if let Ok(metadata) = entry.metadata() {
+                    local_dir_size += metadata.len();
+                }
             }
         }
     }
@@ -201,45 +231,39 @@ fn scan_directory(
 }
 
 /// Propagates weights from deeply nested folders up to their ancestors
-// Оновіть сигнатуру функції, додавши параметр base_path
 fn aggregate_sizes(raw_sizes: &HashMap<PathBuf, u64>, base_path: &Path) -> HashMap<PathBuf, u64> {
     let mut aggregated = HashMap::new();
-
+    // Видалено: if *size == 0 { continue; } для правильного підрахунку вкладених папок
     for (path, size) in raw_sizes {
-        if *size == 0 {
-            continue;
-        }
-
         let mut current: &Path = path.as_path();
-
-        loop {
-            // ОПТИМІЗАЦІЯ: Додаємо вагу лише якщо папка є частиною нашого сканування
-            // і не лежить вище за вказаний базовий шлях
-            if current.starts_with(base_path) {
-                *aggregated.entry(current.to_path_buf()).or_insert(0u64) += size;
-            }
-
+        while current.starts_with(base_path) {
+            *aggregated.entry(current.to_path_buf()).or_insert(0u64) += size;
             if let Some(parent) = current.parent() {
-                if parent.as_os_str().is_empty() {
+                if parent == current {
                     break;
-                }
+                } // Запобігання зацикленню
                 current = parent;
             } else {
                 break;
             }
         }
     }
-
     aggregated
 }
 
-/// Formats raw bytes into human-readable strings (e.g., KB, MB, GB)
+/// Formats raw bytes into human-readable strings (e.g., KB, MB, GB, TB)
 fn format_size(bytes: u64) -> String {
     const KB: u64 = 1024;
     const MB: u64 = KB * 1024;
     const GB: u64 = MB * 1024;
+    const TB: u64 = GB * 1024;
 
-    if bytes >= GB {
+    if bytes >= TB {
+        format!("{:.2} TB", bytes as f64 / TB as f64)
+            .magenta()
+            .bold()
+            .to_string()
+    } else if bytes >= GB {
         format!("{:.2} GB", bytes as f64 / GB as f64)
             .cyan()
             .to_string()

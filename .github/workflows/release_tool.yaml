@@ -4,11 +4,13 @@ on:
   workflow_dispatch:
     inputs:
       tool_name:
-        description: 'Name of the tool to release (e.g., arfind)'
+        description: 'Select the tool to release'
         required: true
         default: 'arfind'
-        type: string
-
+        type: choice
+        options:
+          - arfind
+          - ardisk
 jobs:
   build:
     name: Build Binary
@@ -97,7 +99,7 @@ jobs:
       - name: Create and Push Git Tag
         run: |
           git config --global user.name "github-actions[bot]"
-          git config --global user.email "github-actions[bot]@://github.com"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
           
           # Check if the tag already exists to prevent pipeline crashes
           if git rev-parse "${{ env.TAG_NAME }}" >/dev/null 2>&1; then

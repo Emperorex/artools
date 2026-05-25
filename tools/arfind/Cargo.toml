@@ -8,4 +8,4 @@ authors = ["Artem Shemet"]
 clap = { version = "4", features = ["derive"] }
 glob = "0.3"
 crossbeam-channel = "0.5"
-colored = "2.1"
+colored = "3.1"

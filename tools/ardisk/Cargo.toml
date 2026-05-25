@@ -8,4 +8,4 @@ description = "Fast parallel disk usage analyzer"
 [dependencies]
 clap = { version = "4.0", features = ["derive"] }
 crossbeam-channel = "0.5"
-colored = "2.1"
+colored = "3.1"

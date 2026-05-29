@@ -4,7 +4,7 @@ use crossbeam_channel::{Sender, unbounded};
 use glob::Pattern;
 use std::{
     collections::HashSet,
-    fs, hint,
+    fs,
     path::PathBuf,
     sync::{
         Arc,
@@ -169,17 +169,20 @@ fn parallel_find(root: PathBuf, workers: usize, config: Arc<SearchConfig>, stats
 
         let handle = thread::spawn(move || {
             loop {
-                // Highly optimized lock-free extraction loop (no recv_timeout sleep)
-                let task = match task_rx.try_recv() {
-                    Ok(task) => task,
-                    Err(_) => {
-                        // Defensive check: exit only if no active workers are processing directories
-                        // AND the lock-free task queue is completely drained to avoid race conditions.
-                        if active_tasks.load(Ordering::SeqCst) == 0 && task_rx.is_empty() {
+                // Block the thread efficiently using crossbeam's select macro.
+                // This prevents high CPU usage (burning cores) and wakes up instantly.
+                let task = crossbeam_channel::select! {
+                    recv(task_rx) -> msg => match msg {
+                        Ok(task) => task,
+                        Err(_) => break, // Channel disconnected
+                    },
+                    default => {
+                        // If the queue is empty, check if all work across the system is done
+                        if active_tasks.load(Ordering::SeqCst) == 0 {
                             break;
                         }
-                        // Low-latency CPU backoff strategy to prevent core thrashing
-                        hint::spin_loop();
+                        // Yield execution back to the OS scheduler briefly to save CPU cycles
+                        thread::yield_now();
                         continue;
                     }
                 };

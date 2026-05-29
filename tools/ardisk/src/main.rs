@@ -137,7 +137,9 @@ fn parallel_scan(
                 let task = match task_rx.try_recv() {
                     Ok(task) => task,
                     Err(_) => {
-                        if active_tasks.load(Ordering::SeqCst) == 0 {
+                        // Defensive check: exit only if no active workers are processing directories
+                        // AND the lock-free task queue is completely drained.
+                        if active_tasks.load(Ordering::SeqCst) == 0 && task_rx.is_empty() {
                             break;
                         }
                         hint::spin_loop();

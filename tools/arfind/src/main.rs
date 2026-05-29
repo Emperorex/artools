@@ -173,8 +173,9 @@ fn parallel_find(root: PathBuf, workers: usize, config: Arc<SearchConfig>, stats
                 let task = match task_rx.try_recv() {
                     Ok(task) => task,
                     Err(_) => {
-                        // Check if all other threads have finished their scan work
-                        if active_tasks.load(Ordering::SeqCst) == 0 {
+                        // Defensive check: exit only if no active workers are processing directories
+                        // AND the lock-free task queue is completely drained to avoid race conditions.
+                        if active_tasks.load(Ordering::SeqCst) == 0 && task_rx.is_empty() {
                             break;
                         }
                         // Low-latency CPU backoff strategy to prevent core thrashing

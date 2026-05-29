@@ -40,6 +40,10 @@ struct Args {
     /// Maximum depth of directories to display in the report
     #[arg(long)]
     max_depth: Option<usize>,
+
+    /// Number of top directories to display in the report
+    #[arg(short = 'n', long, default_value_t = 20)]
+    top: usize,
 }
 
 /// Task sent to workers representing a directory to scan
@@ -91,7 +95,7 @@ fn main() {
 
     let mut printed_count = 0;
     for (path, size) in sorted_results.iter() {
-        if printed_count >= 20 {
+        if printed_count >= args.top {
             break;
         }
 

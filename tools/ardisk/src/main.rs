@@ -194,10 +194,6 @@ fn scan_directory(
         let os_file_name = entry.file_name();
         let file_name = os_file_name.to_string_lossy();
 
-        if file_name.starts_with('.') {
-            continue;
-        }
-
         if file_type.is_dir() {
             if config.ignore_dirs.contains(file_name.as_ref()) {
                 continue;

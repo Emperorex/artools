@@ -237,21 +237,27 @@ fn scan_directory(
     guard.insert(dir_path.to_path_buf(), local_dir_size);
 }
 
-/// Propagates weights from deeply nested folders up to their ancestors
+/// Propagates weights from deeply nested folders up the tree
+/// using a single-pass dynamic programming bottom-up rollup.
 fn aggregate_sizes(raw_sizes: &HashMap<PathBuf, u64>, base_path: &Path) -> HashMap<PathBuf, u64> {
     let mut aggregated = HashMap::new();
-    // Видалено: if *size == 0 { continue; } для правильного підрахунку вкладених папок
-    for (path, size) in raw_sizes {
-        let mut current: &Path = path.as_path();
-        while current.starts_with(base_path) {
-            *aggregated.entry(current.to_path_buf()).or_insert(0u64) += size;
-            if let Some(parent) = current.parent() {
-                if parent == current {
-                    break;
-                } // Запобігання зацикленню
-                current = parent;
-            } else {
-                break;
+
+    // Collect and sort paths by depth in descending order to perform a single-pass DP rollup
+    let mut paths: Vec<&PathBuf> = raw_sizes.keys().collect();
+    paths.sort_by_key(|p| std::cmp::Reverse(p.components().count()));
+
+    for path in paths {
+        let size = raw_sizes[path];
+
+        // Ensure the current folder holds its own immediate raw file size
+        *aggregated.entry(path.to_path_buf()).or_insert(0u64) += size;
+
+        // Propagate the accumulated size exactly one level up to the parent directory
+        if let Some(parent) = path.parent() {
+            if parent.starts_with(base_path) {
+                // Read the already accumulated size of the child
+                let child_accumulated_size = *aggregated.get(path).unwrap_or(&0u64);
+                *aggregated.entry(parent.to_path_buf()).or_insert(0u64) += child_accumulated_size;
             }
         }
     }

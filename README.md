@@ -46,9 +46,17 @@ cargo build --release
 When downloading pre-compiled binaries from GitHub Releases on Apple Silicon (M1/M2/M3), macOS may block execution with a malware warning. To bypass this, clear the browser quarantine attribute via your terminal:
 
 ```bash
+# for arfind tool:
+# ARM based Macs:
 xattr -d com.apple.quarantine ./arfind-macos-arm64
-# Or
+# Intel based Macs:
+xattr -d com.apple.quarantine ./arfind-macos-x86_64
+
+# Or for ardisk tool:
+# ARM based Macs:
 xattr -d com.apple.quarantine ./ardisk-macos-arm64
+# Intel based Macs:
+xattr -d com.apple.quarantine ./ardisk-macos-x86_64
 ```
 
 ---

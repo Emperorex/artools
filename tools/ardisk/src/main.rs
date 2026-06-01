@@ -14,6 +14,9 @@ use clap::Parser;
 use colored::Colorize;
 use crossbeam_channel::unbounded;
 
+#[cfg(unix)]
+use std::os::unix::fs::MetadataExt;
+
 /// Default directories to ignore
 const DEFAULT_IGNORES: &[&str] = &[".git", "node_modules", "__pycache__"];
 
@@ -211,21 +214,18 @@ fn scan_directory(
             active_tasks.fetch_add(1, Ordering::SeqCst);
             let _ = task_tx.send(Task { path: entry.path() });
         } else {
-            // Highly optimized cross-platform file size retrieval without redundant path allocation
-            #[cfg(unix)]
-            {
-                // On Unix (macOS APFS / Linux Ext4), directory entries often pre-cache metadata bits.
-                // Standard entry.metadata() utilizes this cache on modern Unix systems when available.
-                if let Ok(metadata) = entry.metadata() {
-                    local_dir_size += metadata.len();
+            // Calculate size dynamically based on platform specs
+            if let Ok(metadata) = entry.metadata() {
+                #[cfg(unix)]
+                {
+                    // On Unix (macOS/Linux), multiply allocated 512-byte blocks
+                    // to get the actual physical disk usage (on-disk size)
+                    local_dir_size += metadata.blocks() * 512;
                 }
-            }
 
-            #[cfg(not(unix))]
-            {
-                // On Windows (NTFS), the WIN32_FIND_DATA structure already populated during read_dir
-                // contains the exact file size, meaning entry.metadata() returns it instantly from RAM.
-                if let Ok(metadata) = entry.metadata() {
+                #[cfg(not(unix))]
+                {
+                    // Fallback to logical file length for Windows/other platforms
                     local_dir_size += metadata.len();
                 }
             }

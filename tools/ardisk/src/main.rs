@@ -252,15 +252,17 @@ fn aggregate_sizes(raw_sizes: &HashMap<PathBuf, u64>, base_path: &Path) -> HashM
         // Ensure the current folder holds its own immediate raw file size
         *aggregated.entry(path.to_path_buf()).or_insert(0u64) += size;
 
-        // Propagate the accumulated size exactly one level up to the parent directory
-        if let Some(parent) = path.parent() {
-            if parent.starts_with(base_path) {
-                // Read the already accumulated size of the child
-                let child_accumulated_size = *aggregated.get(path).unwrap_or(&0u64);
-                *aggregated.entry(parent.to_path_buf()).or_insert(0u64) += child_accumulated_size;
-            }
+        // Propagate the accumulated size exactly one level up to the parent directory.
+        // Collapsed nested if blocks using stable '&&' to satisfy clippy.
+        if let Some(parent) = path.parent()
+            && parent.starts_with(base_path)
+        {
+            // Read the already accumulated size of the child
+            let child_accumulated_size = *aggregated.get(path).unwrap_or(&0u64);
+            *aggregated.entry(parent.to_path_buf()).or_insert(0u64) += child_accumulated_size;
         }
     }
+
     aggregated
 }
 

@@ -1,0 +1,22 @@
+version: 2
+updates:
+  # 1. Automate updates for Rust dependencies (Cargo) across the monorepo
+  - package-ecosystem: "cargo"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    open-pull-requests-limit: 5
+    groups:
+      # Group crate updates together into a single PR to save CI minutes
+      rust-dependencies:
+        patterns:
+          - "*"
+
+  # 2. Automate updates for GitHub Actions workflows (.github/workflows/*.yaml)
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    open-pull-requests-limit: 3

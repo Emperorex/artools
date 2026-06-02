@@ -1,0 +1,6 @@
+[workspace]
+members = [
+    "tools/arfind",
+    "tools/ardisk",
+]
+resolver = "2"

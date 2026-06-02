@@ -200,18 +200,26 @@ fn parallel_find(root: PathBuf, workers: usize, config: Arc<SearchConfig>, stats
     drop(task_tx);
     drop(output_tx);
 
-    // Apply colors natively based on the type of result discovered
-    for item in output_rx {
-        if item.is_dir {
-            println!("{}", item.path.display().to_string().blue().bold());
-        } else {
-            println!("{}", item.path.display());
+    // SPAWN A DEDICATED PRINTER THREAD:
+    // Pipes and flushes output targets concurrently on a separate core,
+    // completely preventing backpressure deadlocks if channels ever become bounded.
+    let printer_handle = thread::spawn(move || {
+        for item in output_rx {
+            if item.is_dir {
+                println!("{}", item.path.display().to_string().blue().bold());
+            } else {
+                println!("{}", item.path.display());
+            }
         }
-    }
+    });
 
+    // Wait for all search workers to finish scanning the filesystem
     for handle in handles {
         handle.join().unwrap();
     }
+
+    // Finally, wait for the dedicated printer thread to finish flushing stdout
+    printer_handle.join().unwrap();
 }
 
 fn scan_directory(
@@ -254,7 +262,9 @@ fn scan_directory(
             continue;
         }
 
-        if !is_dir && !is_symlink {
+        // STATS FIX: Count regular files and all types of symlinks (including symlinked dirs)
+        // as checked filesystem entries, matching standard 'find' behavior.
+        if !is_dir {
             stats.total_files.fetch_add(1, Ordering::Relaxed);
         }
 
@@ -272,7 +282,7 @@ fn scan_directory(
             if type_matches {
                 stats.matched_count.fetch_add(1, Ordering::Relaxed);
 
-                // LAZY ALLOCATION: Create PathBuf ONLY when we are 100% sure we want to output it
+                // Avoid heap allocation unless the entry explicitly matches all search criteria
                 let _ = output_tx.send(MatchResult {
                     path: entry.path(),
                     is_dir,
@@ -280,6 +290,8 @@ fn scan_directory(
             }
         }
 
+        // TRAVERSAL SECURITY: Only recurse into genuine physical directories.
+        // Skipping symlinked directories prevents infinite recursion loops and cyclic graphs.
         if is_dir && !is_symlink {
             if config.ignore_dirs.contains(file_name.as_ref()) {
                 continue;
@@ -288,7 +300,7 @@ fn scan_directory(
             if config.max_depth.is_none_or(|d| task.depth < d) {
                 active_tasks.fetch_add(1, Ordering::SeqCst);
 
-                // LAZY ALLOCATION: Create PathBuf ONLY for directories we are actually going to traverse
+                // Allocate path memory only for directories targeted for deep traversal
                 let _ = task_tx.send(Task {
                     path: entry.path(),
                     depth: task.depth + 1,

@@ -116,7 +116,9 @@ fn main() {
 
     let start_time = Instant::now();
 
-    parallel_find(PathBuf::from(args.path), args.jobs, config, stats.clone());
+    let root_path = fs::canonicalize(&args.path).unwrap_or_else(|_| PathBuf::from(&args.path));
+
+    parallel_find(root_path, args.jobs, config, stats.clone());
 
     let duration = start_time.elapsed();
 

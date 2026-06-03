@@ -4,8 +4,8 @@ use std::{
     io::{BufRead, BufReader, Read},
     path::{Path, PathBuf},
     sync::{
-        atomic::{AtomicUsize, Ordering},
         Arc,
+        atomic::{AtomicUsize, Ordering},
     },
     thread,
     time::Instant,
@@ -20,7 +20,11 @@ const DEFAULT_IGNORES: &[&str] = &[".git", "node_modules", "__pycache__", "targe
 
 /// CLI arguments for argrep
 #[derive(Parser, Debug)]
-#[command(author, version, about = "Fast parallel text search utility (Rust version)")]
+#[command(
+    author,
+    version,
+    about = "Fast parallel text search utility (Rust version)"
+)]
 struct Args {
     /// The text query/pattern to search for
     #[arg(required = true)]
@@ -75,8 +79,7 @@ struct MatchResult {
 fn main() {
     let args = Args::parse();
 
-    let root_path = fs::canonicalize(&args.path)
-        .unwrap_or_else(|_| PathBuf::from(&args.path));
+    let root_path = fs::canonicalize(&args.path).unwrap_or_else(|_| PathBuf::from(&args.path));
 
     let ignore_dirs: HashSet<String> = DEFAULT_IGNORES.iter().map(|s| s.to_string()).collect();
 
@@ -109,9 +112,23 @@ fn main() {
 
     if args.debug {
         eprintln!("{}", "\n=== Search Statistics ===".yellow().bold());
-        eprintln!("Directories checked: {}", stats.total_dirs.load(Ordering::Relaxed).to_string().cyan());
-        eprintln!("Files scanned:       {}", stats.total_files.load(Ordering::Relaxed).to_string().cyan());
-        eprintln!("Total text matches:  {}", stats.matched_lines.load(Ordering::Relaxed).to_string().green().bold());
+        eprintln!(
+            "Directories checked: {}",
+            stats.total_dirs.load(Ordering::Relaxed).to_string().cyan()
+        );
+        eprintln!(
+            "Files scanned:       {}",
+            stats.total_files.load(Ordering::Relaxed).to_string().cyan()
+        );
+        eprintln!(
+            "Total text matches:  {}",
+            stats
+                .matched_lines
+                .load(Ordering::Relaxed)
+                .to_string()
+                .green()
+                .bold()
+        );
         eprintln!("Execution time:      {:.2?}", duration);
     }
 }
@@ -149,7 +166,14 @@ fn parallel_grep(root: PathBuf, workers: usize, config: Arc<SearchConfig>, stats
                     }
                 };
 
-                scan_and_grep(&task_path, &config, &task_tx, &output_tx, &active_tasks, &stats);
+                scan_and_grep(
+                    &task_path,
+                    &config,
+                    &task_tx,
+                    &output_tx,
+                    &active_tasks,
+                    &stats,
+                );
                 active_tasks.fetch_sub(1, Ordering::SeqCst);
             }
         });
@@ -163,13 +187,19 @@ fn parallel_grep(root: PathBuf, workers: usize, config: Arc<SearchConfig>, stats
     // Dedicated output processing loop (runs concurrently on the coordinator thread)
     for result in output_rx {
         let prefix = if config.line_number {
-            format!("{}:{}", result.file_path.display().to_string().magenta(), result.line_num.to_string().green())
+            format!(
+                "{}:{}",
+                result.file_path.display().to_string().magenta(),
+                result.line_num.to_string().green()
+            )
         } else {
             result.file_path.display().to_string().magenta().to_string()
         };
 
         // Simple color highlight for the query keyword inside the line content
-        let highlighted = result.line_content.replace(&config.query, &config.query.red().bold().to_string());
+        let highlighted = result
+            .line_content
+            .replace(&config.query, &config.query.red().bold().to_string());
         println!("{}: {}", prefix, highlighted.trim_end());
     }
 

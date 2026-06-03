@@ -2,5 +2,6 @@
 members = [
     "tools/arfind",
     "tools/ardisk",
+    "tools/argrep",
 ]
 resolver = "2"

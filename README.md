@@ -11,6 +11,7 @@ artools/
 └── tools/
     ├── arfind/          # Fast parallel file and directory finder
     └── ardisk/          # Fast parallel disk usage analyzer
+    └── argrep/          # Fast parallel text searcher
 ```
 
 ---
@@ -18,30 +19,47 @@ artools/
 ## 🔍 Featured Tools
 
 ### 1. `arfind` (Parallel File Finder)
-A high-performance, multi-threaded alternative to the traditional `find` command. It uses low-latency, lock-free coordination to scan directories concurrently without CPU core thrashing.
-
-*   **Key Features:** Object type filtering (`-t f`/`d`/`l` for symlinks), instant streaming to `stdout`, smart automatic ignoring (`.git`, `node_modules`), and hidden path constraints (`-H`).
+A fast alternative to the classic `find` utility. It traverses directory trees concurrently using worker threads and a decoupled dedicated printer thread to stream matched file pathways with zero terminal backpressure deadlocks.
+*   **Key Features:** Conditional tree-pruning, filename pattern evaluation via `glob`, search filtering by filesystem object type (`-t f/d/l`), and strict POSIX symlink cycle protection.
 
 ### 2. `ardisk` (Parallel Disk Usage Analyzer)
-An ultra-fast parallel alternative to the classic `du` utility. It scans targeted directories using multiple threads, extracts exact byte metrics, and aggregates sizes up the directory tree completely in-memory.
+A blazing-fast multi-threaded drop-in replacement for the system `du` tool. It analyzes storage distribution and identifies heavy folders immediately.
+*   **Key Features:** High-speed single-pass bottom-up aggregation ($O(N \log N)$), explicit sorting by structural depth, strict physical block allocation auditing (`blocks * 512`) on macOS/Linux via `MetadataExt`, and interactive output formatting via `--top` and `--max-depth` parameters.
 
-*   **Key Features:** Deep bottom-up size propagation, right-aligned human-readable table formatter (`KB`, `MB`, `GB`, `TB`), and scoped level visualization (`--max-depth`).
+### 3. `argrep` (Parallel Text Searcher)
+A highly optimized code-scanning tool built as a parallel alternative to `grep` or `ripgrep`. It pipes and streams file bytes in parallel, matching multi-core processors directly to file system inputs.
+*   **Key Features:** Automated chunk buffering (`BufReader`), case-insensitive keyword targeting (`-i`), deterministic row index rendering (`-n`), dynamic heap memory recycling, and rapid raw null-byte signature checking to automatically skip binaries and media files.
 
 ---
 
-## 🛠️ Installation & Setup
+## 📥 Installation & Setup
 
-Ensure you have [Rust and Cargo](https://rustup.rs) installed, then clone the repository and build the tools:
+### Requirements
+*   **Rust Stable** (v1.75+ or newer recommended due to stable `&&` in `if let` blocks)
+
+### Cloning the Workspace Monorepo
+```bash
+git clone https://github.com
+cd artools
+```
+
+### Building the Tools
+Since the project is structured as a **Cargo Workspace**, you can compile all binaries concurrently from the root directory:
 
 ```bash
-# Clone the repository
-git clone https://github.com
-cd artools/tools/ardisk # Or tools/arfind
+# Build development profiles
+cargo build
 
-# Build the optimized release binary
+# Build optimized production binaries (Recommended for benchmarking)
 cargo build --release
 ```
 
+The compiled binaries will be located inside the global `target/release/` workspace directory:
+*   `target/release/arfind`
+*   `target/release/ardisk`
+*   `target/release/argrep`
+
+---
 ### ⚠️ Apple Gatekeeper Note (macOS Users)
 When downloading pre-compiled binaries from GitHub Releases on Apple Silicon (M1/M2/M3), macOS may block execution with a malware warning. To bypass this, clear the browser quarantine attribute via your terminal:
 
@@ -57,16 +75,71 @@ xattr -d com.apple.quarantine ./arfind-macos-x86_64
 xattr -d com.apple.quarantine ./ardisk-macos-arm64
 # Intel based Macs:
 xattr -d com.apple.quarantine ./ardisk-macos-x86_64
+
+# Or for argrep tool:
+# ARM based Macs:
+xattr -d com.apple.quarantine ./argrep-macos-arm64
+# Intel based Macs:
+xattr -d com.apple.quarantine ./argrep-macos-x86_64
 ```
 
 ---
 
-## 🚀 CI/CD & Automation
+## 🚀 Quick Usage Examples
 
-This repository enforces high code-quality standards and automates deployment gates via GitHub Actions:
+### Running `arfind`
+```bash
+# Find all Rust source files in the current project
+cargo run --bin arfind -- . -n "*.rs"
 
-1.  **Code Linting (`lint.yml`):** Automatically triggers on every push/PR, dynamically running strict format verification (`cargo fmt --check`) and static analysis (`cargo clippy -- -D warnings`) across all sub-projects.
-2.  **On-Demand Releases (`release-tools.yaml`):** A manual, resource-optimized pipeline. Developers can trigger a production release via the GitHub UI using a secure drop-down selector to choose the target tool, generate historical changelogs, tag commits, and attach cross-compiled production assets.
+# Find only directories matching a specific criteria down to depth level 2
+./target/release/arfind /Users/user/Documents -n "pro*" -t d --max-depth 2
+```
+
+### Running `ardisk`
+```bash
+# Analyze the current folder, display top 15 heaviest paths up to depth 1
+cargo run --bin ardisk -- . -n 15 --max-depth 1
+
+# Audit an absolute path with operational debugging stats enabled
+./target/release/ardisk /var/log --top 10 --debug
+```
+
+### Running `argrep`
+```bash
+# Search for the term "SearchStats" in the workspace with line numbers and statistics
+cargo run --bin argrep -- "SearchStats" . -n -d
+
+# Perform a case-insensitive text match in a specific directory
+./target/release/argrep "todo!" ./src -i -n
+```
+
+---
+
+## 🏗️ Monorepo Maintenance Commands
+
+Because of the monolithic virtual workspace setup, quality assurance can be enforced globally with single-line controls:
+
+```bash
+# Format the entire codebase according to Rust guidelines
+cargo fmt --all
+
+# Run workspace-wide static code analysis and linting policies
+cargo clippy --workspace -- -D warnings
+
+# Execute all test pipelines inside the workspace members
+cargo test --workspace
+```
+
+---
+## 🤖 CI/CD Governance & Automated Releases
+
+The repository is integrated with robust automated DevOps infrastructure:
+
+*   **Dependabot Integration:** Configured via `.github/dependabot.yml`. Periodically inspects Cargo crate dependencies and GitHub Actions workflow tags on a weekly schedule.
+*   **Manual On-Demand Release Pipeline (`release-tools.yaml`):** Implements a GitHub `workflow_dispatch` drop-down interface. Allows developers to manually trigger production releases for any specific workspace tool. It automatically initiates cross-compilation matrix builds, packaging fully static binaries for **Linux (musl)**, **Apple Silicon macOS (arm64)**, and **Legacy Intel macOS (x86_64)** simultaneously.
+
+---
 
 ## 📄 License
 

@@ -42,7 +42,7 @@ jobs:
       - name: Rust Cache
         uses: swatinem/rust-cache@v2
         with:
-          workspaces: "tools/${{ inputs.tool_name }}"
+          workspaces: "."
 
       # musl-tools package required to produce statically linked Linux binaries
       - name: Install Linux dependencies
@@ -52,19 +52,19 @@ jobs:
       # Build production binary
       - name: Build Release Binary
         run: |
-          cd tools/${{ inputs.tool_name }}
-          cargo build --release --target ${{ matrix.target }}
+          cargo build --release --target ${{ matrix.target }} --bin ${{ inputs.tool_name }}
 
       # Codesign macOS binary with ad-hoc signature to mitigate Gatekeeper kills
       - name: Codesign macOS Binary
         if: matrix.os == 'macos-latest'
         run: |
-          codesign -s - "tools/${{ inputs.tool_name }}/target/${{ matrix.target }}/release/${{ inputs.tool_name }}"
+          codesign -s - "target/${{ matrix.target }}/release/${{ inputs.tool_name }}"
 
       - name: Prepare Artifact
         run: |
           mkdir -p dist
-          cp tools/${{ inputs.tool_name }}/target/${{ matrix.target }}/release/${{ inputs.tool_name }} dist/${{ inputs.tool_name }}-${{ matrix.artifact_suffix }}
+          cp target/${{ matrix.target }}/release/${{ inputs.tool_name }} \
+             dist/${{ inputs.tool_name }}-${{ matrix.artifact_suffix }}
 
       - name: Upload Artifact
         uses: actions/upload-artifact@v7
@@ -109,8 +109,7 @@ jobs:
           if git rev-parse "${{ env.TAG_NAME }}" >/dev/null 2>&1; then
             echo "Tag ${{ env.TAG_NAME }} already exists. Skipping tag creation."
           else
-            echo "Creating tag ${{ env.TAG_NAME }}..."
-            git tag -a "${{ env.TAG_NAME }}" -m "Manual production release for ${{ inputs.tool_name }} v${{ env.VERSION }}"
+            git tag -a "${{ env.TAG_NAME }}" -m "Release ${{ inputs.tool_name }} v${{ env.VERSION }}"
             git push origin "${{ env.TAG_NAME }}"
           fi
 

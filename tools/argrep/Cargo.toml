@@ -3,7 +3,7 @@ name = "argrep"
 version = "0.1.0"
 edition = "2024"
 authors = ["Artem Shemet"]
-description = "Fast parallel text search utility (Rust version)"
+description = "Fast parallel text search utility"
 
 [dependencies]
 clap = { version = "4.0", features = ["derive"] }

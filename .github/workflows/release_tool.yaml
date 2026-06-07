@@ -11,6 +11,7 @@ on:
         options:
           - arfind
           - ardisk
+          - argrep
 jobs:
   build:
     name: Build Binary

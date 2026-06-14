@@ -9,3 +9,6 @@ description = "Fast parallel disk usage analyzer"
 clap = { version = "4.0", features = ["derive"] }
 crossbeam-channel = "0.5"
 colored = "3.1"
+
+[dev-dependencies]
+tempfile = "3"

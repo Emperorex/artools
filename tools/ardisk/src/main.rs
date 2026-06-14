@@ -1,24 +1,7 @@
-use std::{
-    collections::{HashMap, HashSet},
-    fs,
-    path::{Path, PathBuf},
-    sync::{
-        Arc, Mutex,
-        atomic::{AtomicUsize, Ordering},
-    },
-    thread,
-    time::Instant,
-};
-
+use ardisk::{DEFAULT_IGNORES, aggregate_sizes, build_config, format_size, parallel_scan};
 use clap::Parser;
 use colored::Colorize;
-use crossbeam_channel::unbounded;
-
-#[cfg(unix)]
-use std::os::unix::fs::MetadataExt;
-
-/// Default directories to ignore
-const DEFAULT_IGNORES: &[&str] = &[".git", "node_modules", "__pycache__"];
+use std::{collections::HashSet, fs, path::PathBuf, time::Instant};
 
 /// CLI arguments for ardisk
 #[derive(Parser, Debug)]
@@ -49,44 +32,20 @@ struct Args {
     top: usize,
 }
 
-/// Task sent to workers representing a directory to scan
-struct Task {
-    path: PathBuf,
-}
-
-/// Configuration shared across worker threads
-struct ScanConfig {
-    ignore_dirs: HashSet<String>,
-    debug: bool,
-}
-
 fn main() {
     let args = Args::parse();
 
     let ignore_dirs: HashSet<String> = DEFAULT_IGNORES.iter().map(|s| s.to_string()).collect();
     let target_path = fs::canonicalize(&args.path).unwrap_or_else(|_| PathBuf::from(&args.path));
-
-    let config = Arc::new(ScanConfig {
-        ignore_dirs,
-        debug: args.debug,
-    });
-
-    // Shared thread-safe storage for folder sizes (only tracks immediate files inside that exact folder)
-    let raw_sizes = Arc::new(Mutex::new(HashMap::<PathBuf, u64>::new()));
+    let config = build_config(ignore_dirs, args.debug);
 
     let start_time = Instant::now();
 
     // Phase 1: Parallel file scanning
-    parallel_scan(
-        target_path.clone(),
-        args.jobs,
-        config,
-        Arc::clone(&raw_sizes),
-    );
+    let raw_sizes = parallel_scan(target_path.clone(), args.jobs, config);
 
-    // Phase 2: Post-processing (aggregation and rollup from bottom to top)
-    let raw_sizes_map = Arc::try_unwrap(raw_sizes).unwrap().into_inner().unwrap();
-    let aggregated_sizes = aggregate_sizes(&raw_sizes_map, &target_path);
+    // Phase 2: Aggregation and rollup from bottom to top
+    let aggregated_sizes = aggregate_sizes(&raw_sizes, &target_path);
 
     let duration = start_time.elapsed();
 
@@ -101,10 +60,8 @@ fn main() {
         if printed_count >= args.top {
             break;
         }
-
         if let Ok(rel_path) = path.strip_prefix(&target_path) {
             let current_depth = rel_path.components().count();
-
             if args.max_depth.is_none_or(|max_d| current_depth <= max_d) {
                 println!("{:>10}  {}", format_size(**size), path.display());
                 printed_count += 1;
@@ -114,181 +71,7 @@ fn main() {
 
     if args.debug {
         eprintln!("\n{}", "=== Operational Metrics ===".green().bold());
-        eprintln!("Total scanned folders: {}", raw_sizes_map.len());
+        eprintln!("Total scanned folders: {}", raw_sizes.len());
         eprintln!("Execution time:        {:.2?}", duration);
-    }
-}
-
-fn parallel_scan(
-    root: PathBuf,
-    workers: usize,
-    config: Arc<ScanConfig>,
-    raw_sizes: Arc<Mutex<HashMap<PathBuf, u64>>>,
-) {
-    let (task_tx, task_rx) = unbounded::<Task>();
-    let active_tasks = Arc::new(AtomicUsize::new(1));
-
-    task_tx.send(Task { path: root }).unwrap();
-
-    let mut handles = Vec::new();
-
-    for _ in 0..workers {
-        let task_rx = task_rx.clone();
-        let task_tx = task_tx.clone();
-        let config = Arc::clone(&config);
-        let raw_sizes = Arc::clone(&raw_sizes);
-        let active_tasks = Arc::clone(&active_tasks);
-
-        let handle = thread::spawn(move || {
-            loop {
-                // Block the thread efficiently using crossbeam's select macro.
-                // This prevents high CPU usage (burning cores) and wakes up instantly.
-                let task = crossbeam_channel::select! {
-                    recv(task_rx) -> msg => match msg {
-                        Ok(task) => task,
-                        Err(_) => break, // Channel disconnected
-                    },
-                    default => {
-                        // If the queue is empty, check if all work across the system is done
-                        if active_tasks.load(Ordering::SeqCst) == 0 {
-                            break;
-                        }
-                        // Yield execution back to the OS scheduler briefly to save CPU cycles
-                        thread::yield_now();
-                        continue;
-                    }
-                };
-
-                scan_directory(&task.path, &config, &task_tx, &active_tasks, &raw_sizes);
-                active_tasks.fetch_sub(1, Ordering::SeqCst);
-            }
-        });
-
-        handles.push(handle);
-    }
-
-    drop(task_tx);
-
-    for handle in handles {
-        handle.join().unwrap();
-    }
-}
-
-fn scan_directory(
-    dir_path: &Path,
-    config: &ScanConfig,
-    task_tx: &crossbeam_channel::Sender<Task>,
-    active_tasks: &AtomicUsize,
-    raw_sizes: &Mutex<HashMap<PathBuf, u64>>,
-) {
-    let entries = match fs::read_dir(dir_path) {
-        Ok(entries) => entries,
-        Err(err) => {
-            if config.debug {
-                eprintln!("{}: {}: {}", "ardisk".red(), dir_path.display(), err);
-            }
-            return;
-        }
-    };
-
-    let mut local_dir_size = 0u64;
-
-    for entry in entries.flatten() {
-        let file_type = match entry.file_type() {
-            Ok(ft) => ft,
-            Err(_) => continue,
-        };
-
-        if file_type.is_symlink() {
-            continue;
-        }
-
-        let os_file_name = entry.file_name();
-        let file_name = os_file_name.to_string_lossy();
-
-        if file_type.is_dir() {
-            if config.ignore_dirs.contains(file_name.as_ref()) {
-                continue;
-            }
-
-            active_tasks.fetch_add(1, Ordering::SeqCst);
-            let _ = task_tx.send(Task { path: entry.path() });
-        } else {
-            // Calculate size dynamically based on platform specs
-            if let Ok(metadata) = entry.metadata() {
-                #[cfg(unix)]
-                {
-                    // On Unix (macOS/Linux), multiply allocated 512-byte blocks
-                    // to get the actual physical disk usage (on-disk size)
-                    local_dir_size += metadata.blocks() * 512;
-                }
-
-                #[cfg(not(unix))]
-                {
-                    // Fallback to logical file length for Windows/other platforms
-                    local_dir_size += metadata.len();
-                }
-            }
-        }
-    }
-
-    // Lock the mutex briefly to store this specific directory's raw file size
-    let mut guard = raw_sizes.lock().unwrap();
-    guard.insert(dir_path.to_path_buf(), local_dir_size);
-}
-
-/// Propagates weights from deeply nested folders up the tree
-/// using a single-pass dynamic programming bottom-up rollup.
-fn aggregate_sizes(raw_sizes: &HashMap<PathBuf, u64>, base_path: &Path) -> HashMap<PathBuf, u64> {
-    let mut aggregated = HashMap::new();
-
-    // Collect and sort paths by depth in descending order to perform a single-pass DP rollup
-    let mut paths: Vec<&PathBuf> = raw_sizes.keys().collect();
-    paths.sort_by_key(|p| std::cmp::Reverse(p.components().count()));
-
-    for path in paths {
-        let size = raw_sizes[path];
-
-        // Ensure the current folder holds its own immediate raw file size
-        *aggregated.entry(path.to_path_buf()).or_insert(0u64) += size;
-
-        // Propagate the accumulated size exactly one level up to the parent directory.
-        // Collapsed nested if blocks using stable '&&' to satisfy clippy.
-        if let Some(parent) = path.parent()
-            && parent.starts_with(base_path)
-        {
-            // Read the already accumulated size of the child
-            let child_accumulated_size = *aggregated.get(path).unwrap_or(&0u64);
-            *aggregated.entry(parent.to_path_buf()).or_insert(0u64) += child_accumulated_size;
-        }
-    }
-
-    aggregated
-}
-
-/// Formats raw bytes into human-readable strings (e.g., KB, MB, GB, TB)
-fn format_size(bytes: u64) -> String {
-    const KB: u64 = 1024;
-    const MB: u64 = KB * 1024;
-    const GB: u64 = MB * 1024;
-    const TB: u64 = GB * 1024;
-
-    if bytes >= TB {
-        format!("{:.2} TB", bytes as f64 / TB as f64)
-            .magenta()
-            .bold()
-            .to_string()
-    } else if bytes >= GB {
-        format!("{:.2} GB", bytes as f64 / GB as f64)
-            .cyan()
-            .to_string()
-    } else if bytes >= MB {
-        format!("{:.2} MB", bytes as f64 / MB as f64)
-            .green()
-            .to_string()
-    } else if bytes >= KB {
-        format!("{:.2} KB", bytes as f64 / KB as f64).to_string()
-    } else {
-        format!("{} B", bytes).to_string()
     }
 }

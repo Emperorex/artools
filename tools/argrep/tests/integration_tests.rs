@@ -29,11 +29,7 @@ fn default_config(query: &str, ignore_case: bool) -> std::sync::Arc<argrep::Sear
 }
 
 /// Runs parallel_grep and returns (matched_file_names, matched_line_contents) sorted.
-fn collect_matches(
-    root: PathBuf,
-    query: &str,
-    ignore_case: bool,
-) -> (Vec<String>, Vec<String>) {
+fn collect_matches(root: PathBuf, query: &str, ignore_case: bool) -> (Vec<String>, Vec<String>) {
     let config = default_config(query, ignore_case);
     let stats = SearchStats::new();
 
@@ -43,10 +39,13 @@ fn collect_matches(
     let lc_clone = Arc::clone(&line_contents);
 
     parallel_grep(root, 4, config, stats, move |item| {
-        fn_clone
-            .lock()
-            .unwrap()
-            .push(item.file_path.file_name().unwrap().to_string_lossy().to_string());
+        fn_clone.lock().unwrap().push(
+            item.file_path
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .to_string(),
+        );
         lc_clone
             .lock()
             .unwrap()
@@ -200,7 +199,11 @@ fn custom_ignore_dir_is_excluded() {
 
     parallel_grep(root, 4, config, stats, move |item| {
         r.lock().unwrap().push(
-            item.file_path.file_name().unwrap().to_string_lossy().to_string(),
+            item.file_path
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .to_string(),
         );
     });
 
@@ -244,16 +247,21 @@ fn multiple_workers_find_same_matches_as_single_worker() {
     ]);
 
     let run = |workers: usize| {
-        let ignore_dirs: HashSet<String> =
-            DEFAULT_IGNORES.iter().map(|s| s.to_string()).collect();
+        let ignore_dirs: HashSet<String> = DEFAULT_IGNORES.iter().map(|s| s.to_string()).collect();
         let config = build_config("needle".to_string(), false, false, ignore_dirs, false);
         let results: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
         let r = Arc::clone(&results);
-        parallel_grep(root.clone(), workers, config, SearchStats::new(), move |item| {
-            r.lock()
-                .unwrap()
-                .push(item.line_content.trim_end().to_string());
-        });
+        parallel_grep(
+            root.clone(),
+            workers,
+            config,
+            SearchStats::new(),
+            move |item| {
+                r.lock()
+                    .unwrap()
+                    .push(item.line_content.trim_end().to_string());
+            },
+        );
         let mut v = results.lock().unwrap().clone();
         v.sort();
         v

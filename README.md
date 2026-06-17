@@ -7,10 +7,10 @@ A collection of ultra-fast, reliable, and production-ready CLI utilities written
 This repository is organized as a monorepo under the `tools/` directory:
 ```text
 artools/
-├── .github/workflows/   # Automated CI/CD pipelines (Linting & Manual Releases)
+├── .github/workflows/   # Automated CI/CD pipelines (Lint, Test & Manual Releases)
 └── tools/
     ├── arfind/          # Fast parallel file and directory finder
-    └── ardisk/          # Fast parallel disk usage analyzer
+    ├── ardisk/          # Fast parallel disk usage analyzer
     └── argrep/          # Fast parallel text searcher
 ```
 
@@ -35,11 +35,11 @@ A highly optimized code-scanning tool built as a parallel alternative to `grep` 
 ## 📥 Installation & Setup
 
 ### Requirements
-*   **Rust Stable** (v1.75+ or newer recommended due to stable `&&` in `if let` blocks)
+*   **Rust Stable** (v1.88+ required for stable `if let` chain syntax with `&&`)
 
 ### Cloning the Workspace Monorepo
 ```bash
-git clone https://github.com
+git clone https://github.com/your-username/artools.git
 cd artools
 ```
 
@@ -127,7 +127,7 @@ cargo fmt --all
 # Run workspace-wide static code analysis and linting policies
 cargo clippy --workspace -- -D warnings
 
-# Execute all test pipelines inside the workspace members
+# Execute all test suites across all workspace members
 cargo test --workspace
 ```
 
@@ -136,6 +136,8 @@ cargo test --workspace
 
 The repository is integrated with robust automated DevOps infrastructure:
 
+*   **Lint Pipeline (`lint.yml`):** Runs on every push and pull request to `main`. Enforces `cargo fmt --check` and `cargo clippy -D warnings` across all workspace tools, and validates any HTML files via `htmlhint`.
+*   **Test Pipeline (`test.yml`):** Runs on every push and pull request to `main`. Executes the full integration test suite for each tool (`arfind`, `ardisk`, `argrep`) in parallel matrix jobs, so a failure in one tool doesn't mask results from the others.
 *   **Dependabot Integration:** Configured via `.github/dependabot.yml`. Periodically inspects Cargo crate dependencies and GitHub Actions workflow tags on a weekly schedule.
 *   **Manual On-Demand Release Pipeline (`release-tools.yaml`):** Implements a GitHub `workflow_dispatch` drop-down interface. Allows developers to manually trigger production releases for any specific workspace tool. It automatically initiates cross-compilation matrix builds, packaging fully static binaries for **Linux (musl)**, **Apple Silicon macOS (arm64)**, and **Legacy Intel macOS (x86_64)** simultaneously.
 

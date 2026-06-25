@@ -32,14 +32,14 @@ A highly optimized code-scanning tool built as a parallel alternative to `grep` 
 
 ---
 
-## 📥 Installation & Setup
+## 📥 Installation & Setup Development
 
 ### Requirements
 *   **Rust Stable** (v1.88+ required for stable `if let` chain syntax with `&&`)
 
 ### Cloning the Workspace Monorepo
 ```bash
-git clone https://github.com/your-username/artools.git
+git clone https://github.com/Emperorex/artools.git
 cd artools
 ```
 
@@ -59,6 +59,35 @@ The compiled binaries will be located inside the global `target/release/` worksp
 *   `target/release/ardisk`
 *   `target/release/argrep`
 
+---
+
+## 📥 Installation
+
+### Requirements
+- macOS or Linux (x86_64 or arm64)
+- `curl` and `jq` available in PATH
+- A GitHub personal access token with **Contents: Read** and **Metadata: Read** permissions
+  → Generate one at https://github.com/settings/tokens
+
+### One-line install (all tools)
+```bash
+export GITHUB_TOKEN=github_pat_...
+curl -fsSL \
+  -H "Authorization: token $GITHUB_TOKEN" \
+  -H "Accept: application/vnd.github.v3.raw" \
+  "https://api.github.com/repos/Emperorex/artools/contents/install.sh" \
+  | bash
+```
+
+### Install a specific tool
+```bash
+... | bash -s -- arfind
+```
+
+### Custom install directory (no sudo needed)
+```bash
+INSTALL_DIR=~/.local/bin ... | bash
+```
 ---
 ### ⚠️ Apple Gatekeeper Note (macOS Users)
 When downloading pre-compiled binaries from GitHub Releases on Apple Silicon (M1/M2/M3), macOS may block execution with a malware warning. To bypass this, clear the browser quarantine attribute via your terminal:

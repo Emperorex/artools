@@ -140,10 +140,10 @@ pub fn scan_directory(
             let _ = task_tx.send(Task { path: entry.path() });
         } else {
             // If --include is set, skip files that don't match the pattern
-            if let Some(pattern) = &config.include_pattern {
-                if !pattern.matches(&file_name) {
-                    continue;
-                }
+            if let Some(pattern) = &config.include_pattern
+                && !pattern.matches(&file_name)
+            {
+                continue;
             }
 
             if let Ok(metadata) = entry.metadata() {

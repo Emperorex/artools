@@ -1,5 +1,6 @@
 use colored::Colorize;
 use crossbeam_channel::unbounded;
+use glob::Pattern;
 use std::{
     collections::{HashMap, HashSet},
     fs,
@@ -25,12 +26,23 @@ pub struct Task {
 /// Configuration shared across worker threads
 pub struct ScanConfig {
     pub ignore_dirs: HashSet<String>,
+    /// When set, only files whose names match this glob pattern contribute to
+    /// directory sizes. Directories themselves are always traversed regardless.
+    pub include_pattern: Option<Pattern>,
     pub debug: bool,
 }
 
 /// Builds a `ScanConfig` from the given parameters.
-pub fn build_config(ignore_dirs: HashSet<String>, debug: bool) -> Arc<ScanConfig> {
-    Arc::new(ScanConfig { ignore_dirs, debug })
+pub fn build_config(
+    ignore_dirs: HashSet<String>,
+    include_pattern: Option<Pattern>,
+    debug: bool,
+) -> Arc<ScanConfig> {
+    Arc::new(ScanConfig {
+        ignore_dirs,
+        include_pattern,
+        debug,
+    })
 }
 
 /// Runs a parallel scan rooted at `root` and returns raw per-directory sizes
@@ -127,6 +139,13 @@ pub fn scan_directory(
             active_tasks.fetch_add(1, Ordering::SeqCst);
             let _ = task_tx.send(Task { path: entry.path() });
         } else {
+            // If --include is set, skip files that don't match the pattern
+            if let Some(pattern) = &config.include_pattern {
+                if !pattern.matches(&file_name) {
+                    continue;
+                }
+            }
+
             if let Ok(metadata) = entry.metadata() {
                 #[cfg(unix)]
                 {

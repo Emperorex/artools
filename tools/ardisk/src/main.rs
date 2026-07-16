@@ -1,6 +1,7 @@
 use ardisk::{DEFAULT_IGNORES, aggregate_sizes, build_config, format_size, parallel_scan};
 use clap::Parser;
 use colored::Colorize;
+use glob::Pattern;
 use std::{collections::HashSet, fs, path::PathBuf, time::Instant};
 
 /// Parses a human-readable size string into bytes.
@@ -71,6 +72,10 @@ struct Args {
     #[arg(short = 'n', long, default_value_t = 20)]
     top: usize,
 
+    /// Only count files matching this glob pattern (e.g. "*.rs", "*.mp4")
+    #[arg(long)]
+    include: Option<String>,
+
     /// Only show directories larger than this size (e.g. 100KB, 10MB, 1GB)
     #[arg(long)]
     threshold: Option<String>,
@@ -85,7 +90,22 @@ fn main() {
 
     let ignore_dirs: HashSet<String> = DEFAULT_IGNORES.iter().map(|s| s.to_string()).collect();
     let target_path = fs::canonicalize(&args.path).unwrap_or_else(|_| PathBuf::from(&args.path));
-    let config = build_config(ignore_dirs, args.debug);
+
+    let include_pattern: Option<Pattern> = match &args.include {
+        Some(p) => match Pattern::new(p) {
+            Ok(pat) => Some(pat),
+            Err(e) => {
+                eprintln!(
+                    "{}",
+                    format!("error: Invalid glob pattern \'{}\': {}", p, e).red()
+                );
+                std::process::exit(1);
+            }
+        },
+        None => None,
+    };
+
+    let config = build_config(ignore_dirs, include_pattern, args.debug);
 
     let start_time = Instant::now();
 
@@ -124,6 +144,12 @@ fn main() {
         for (path, size) in sorted_results.iter() {
             if printed_count >= args.top {
                 break;
+            }
+
+            // Suppress zero-size directories when --include is active —
+            // they contain no matching files and only add noise to the output
+            if threshold_bytes.is_none() && args.include.is_some() && **size == 0 {
+                continue;
             }
 
             // Apply --threshold filter

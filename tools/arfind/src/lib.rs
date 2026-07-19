@@ -262,8 +262,7 @@ pub fn scan_directory(
                     match &config.size_filter {
                         Some(f) => {
                             let len = entry.metadata().map(|m| m.len()).unwrap_or(0);
-                            f.min.is_none_or(|min| len > min)
-                                && f.max.is_none_or(|max| len < max)
+                            f.min.is_none_or(|min| len > min) && f.max.is_none_or(|max| len < max)
                         }
                         None => true,
                     }

@@ -22,9 +22,18 @@ fn parse_size(s: &str) -> Result<SizeFilter, String> {
     let bytes = parse_size_bytes(rest)?;
 
     Ok(match prefix {
-        '+' => SizeFilter { min: Some(bytes), max: None },
-        '-' => SizeFilter { min: None, max: Some(bytes) },
-        _   => SizeFilter { min: Some(bytes), max: None }, // no prefix → same as +N
+        '+' => SizeFilter {
+            min: Some(bytes),
+            max: None,
+        },
+        '-' => SizeFilter {
+            min: None,
+            max: Some(bytes),
+        },
+        _ => SizeFilter {
+            min: Some(bytes),
+            max: None,
+        }, // no prefix → same as +N
     })
 }
 
@@ -48,12 +57,17 @@ fn parse_size_bytes(s: &str) -> Result<u64, String> {
     const TB: f64 = GB * 1024.0;
 
     let multiplier = match suffix.to_uppercase().as_str() {
-        "B"  => 1.0,
+        "B" => 1.0,
         "KB" => KB,
         "MB" => MB,
         "GB" => GB,
         "TB" => TB,
-        other => return Err(format!("Unknown unit '{}'. Use B, KB, MB, GB, or TB.", other)),
+        other => {
+            return Err(format!(
+                "Unknown unit '{}'. Use B, KB, MB, GB, or TB.",
+                other
+            ));
+        }
     };
 
     Ok((value * multiplier) as u64)

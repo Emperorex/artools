@@ -295,25 +295,3 @@ pub fn scan_directory(
         }
     }
 }
-
-pub fn build_config(
-    pattern: Pattern,
-    ignore_dirs: HashSet<String>,
-    max_depth: Option<usize>,
-    file_type: Option<String>,
-    hidden: bool,
-    debug: bool,
-    size_filter: Option<SizeFilter>,
-    empty_only: bool,
-) -> Arc<SearchConfig> {
-    Arc::new(SearchConfig {
-        pattern,
-        ignore_dirs,
-        max_depth,
-        file_type,
-        hidden,
-        debug,
-        size_filter,
-        empty_only,
-    })
-}

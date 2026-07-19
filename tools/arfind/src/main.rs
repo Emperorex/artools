@@ -1,8 +1,14 @@
-use arfind::{Args, DEFAULT_IGNORES, SearchStats, SizeFilter, build_config, parallel_find};
+use arfind::{Args, DEFAULT_IGNORES, SearchConfig, SearchStats, SizeFilter, parallel_find};
 use clap::Parser;
 use colored::Colorize;
 use glob::Pattern;
-use std::{collections::HashSet, fs, path::PathBuf, sync::atomic::Ordering, time::Instant};
+use std::{
+    collections::HashSet,
+    fs,
+    path::PathBuf,
+    sync::{Arc, atomic::Ordering},
+    time::Instant,
+};
 
 /// Parses a size string with optional +/- prefix into a SizeFilter.
 /// +N → min bound (greater than N), -N → max bound (less than N), N → exact (greater than N-1, less than N+1)
@@ -108,16 +114,16 @@ fn main() {
         None => None,
     };
 
-    let config = build_config(
+    let config = Arc::new(SearchConfig {
         pattern,
         ignore_dirs,
-        args.max_depth,
-        args.file_type,
-        args.hidden,
-        args.debug,
+        max_depth: args.max_depth,
+        file_type: args.file_type,
+        hidden: args.hidden,
+        debug: args.debug,
         size_filter,
-        args.empty,
-    );
+        empty_only: args.empty,
+    });
 
     let stats = SearchStats::new();
     let start_time = Instant::now();

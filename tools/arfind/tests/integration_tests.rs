@@ -1,4 +1,4 @@
-use arfind::{DEFAULT_IGNORES, SearchStats, SizeFilter, build_config, parallel_find};
+use arfind::{DEFAULT_IGNORES, SearchConfig, SearchStats, SizeFilter, parallel_find};
 use glob::Pattern;
 use std::{
     collections::HashSet,
@@ -40,16 +40,16 @@ fn collect_names(
         ignore_dirs.insert(d.to_string());
     }
 
-    let config = build_config(
-        Pattern::new(pattern).unwrap(),
+    let config = Arc::new(SearchConfig {
+        pattern: Pattern::new(pattern).unwrap(),
         ignore_dirs,
         max_depth,
-        file_type.map(|s| s.to_string()),
+        file_type: file_type.map(|s| s.to_string()),
         hidden,
-        false,
-        None,
-        false,
-    );
+        debug: false,
+        size_filter: None,
+        empty_only: false,
+    });
 
     let stats = SearchStats::new();
     let results: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
@@ -207,16 +207,16 @@ fn stats_count_files_and_dirs_correctly() {
     let mut ignore_dirs: HashSet<String> = DEFAULT_IGNORES.iter().map(|s| s.to_string()).collect();
     ignore_dirs.insert("node_modules".to_string());
 
-    let config = build_config(
-        Pattern::new("*").unwrap(),
+    let config = Arc::new(SearchConfig {
+        pattern: Pattern::new("*").unwrap(),
         ignore_dirs,
-        None,
-        None,
-        false,
-        false,
-        None,
-        false,
-    );
+        max_depth: None,
+        file_type: None,
+        hidden: false,
+        debug: false,
+        size_filter: None,
+        empty_only: false,
+    });
 
     let stats = SearchStats::new();
     let stats_clone = stats.clone();
@@ -261,16 +261,16 @@ fn multiple_workers_produce_same_results_as_single_worker() {
 
     let run = |workers: usize| {
         let ignore_dirs: HashSet<String> = DEFAULT_IGNORES.iter().map(|s| s.to_string()).collect();
-        let config = build_config(
-            Pattern::new("*.txt").unwrap(),
+        let config = Arc::new(SearchConfig {
+            pattern: Pattern::new("*.txt").unwrap(),
             ignore_dirs,
-            None,
-            None,
-            false,
-            false,
-            None,
-            false,
-        );
+            max_depth: None,
+            file_type: None,
+            hidden: false,
+            debug: false,
+            size_filter: None,
+            empty_only: false,
+        });
         let results: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
         let results_clone = Arc::clone(&results);
         parallel_find(
@@ -330,19 +330,19 @@ fn size_min_filters_small_files() {
     let (_dir, root) = make_tree_with_content(&[("large.txt", &large), ("small.txt", &small)]);
 
     let ignore_dirs: HashSet<String> = DEFAULT_IGNORES.iter().map(|s| s.to_string()).collect();
-    let config = build_config(
-        Pattern::new("*").unwrap(),
+    let config = Arc::new(SearchConfig {
+        pattern: Pattern::new("*").unwrap(),
         ignore_dirs,
-        None,
-        Some("f".to_string()),
-        false,
-        false,
-        Some(SizeFilter {
+        max_depth: None,
+        file_type: Some("f".to_string()),
+        hidden: false,
+        debug: false,
+        size_filter: Some(SizeFilter {
             min: Some(1024),
             max: None,
         }), // +1KB
-        false,
-    );
+        empty_only: false,
+    });
 
     let names = collect_with_config(root, config);
     assert!(
@@ -362,19 +362,19 @@ fn size_max_filters_large_files() {
     let (_dir, root) = make_tree_with_content(&[("large.txt", &large), ("small.txt", &small)]);
 
     let ignore_dirs: HashSet<String> = DEFAULT_IGNORES.iter().map(|s| s.to_string()).collect();
-    let config = build_config(
-        Pattern::new("*").unwrap(),
+    let config = Arc::new(SearchConfig {
+        pattern: Pattern::new("*").unwrap(),
         ignore_dirs,
-        None,
-        Some("f".to_string()),
-        false,
-        false,
-        Some(SizeFilter {
+        max_depth: None,
+        file_type: Some("f".to_string()),
+        hidden: false,
+        debug: false,
+        size_filter: Some(SizeFilter {
             min: None,
             max: Some(1024),
         }), // -1KB
-        false,
-    );
+        empty_only: false,
+    });
 
     let names = collect_with_config(root, config);
     assert!(
@@ -394,19 +394,19 @@ fn size_filter_does_not_affect_directories() {
 
     let ignore_dirs: HashSet<String> = DEFAULT_IGNORES.iter().map(|s| s.to_string()).collect();
     // min=99GB — no file matches, but directories should still appear
-    let config = build_config(
-        Pattern::new("*").unwrap(),
+    let config = Arc::new(SearchConfig {
+        pattern: Pattern::new("*").unwrap(),
         ignore_dirs,
-        None,
-        Some("d".to_string()),
-        false,
-        false,
-        Some(SizeFilter {
+        max_depth: None,
+        file_type: Some("d".to_string()),
+        hidden: false,
+        debug: false,
+        size_filter: Some(SizeFilter {
             min: Some(99 * 1024 * 1024 * 1024),
             max: None,
         }),
-        false,
-    );
+        empty_only: false,
+    });
 
     let names = collect_with_config(root, config);
     assert!(
@@ -422,16 +422,16 @@ fn empty_finds_zero_byte_files() {
     let (_dir, root) = make_tree_with_content(&[("empty.txt", b""), ("nonempty.txt", b"hello")]);
 
     let ignore_dirs: HashSet<String> = DEFAULT_IGNORES.iter().map(|s| s.to_string()).collect();
-    let config = build_config(
-        Pattern::new("*").unwrap(),
+    let config = Arc::new(SearchConfig {
+        pattern: Pattern::new("*").unwrap(),
         ignore_dirs,
-        None,
-        Some("f".to_string()),
-        false,
-        false,
-        None,
-        true, // empty_only
-    );
+        max_depth: None,
+        file_type: Some("f".to_string()),
+        hidden: false,
+        debug: false,
+        size_filter: None,
+        empty_only: true,
+    });
 
     let names = collect_with_config(root, config);
     assert_eq!(names, vec!["empty.txt"]);
@@ -446,16 +446,16 @@ fn empty_finds_empty_directories() {
     fs::write(root.join("nonempty_dir/file.txt"), b"hi").unwrap();
 
     let ignore_dirs: HashSet<String> = DEFAULT_IGNORES.iter().map(|s| s.to_string()).collect();
-    let config = build_config(
-        Pattern::new("*").unwrap(),
+    let config = Arc::new(SearchConfig {
+        pattern: Pattern::new("*").unwrap(),
         ignore_dirs,
-        None,
-        Some("d".to_string()),
-        false,
-        false,
-        None,
-        true, // empty_only
-    );
+        max_depth: None,
+        file_type: Some("d".to_string()),
+        hidden: false,
+        debug: false,
+        size_filter: None,
+        empty_only: true,
+    });
 
     let names = collect_with_config(root, config);
     assert!(
@@ -473,16 +473,16 @@ fn empty_false_returns_all_files() {
     let (_dir, root) = make_tree_with_content(&[("empty.txt", b""), ("nonempty.txt", b"hello")]);
 
     let ignore_dirs: HashSet<String> = DEFAULT_IGNORES.iter().map(|s| s.to_string()).collect();
-    let config = build_config(
-        Pattern::new("*.txt").unwrap(),
+    let config = Arc::new(SearchConfig {
+        pattern: Pattern::new("*.txt").unwrap(),
         ignore_dirs,
-        None,
-        Some("f".to_string()),
-        false,
-        false,
-        None,
-        false, // empty_only = false
-    );
+        max_depth: None,
+        file_type: Some("f".to_string()),
+        hidden: false,
+        debug: false,
+        size_filter: None,
+        empty_only: false,
+    });
 
     let names = collect_with_config(root, config);
     assert_eq!(names, vec!["empty.txt", "nonempty.txt"]);

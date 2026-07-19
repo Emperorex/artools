@@ -17,10 +17,10 @@ use std::{
 fn parse_size(s: &str) -> Result<SizeFilter, String> {
     let s = s.trim();
 
-    let (prefix, rest) = if s.starts_with('+') {
-        ('+', &s[1..])
-    } else if s.starts_with('-') {
-        ('-', &s[1..])
+    let (prefix, rest) = if let Some(stripped) = s.strip_prefix('+') {
+        ('+', stripped)
+    } else if let Some(stripped) = s.strip_prefix('-') {
+        ('-', stripped)
     } else {
         ('=', s)
     };

@@ -1,4 +1,4 @@
-use arfind::{DEFAULT_IGNORES, SearchStats, build_config, parallel_find};
+use arfind::{DEFAULT_IGNORES, SearchStats, SizeFilter, build_config, parallel_find};
 use glob::Pattern;
 use std::{
     collections::HashSet,
@@ -46,6 +46,8 @@ fn collect_names(
         max_depth,
         file_type.map(|s| s.to_string()),
         hidden,
+        false,
+        None,
         false,
     );
 
@@ -212,6 +214,8 @@ fn stats_count_files_and_dirs_correctly() {
         None,
         false,
         false,
+        None,
+        false,
     );
 
     let stats = SearchStats::new();
@@ -264,6 +268,8 @@ fn multiple_workers_produce_same_results_as_single_worker() {
             None,
             false,
             false,
+            None,
+            false,
         );
         let results: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
         let results_clone = Arc::clone(&results);
@@ -285,4 +291,199 @@ fn multiple_workers_produce_same_results_as_single_worker() {
     };
 
     assert_eq!(run(1), run(8));
+}
+
+// ── --size filter ─────────────────────────────────────────────────────────────
+
+fn make_tree_with_content(files: &[(&str, &[u8])]) -> (TempDir, PathBuf) {
+    let dir = TempDir::new().unwrap();
+    for (rel, content) in files {
+        let full = dir.path().join(rel);
+        if let Some(parent) = full.parent() {
+            fs::create_dir_all(parent).unwrap();
+        }
+        fs::write(&full, content).unwrap();
+    }
+    let root = fs::canonicalize(dir.path()).unwrap();
+    (dir, root)
+}
+
+fn collect_with_config(root: PathBuf, config: std::sync::Arc<arfind::SearchConfig>) -> Vec<String> {
+    let results: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let results_clone = Arc::clone(&results);
+    parallel_find(root, 4, config, SearchStats::new(), move |item| {
+        results_clone
+            .lock()
+            .unwrap()
+            .push(item.path.file_name().unwrap().to_string_lossy().to_string());
+    });
+    let mut v = results.lock().unwrap().clone();
+    v.sort();
+    v
+}
+
+#[test]
+fn size_min_filters_small_files() {
+    // large.txt = 2048 bytes, small.txt = 10 bytes
+    let large = vec![b'x'; 2048];
+    let small = vec![b'x'; 10];
+    let (_dir, root) = make_tree_with_content(&[("large.txt", &large), ("small.txt", &small)]);
+
+    let ignore_dirs: HashSet<String> = DEFAULT_IGNORES.iter().map(|s| s.to_string()).collect();
+    let config = build_config(
+        Pattern::new("*").unwrap(),
+        ignore_dirs,
+        None,
+        Some("f".to_string()),
+        false,
+        false,
+        Some(SizeFilter {
+            min: Some(1024),
+            max: None,
+        }), // +1KB
+        false,
+    );
+
+    let names = collect_with_config(root, config);
+    assert!(
+        names.contains(&"large.txt".to_string()),
+        "large.txt should match +1KB"
+    );
+    assert!(
+        !names.contains(&"small.txt".to_string()),
+        "small.txt should be excluded"
+    );
+}
+
+#[test]
+fn size_max_filters_large_files() {
+    let large = vec![b'x'; 2048];
+    let small = vec![b'x'; 10];
+    let (_dir, root) = make_tree_with_content(&[("large.txt", &large), ("small.txt", &small)]);
+
+    let ignore_dirs: HashSet<String> = DEFAULT_IGNORES.iter().map(|s| s.to_string()).collect();
+    let config = build_config(
+        Pattern::new("*").unwrap(),
+        ignore_dirs,
+        None,
+        Some("f".to_string()),
+        false,
+        false,
+        Some(SizeFilter {
+            min: None,
+            max: Some(1024),
+        }), // -1KB
+        false,
+    );
+
+    let names = collect_with_config(root, config);
+    assert!(
+        names.contains(&"small.txt".to_string()),
+        "small.txt should match -1KB"
+    );
+    assert!(
+        !names.contains(&"large.txt".to_string()),
+        "large.txt should be excluded"
+    );
+}
+
+#[test]
+fn size_filter_does_not_affect_directories() {
+    let small = vec![b'x'; 1];
+    let (_dir, root) = make_tree_with_content(&[("subdir/file.txt", &small)]);
+
+    let ignore_dirs: HashSet<String> = DEFAULT_IGNORES.iter().map(|s| s.to_string()).collect();
+    // min=99GB — no file matches, but directories should still appear
+    let config = build_config(
+        Pattern::new("*").unwrap(),
+        ignore_dirs,
+        None,
+        Some("d".to_string()),
+        false,
+        false,
+        Some(SizeFilter {
+            min: Some(99 * 1024 * 1024 * 1024),
+            max: None,
+        }),
+        false,
+    );
+
+    let names = collect_with_config(root, config);
+    assert!(
+        names.contains(&"subdir".to_string()),
+        "dirs should not be filtered by --size"
+    );
+}
+
+// ── --empty filter ────────────────────────────────────────────────────────────
+
+#[test]
+fn empty_finds_zero_byte_files() {
+    let (_dir, root) = make_tree_with_content(&[("empty.txt", b""), ("nonempty.txt", b"hello")]);
+
+    let ignore_dirs: HashSet<String> = DEFAULT_IGNORES.iter().map(|s| s.to_string()).collect();
+    let config = build_config(
+        Pattern::new("*").unwrap(),
+        ignore_dirs,
+        None,
+        Some("f".to_string()),
+        false,
+        false,
+        None,
+        true, // empty_only
+    );
+
+    let names = collect_with_config(root, config);
+    assert_eq!(names, vec!["empty.txt"]);
+}
+
+#[test]
+fn empty_finds_empty_directories() {
+    let dir = TempDir::new().unwrap();
+    let root = fs::canonicalize(dir.path()).unwrap();
+    fs::create_dir_all(root.join("empty_dir")).unwrap();
+    fs::create_dir_all(root.join("nonempty_dir")).unwrap();
+    fs::write(root.join("nonempty_dir/file.txt"), b"hi").unwrap();
+
+    let ignore_dirs: HashSet<String> = DEFAULT_IGNORES.iter().map(|s| s.to_string()).collect();
+    let config = build_config(
+        Pattern::new("*").unwrap(),
+        ignore_dirs,
+        None,
+        Some("d".to_string()),
+        false,
+        false,
+        None,
+        true, // empty_only
+    );
+
+    let names = collect_with_config(root, config);
+    assert!(
+        names.contains(&"empty_dir".to_string()),
+        "empty_dir should match"
+    );
+    assert!(
+        !names.contains(&"nonempty_dir".to_string()),
+        "nonempty_dir should not match"
+    );
+}
+
+#[test]
+fn empty_false_returns_all_files() {
+    let (_dir, root) = make_tree_with_content(&[("empty.txt", b""), ("nonempty.txt", b"hello")]);
+
+    let ignore_dirs: HashSet<String> = DEFAULT_IGNORES.iter().map(|s| s.to_string()).collect();
+    let config = build_config(
+        Pattern::new("*.txt").unwrap(),
+        ignore_dirs,
+        None,
+        Some("f".to_string()),
+        false,
+        false,
+        None,
+        false, // empty_only = false
+    );
+
+    let names = collect_with_config(root, config);
+    assert_eq!(names, vec!["empty.txt", "nonempty.txt"]);
 }

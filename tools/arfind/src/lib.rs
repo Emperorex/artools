@@ -48,6 +48,19 @@ pub struct Args {
 
     #[arg(short, long)]
     pub debug: bool,
+
+    /// Filter by file size: N or +N (larger than), -N (smaller than).
+    /// Supported units: B, KB, MB, GB, TB. Examples: 100MB, +100MB, -1KB
+    #[arg(long, allow_hyphen_values = true)]
+    pub size: Option<String>,
+
+    /// Only match empty files (size 0) or empty directories (no children)
+    #[arg(short = 'e', long)]
+    pub empty: bool,
+
+    /// Print only the total count of matches instead of paths
+    #[arg(short = 'c', long)]
+    pub count: bool,
 }
 
 /// Task sent to workers
@@ -55,6 +68,13 @@ pub struct Args {
 pub struct Task {
     pub path: PathBuf,
     pub depth: usize,
+}
+
+/// Size filter with optional lower and upper bounds (in bytes).
+/// Mirrors find's +N (greater than) and -N (less than) semantics.
+pub struct SizeFilter {
+    pub min: Option<u64>, // +N  → size > N
+    pub max: Option<u64>, // -N  → size < N
 }
 
 /// Shared configuration and filters for the search
@@ -65,6 +85,8 @@ pub struct SearchConfig {
     pub file_type: Option<String>,
     pub hidden: bool,
     pub debug: bool,
+    pub size_filter: Option<SizeFilter>,
+    pub empty_only: bool,
 }
 
 /// Shared atomic counters for runtime statistics
@@ -221,11 +243,41 @@ pub fn scan_directory(
             };
 
             if type_matches {
-                stats.matched_count.fetch_add(1, Ordering::Relaxed);
-                let _ = output_tx.send(MatchResult {
-                    path: entry.path(),
-                    is_dir,
-                });
+                // --empty: check whether the entry is empty
+                let is_empty = if is_dir {
+                    // A directory is empty if it has no children
+                    fs::read_dir(entry.path())
+                        .map(|mut d| d.next().is_none())
+                        .unwrap_or(false)
+                } else {
+                    entry.metadata().map(|m| m.len() == 0).unwrap_or(false)
+                };
+
+                if config.empty_only && !is_empty {
+                    continue;
+                }
+
+                // --size: apply size filter to files only (dirs have no single size)
+                let size_ok = if !is_dir && !is_symlink {
+                    match &config.size_filter {
+                        Some(f) => {
+                            let len = entry.metadata().map(|m| m.len()).unwrap_or(0);
+                            f.min.is_none_or(|min| len > min)
+                                && f.max.is_none_or(|max| len < max)
+                        }
+                        None => true,
+                    }
+                } else {
+                    true // size filter does not apply to directories or symlinks
+                };
+
+                if size_ok {
+                    stats.matched_count.fetch_add(1, Ordering::Relaxed);
+                    let _ = output_tx.send(MatchResult {
+                        path: entry.path(),
+                        is_dir,
+                    });
+                }
             }
         }
 
@@ -252,6 +304,8 @@ pub fn build_config(
     file_type: Option<String>,
     hidden: bool,
     debug: bool,
+    size_filter: Option<SizeFilter>,
+    empty_only: bool,
 ) -> Arc<SearchConfig> {
     Arc::new(SearchConfig {
         pattern,
@@ -260,5 +314,7 @@ pub fn build_config(
         file_type,
         hidden,
         debug,
+        size_filter,
+        empty_only,
     })
 }

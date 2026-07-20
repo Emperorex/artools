@@ -113,17 +113,57 @@ jobs:
             git push origin "${{ env.TAG_NAME }}"
           fi
 
-      # Publish official GitHub Release tied to the newly created tag with automated notes
+      # Find the previous release tag for this specific tool to use as the
+      # commit range start point. Falls back to the first commit if no prior tag exists.
+      - name: Generate tool-scoped release notes
+        id: release_notes
+        run: |
+          TOOL="${{ inputs.tool_name }}"
+          CURRENT_TAG="${{ env.TAG_NAME }}"
+
+          # Find the most recent previous tag for this tool (e.g. arfind-v0.1.1)
+          PREV_TAG=$(git tag --list "${TOOL}-v*" --sort=-version:refname \
+            | grep -v "^${CURRENT_TAG}$" \
+            | head -n1)
+
+          if [ -z "$PREV_TAG" ]; then
+            # No previous tag — include all commits touching this tool's directory
+            RANGE=""
+            echo "No previous tag found for ${TOOL}, using full history."
+          else
+            RANGE="${PREV_TAG}..HEAD"
+            echo "Generating notes from ${PREV_TAG} to HEAD"
+          fi
+
+          # Collect only commits that touched files under tools/<tool>/
+          # --follow-renames handles file moves across the history
+          COMMITS=$(git log ${RANGE} \
+            --pretty=format:"- %s (%h)" \
+            -- "tools/${TOOL}/" \
+            | head -50)
+
+          if [ -z "$COMMITS" ]; then
+            COMMITS="- No changes specific to \`${TOOL}\` since the last release."
+          fi
+
+          # Write multi-line output safely using the GITHUB_OUTPUT heredoc syntax
+          {
+            echo "notes<<RELEASE_NOTES_EOF"
+            echo "## What's Changed in \`${TOOL}\`"
+            echo ""
+            echo "$COMMITS"
+            echo ""
+            echo "**Full changelog:** https://github.com/${{ github.repository }}/commits/main/tools/${TOOL}"
+            echo "RELEASE_NOTES_EOF"
+          } >> "$GITHUB_OUTPUT"
+
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ env.TAG_NAME }}
           name: ${{ inputs.tool_name }} v${{ env.VERSION }}
-          body: |
-            ## Manual Production Release for `${{ inputs.tool_name }}`
-            Optimized binaries generated successfully via on-demand workflow dispatch.
-          # Automatically generates notes containing the full commit history and contributors list
-          generate_release_notes: true
+          body: ${{ steps.release_notes.outputs.notes }}
+          generate_release_notes: false
           files: |
             dist/${{ inputs.tool_name }}-linux-x86_64
             dist/${{ inputs.tool_name }}-macos-arm64

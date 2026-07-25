@@ -1,4 +1,5 @@
 use argrep::{DEFAULT_IGNORES, SearchStats, build_config, parallel_grep};
+use glob::Pattern;
 use std::{
     collections::HashSet,
     fs,
@@ -25,7 +26,17 @@ fn make_tree(files: &[(&str, &str)]) -> (TempDir, PathBuf) {
 
 fn default_config(query: &str, ignore_case: bool) -> std::sync::Arc<argrep::SearchConfig> {
     let ignore_dirs: HashSet<String> = DEFAULT_IGNORES.iter().map(|s| s.to_string()).collect();
-    build_config(query.to_string(), ignore_case, false, ignore_dirs, false)
+    build_config(
+        query.to_string(),
+        ignore_case,
+        false,
+        ignore_dirs,
+        false,
+        false,
+        false,
+        false,
+        None,
+    )
 }
 
 /// Runs parallel_grep and returns (matched_file_names, matched_line_contents) sorted.
@@ -192,7 +203,17 @@ fn custom_ignore_dir_is_excluded() {
 
     let mut ignore_dirs: HashSet<String> = DEFAULT_IGNORES.iter().map(|s| s.to_string()).collect();
     ignore_dirs.insert("vendor".to_string());
-    let config = build_config("needle".to_string(), false, false, ignore_dirs, false);
+    let config = build_config(
+        "needle".to_string(),
+        false,
+        false,
+        ignore_dirs,
+        false,
+        false,
+        false,
+        false,
+        None,
+    );
     let stats = SearchStats::new();
     let results: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
     let r = Arc::clone(&results);
@@ -223,7 +244,17 @@ fn stats_counts_are_accurate() {
     ]);
 
     let ignore_dirs: HashSet<String> = DEFAULT_IGNORES.iter().map(|s| s.to_string()).collect();
-    let config = build_config("TARGET".to_string(), false, false, ignore_dirs, false);
+    let config = build_config(
+        "TARGET".to_string(),
+        false,
+        false,
+        ignore_dirs,
+        false,
+        false,
+        false,
+        false,
+        None,
+    );
     let stats = SearchStats::new();
     let stats_clone = stats.clone();
 
@@ -248,7 +279,17 @@ fn multiple_workers_find_same_matches_as_single_worker() {
 
     let run = |workers: usize| {
         let ignore_dirs: HashSet<String> = DEFAULT_IGNORES.iter().map(|s| s.to_string()).collect();
-        let config = build_config("needle".to_string(), false, false, ignore_dirs, false);
+        let config = build_config(
+            "needle".to_string(),
+            false,
+            false,
+            ignore_dirs,
+            false,
+            false,
+            false,
+            false,
+            None,
+        );
         let results: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
         let r = Arc::clone(&results);
         parallel_grep(
@@ -292,4 +333,331 @@ fn match_on_last_line_without_newline() {
     let (names, lines) = collect_matches(root, "needle", false);
     assert_eq!(names, vec!["file.txt"]);
     assert_eq!(lines, vec!["needle no newline"]);
+}
+
+// ── -v invert match ───────────────────────────────────────────────────────────
+
+#[test]
+fn invert_returns_non_matching_lines() {
+    let (_dir, root) = make_tree(&[("file.txt", "match this\nskip this\nmatch again\n")]);
+
+    let ignore_dirs: HashSet<String> = DEFAULT_IGNORES.iter().map(|s| s.to_string()).collect();
+    let config = build_config(
+        "match".to_string(),
+        false,
+        false,
+        ignore_dirs,
+        false,
+        true, // invert
+        false,
+        false,
+        None,
+    );
+    let results: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let r = Arc::clone(&results);
+    parallel_grep(root, 4, config, SearchStats::new(), move |item| {
+        r.lock()
+            .unwrap()
+            .push(item.line_content.trim_end().to_string());
+    });
+    let mut lines = results.lock().unwrap().clone();
+    lines.sort();
+    assert_eq!(lines, vec!["skip this"]);
+}
+
+#[test]
+fn invert_with_no_matches_returns_all_lines() {
+    let (_dir, root) = make_tree(&[("file.txt", "line one\nline two\n")]);
+
+    let ignore_dirs: HashSet<String> = DEFAULT_IGNORES.iter().map(|s| s.to_string()).collect();
+    let config = build_config(
+        "zzznomatch".to_string(),
+        false,
+        false,
+        ignore_dirs,
+        false,
+        true,
+        false,
+        false,
+        None,
+    );
+    let results: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let r = Arc::clone(&results);
+    parallel_grep(root, 4, config, SearchStats::new(), move |item| {
+        r.lock()
+            .unwrap()
+            .push(item.line_content.trim_end().to_string());
+    });
+    let mut lines = results.lock().unwrap().clone();
+    lines.sort();
+    assert_eq!(lines, vec!["line one", "line two"]);
+}
+
+// ── -l files-with-matches ─────────────────────────────────────────────────────
+
+#[test]
+fn files_with_matches_returns_only_filenames() {
+    let (_dir, root) = make_tree(&[
+        ("a.txt", "needle here\n"),
+        ("b.txt", "nothing\n"),
+        ("c.txt", "needle again\n"),
+    ]);
+
+    let ignore_dirs: HashSet<String> = DEFAULT_IGNORES.iter().map(|s| s.to_string()).collect();
+    let config = build_config(
+        "needle".to_string(),
+        false,
+        false,
+        ignore_dirs,
+        false,
+        false,
+        true, // files_with_matches
+        false,
+        None,
+    );
+    let results: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let r = Arc::clone(&results);
+    parallel_grep(root, 4, config, SearchStats::new(), move |item| {
+        r.lock().unwrap().push(
+            item.file_path
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .to_string(),
+        );
+    });
+    let mut names = results.lock().unwrap().clone();
+    names.sort();
+    assert_eq!(names, vec!["a.txt", "c.txt"]);
+}
+
+#[test]
+fn files_with_matches_emits_each_file_once() {
+    // File has multiple matching lines — should still appear only once with -l
+    let (_dir, root) = make_tree(&[("file.txt", "needle\nneedle again\nneedle third\n")]);
+
+    let ignore_dirs: HashSet<String> = DEFAULT_IGNORES.iter().map(|s| s.to_string()).collect();
+    let config = build_config(
+        "needle".to_string(),
+        false,
+        false,
+        ignore_dirs,
+        false,
+        false,
+        true,
+        false,
+        None,
+    );
+    let results: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let r = Arc::clone(&results);
+    parallel_grep(root, 4, config, SearchStats::new(), move |item| {
+        r.lock().unwrap().push(
+            item.file_path
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .to_string(),
+        );
+    });
+    assert_eq!(
+        results.lock().unwrap().len(),
+        1,
+        "file should appear exactly once"
+    );
+}
+
+// ── -c count per file ─────────────────────────────────────────────────────────
+
+#[test]
+fn count_per_file_returns_correct_counts() {
+    let (_dir, root) = make_tree(&[
+        ("a.txt", "needle\nneedle\nother\n"),
+        ("b.txt", "nothing\n"),
+        ("c.txt", "needle\n"),
+    ]);
+
+    let ignore_dirs: HashSet<String> = DEFAULT_IGNORES.iter().map(|s| s.to_string()).collect();
+    let config = build_config(
+        "needle".to_string(),
+        false,
+        false,
+        ignore_dirs,
+        false,
+        false,
+        false,
+        true, // count_per_file
+        None,
+    );
+    let results: Arc<Mutex<Vec<(String, usize)>>> = Arc::new(Mutex::new(Vec::new()));
+    let r = Arc::clone(&results);
+    parallel_grep(root, 4, config, SearchStats::new(), move |item| {
+        r.lock().unwrap().push((
+            item.file_path
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .to_string(),
+            item.count.unwrap_or(0),
+        ));
+    });
+    let mut counts = results.lock().unwrap().clone();
+    counts.sort_by_key(|(name, _)| name.clone());
+
+    assert_eq!(
+        counts,
+        vec![
+            ("a.txt".to_string(), 2),
+            ("b.txt".to_string(), 0),
+            ("c.txt".to_string(), 1),
+        ]
+    );
+}
+
+#[test]
+fn count_per_file_emits_result_for_every_file() {
+    // Even files with 0 matches should emit a count result
+    let (_dir, root) = make_tree(&[("match.txt", "needle\n"), ("nomatch.txt", "nothing\n")]);
+
+    let ignore_dirs: HashSet<String> = DEFAULT_IGNORES.iter().map(|s| s.to_string()).collect();
+    let config = build_config(
+        "needle".to_string(),
+        false,
+        false,
+        ignore_dirs,
+        false,
+        false,
+        false,
+        true,
+        None,
+    );
+    let results: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let r = Arc::clone(&results);
+    parallel_grep(root, 4, config, SearchStats::new(), move |item| {
+        r.lock().unwrap().push(
+            item.file_path
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .to_string(),
+        );
+    });
+    assert_eq!(
+        results.lock().unwrap().len(),
+        2,
+        "both files should emit a count"
+    );
+}
+
+// ── --include pattern ─────────────────────────────────────────────────────────
+
+#[test]
+fn include_pattern_searches_only_matching_files() {
+    let (_dir, root) = make_tree(&[
+        ("main.rs", "needle in rust\n"),
+        ("readme.md", "needle in markdown\n"),
+        ("config.toml", "needle in toml\n"),
+    ]);
+
+    let ignore_dirs: HashSet<String> = DEFAULT_IGNORES.iter().map(|s| s.to_string()).collect();
+    let config = build_config(
+        "needle".to_string(),
+        false,
+        false,
+        ignore_dirs,
+        false,
+        false,
+        false,
+        false,
+        Some(Pattern::new("*.rs").unwrap()),
+    );
+    let results: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let r = Arc::clone(&results);
+    parallel_grep(root, 4, config, SearchStats::new(), move |item| {
+        r.lock().unwrap().push(
+            item.file_path
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .to_string(),
+        );
+    });
+    assert_eq!(results.lock().unwrap().clone(), vec!["main.rs"]);
+}
+
+#[test]
+fn include_pattern_no_files_match_returns_empty() {
+    let (_dir, root) = make_tree(&[("main.rs", "needle\n"), ("lib.rs", "needle\n")]);
+
+    let ignore_dirs: HashSet<String> = DEFAULT_IGNORES.iter().map(|s| s.to_string()).collect();
+    let config = build_config(
+        "needle".to_string(),
+        false,
+        false,
+        ignore_dirs,
+        false,
+        false,
+        false,
+        false,
+        Some(Pattern::new("*.txt").unwrap()), // no .txt files exist
+    );
+    let results: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let r = Arc::clone(&results);
+    parallel_grep(root, 4, config, SearchStats::new(), move |item| {
+        r.lock().unwrap().push(item.file_path.display().to_string());
+    });
+    assert!(results.lock().unwrap().is_empty());
+}
+
+#[test]
+fn include_wildcard_matches_all_files() {
+    let (_dir, root) = make_tree(&[("a.rs", "needle\n"), ("b.txt", "needle\n")]);
+
+    let ignore_dirs_all: HashSet<String> = DEFAULT_IGNORES.iter().map(|s| s.to_string()).collect();
+    let ignore_dirs_wild: HashSet<String> = DEFAULT_IGNORES.iter().map(|s| s.to_string()).collect();
+
+    let config_all = build_config(
+        "needle".to_string(),
+        false,
+        false,
+        ignore_dirs_all,
+        false,
+        false,
+        false,
+        false,
+        None,
+    );
+    let config_wild = build_config(
+        "needle".to_string(),
+        false,
+        false,
+        ignore_dirs_wild,
+        false,
+        false,
+        false,
+        false,
+        Some(Pattern::new("*").unwrap()),
+    );
+
+    let run = |config: std::sync::Arc<argrep::SearchConfig>| {
+        let results: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let r = Arc::clone(&results);
+        parallel_grep(root.clone(), 4, config, SearchStats::new(), move |item| {
+            r.lock().unwrap().push(
+                item.file_path
+                    .file_name()
+                    .unwrap()
+                    .to_string_lossy()
+                    .to_string(),
+            );
+        });
+        let mut v = results.lock().unwrap().clone();
+        v.sort();
+        v
+    };
+
+    assert_eq!(
+        run(config_all),
+        run(config_wild),
+        "'*' include should match same as no filter"
+    );
 }

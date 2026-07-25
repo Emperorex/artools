@@ -1,6 +1,7 @@
 use argrep::{DEFAULT_IGNORES, SearchStats, build_config, parallel_grep};
 use clap::Parser;
 use colored::Colorize;
+use glob::Pattern;
 use std::{collections::HashSet, fs, path::PathBuf, sync::atomic::Ordering, time::Instant};
 
 /// CLI arguments for argrep
@@ -34,6 +35,22 @@ struct Args {
     /// Show search statistics and operational errors
     #[arg(short, long)]
     debug: bool,
+
+    /// Invert match: print lines that do NOT contain the query
+    #[arg(short = 'v', long)]
+    invert: bool,
+
+    /// Print only filenames of files that contain a match
+    #[arg(short = 'l', long = "files-with-matches")]
+    files_with_matches: bool,
+
+    /// Print count of matching lines per file instead of the lines themselves
+    #[arg(short = 'c', long = "count")]
+    count_per_file: bool,
+
+    /// Only search files whose names match this glob (e.g. "*.rs", "*.log")
+    #[arg(long)]
+    include: Option<String>,
 }
 
 fn main() {
@@ -42,12 +59,30 @@ fn main() {
     let root_path = fs::canonicalize(&args.path).unwrap_or_else(|_| PathBuf::from(&args.path));
     let ignore_dirs: HashSet<String> = DEFAULT_IGNORES.iter().map(|s| s.to_string()).collect();
 
+    let include_pattern: Option<Pattern> = match &args.include {
+        Some(p) => match Pattern::new(p) {
+            Ok(pat) => Some(pat),
+            Err(e) => {
+                eprintln!(
+                    "{}",
+                    format!("error: Invalid glob pattern '{}': {}", p, e).red()
+                );
+                std::process::exit(1);
+            }
+        },
+        None => None,
+    };
+
     let config = build_config(
         args.query,
         args.ignore_case,
         args.line_number,
         ignore_dirs,
         args.debug,
+        args.invert,
+        args.files_with_matches,
+        args.count_per_file,
+        include_pattern,
     );
 
     let stats = SearchStats::new();
@@ -55,23 +90,38 @@ fn main() {
 
     let line_number = config.line_number;
     let query = config.query.clone();
+    let files_with_matches = config.files_with_matches;
+    let count_per_file = config.count_per_file;
 
     parallel_grep(root_path, args.jobs, config, stats.clone(), move |result| {
-        let prefix = if line_number {
-            format!(
-                "{}:{}",
+        if files_with_matches {
+            // -l: print only the file path
+            println!("{}", result.file_path.display().to_string().magenta());
+        } else if count_per_file {
+            // -c: print "filepath: N"
+            let count = result.count.unwrap_or(0);
+            println!(
+                "{}: {}",
                 result.file_path.display().to_string().magenta(),
-                result.line_num.to_string().green()
-            )
+                count.to_string().green()
+            );
         } else {
-            result.file_path.display().to_string().magenta().to_string()
-        };
+            // Normal / -v / -n mode: print matching lines
+            let prefix = if line_number {
+                format!(
+                    "{}:{}",
+                    result.file_path.display().to_string().magenta(),
+                    result.line_num.to_string().green()
+                )
+            } else {
+                result.file_path.display().to_string().magenta().to_string()
+            };
 
-        // Simple color highlight for the query keyword inside the line content
-        let highlighted = result
-            .line_content
-            .replace(&query, &query.red().bold().to_string());
-        println!("{}: {}", prefix, highlighted.trim_end());
+            let highlighted = result
+                .line_content
+                .replace(&query, &query.red().bold().to_string());
+            println!("{}: {}", prefix, highlighted.trim_end());
+        }
     });
 
     let duration = start_time.elapsed();

@@ -1,5 +1,6 @@
 use colored::Colorize;
 use crossbeam_channel::unbounded;
+use glob::Pattern;
 use std::{
     collections::HashSet,
     fs::{self, File},
@@ -23,6 +24,14 @@ pub struct SearchConfig {
     pub line_number: bool,
     pub ignore_dirs: HashSet<String>,
     pub debug: bool,
+    /// -v: print lines that do NOT match
+    pub invert: bool,
+    /// -l: print only filenames, not matching lines
+    pub files_with_matches: bool,
+    /// -c: print count of matching lines per file
+    pub count_per_file: bool,
+    /// --include: only search files matching this glob pattern
+    pub include_pattern: Option<Pattern>,
 }
 
 /// Shared statistics counters
@@ -54,6 +63,8 @@ pub struct MatchResult {
     pub file_path: PathBuf,
     pub line_num: usize,
     pub line_content: String,
+    /// Set when --count is active: total matching lines in this file
+    pub count: Option<usize>,
 }
 
 /// Builds a `SearchConfig` from the given parameters.
@@ -63,6 +74,10 @@ pub fn build_config(
     line_number: bool,
     ignore_dirs: HashSet<String>,
     debug: bool,
+    invert: bool,
+    files_with_matches: bool,
+    count_per_file: bool,
+    include_pattern: Option<Pattern>,
 ) -> Arc<SearchConfig> {
     let normalized_query = if ignore_case {
         query.to_lowercase()
@@ -77,6 +92,10 @@ pub fn build_config(
         line_number,
         ignore_dirs,
         debug,
+        invert,
+        files_with_matches,
+        count_per_file,
+        include_pattern,
     })
 }
 
@@ -196,6 +215,12 @@ pub fn scan_and_grep(
             active_tasks.fetch_add(1, Ordering::SeqCst);
             let _ = task_tx.send(entry.path());
         } else {
+            // --include: skip files whose names don't match the pattern
+            if let Some(pattern) = &config.include_pattern
+                && !pattern.matches(&file_name)
+            {
+                continue;
+            }
             stats.total_files.fetch_add(1, Ordering::Relaxed);
             grep_file(&entry.path(), config, output_tx, stats);
         }
@@ -226,7 +251,6 @@ pub fn grep_file(
         if sniffer_buffer[..bytes_read].contains(&0u8) {
             return; // Skip compiled binaries or media files
         }
-        // Seek back to the start using the underlying file handle
         if reader.seek(SeekFrom::Start(0)).is_err() {
             return;
         }
@@ -234,7 +258,8 @@ pub fn grep_file(
 
     // Process file line by line, reusing a single heap allocation
     let mut line = String::new();
-    let mut line_num = 0;
+    let mut line_num = 0usize;
+    let mut match_count = 0usize;
 
     while let Ok(bytes) = reader.read_line(&mut line) {
         if bytes == 0 {
@@ -242,20 +267,54 @@ pub fn grep_file(
         }
         line_num += 1;
 
-        let is_match = if config.ignore_case {
+        let line_matches = if config.ignore_case {
             line.to_lowercase().contains(&config.normalized_query)
         } else {
             line.contains(&config.query)
         };
 
-        if is_match {
+        // Apply -v inversion
+        let should_emit = if config.invert {
+            !line_matches
+        } else {
+            line_matches
+        };
+
+        if should_emit {
+            match_count += 1;
             stats.matched_lines.fetch_add(1, Ordering::Relaxed);
-            let _ = output_tx.send(MatchResult {
-                file_path: file_path.to_path_buf(),
-                line_num,
-                line_content: line.clone(),
-            });
+
+            if config.files_with_matches {
+                // -l: emit the file once and stop reading further
+                let _ = output_tx.send(MatchResult {
+                    file_path: file_path.to_path_buf(),
+                    line_num: 0,
+                    line_content: String::new(),
+                    count: None,
+                });
+                break;
+            } else if !config.count_per_file {
+                // Normal mode: emit each matching line
+                let _ = output_tx.send(MatchResult {
+                    file_path: file_path.to_path_buf(),
+                    line_num,
+                    line_content: line.clone(),
+                    count: None,
+                });
+            }
+            // -c mode: accumulate count, emit at end
         }
+
         line.clear();
+    }
+
+    // -c: emit one result per file with the total count
+    if config.count_per_file {
+        let _ = output_tx.send(MatchResult {
+            file_path: file_path.to_path_buf(),
+            line_num: 0,
+            line_content: String::new(),
+            count: Some(match_count),
+        });
     }
 }

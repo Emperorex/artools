@@ -67,36 +67,14 @@ pub struct MatchResult {
     pub count: Option<usize>,
 }
 
-/// Builds a `SearchConfig` from the given parameters.
-pub fn build_config(
-    query: String,
-    ignore_case: bool,
-    line_number: bool,
-    ignore_dirs: HashSet<String>,
-    debug: bool,
-    invert: bool,
-    files_with_matches: bool,
-    count_per_file: bool,
-    include_pattern: Option<Pattern>,
-) -> Arc<SearchConfig> {
-    let normalized_query = if ignore_case {
+/// Normalizes a query string for case-insensitive matching.
+/// Call this when constructing `SearchConfig` with `ignore_case: true`.
+pub fn normalize_query(query: &str, ignore_case: bool) -> String {
+    if ignore_case {
         query.to_lowercase()
     } else {
-        query.clone()
-    };
-
-    Arc::new(SearchConfig {
-        query,
-        normalized_query,
-        ignore_case,
-        line_number,
-        ignore_dirs,
-        debug,
-        invert,
-        files_with_matches,
-        count_per_file,
-        include_pattern,
-    })
+        query.to_string()
+    }
 }
 
 /// Runs a parallel grep across all text files under `root`,

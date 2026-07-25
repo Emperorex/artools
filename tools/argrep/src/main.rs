@@ -1,8 +1,14 @@
-use argrep::{DEFAULT_IGNORES, SearchStats, build_config, parallel_grep};
+use argrep::{DEFAULT_IGNORES, SearchConfig, SearchStats, normalize_query, parallel_grep};
 use clap::Parser;
 use colored::Colorize;
 use glob::Pattern;
-use std::{collections::HashSet, fs, path::PathBuf, sync::atomic::Ordering, time::Instant};
+use std::{
+    collections::HashSet,
+    fs,
+    path::PathBuf,
+    sync::{Arc, atomic::Ordering},
+    time::Instant,
+};
 
 /// CLI arguments for argrep
 #[derive(Parser, Debug)]
@@ -73,17 +79,18 @@ fn main() {
         None => None,
     };
 
-    let config = build_config(
-        args.query,
-        args.ignore_case,
-        args.line_number,
+    let config = Arc::new(SearchConfig {
+        normalized_query: normalize_query(&args.query, args.ignore_case),
+        query: args.query,
+        ignore_case: args.ignore_case,
+        line_number: args.line_number,
         ignore_dirs,
-        args.debug,
-        args.invert,
-        args.files_with_matches,
-        args.count_per_file,
+        debug: args.debug,
+        invert: args.invert,
+        files_with_matches: args.files_with_matches,
+        count_per_file: args.count_per_file,
         include_pattern,
-    );
+    });
 
     let stats = SearchStats::new();
     let start_time = Instant::now();

@@ -5,6 +5,7 @@ use glob::Pattern;
 use std::{
     collections::HashSet,
     fs,
+    io::{self, BufRead, IsTerminal},
     path::PathBuf,
     sync::{Arc, atomic::Ordering},
     time::Instant,
@@ -62,7 +63,6 @@ struct Args {
 fn main() {
     let args = Args::parse();
 
-    let root_path = fs::canonicalize(&args.path).unwrap_or_else(|_| PathBuf::from(&args.path));
     let ignore_dirs: HashSet<String> = DEFAULT_IGNORES.iter().map(|s| s.to_string()).collect();
 
     let include_pattern: Option<Pattern> = match &args.include {
@@ -95,41 +95,28 @@ fn main() {
     let stats = SearchStats::new();
     let start_time = Instant::now();
 
-    let line_number = config.line_number;
-    let query = config.query.clone();
-    let files_with_matches = config.files_with_matches;
-    let count_per_file = config.count_per_file;
+    // If stdin is a pipe (not a terminal), read from it directly instead of
+    // traversing the filesystem — mirrors grep behaviour with piped input.
+    if !io::stdin().is_terminal() {
+        grep_stdin(&config);
+    } else {
+        let root_path = fs::canonicalize(&args.path).unwrap_or_else(|_| PathBuf::from(&args.path));
 
-    parallel_grep(root_path, args.jobs, config, stats.clone(), move |result| {
-        if files_with_matches {
-            // -l: print only the file path
-            println!("{}", result.file_path.display().to_string().magenta());
-        } else if count_per_file {
-            // -c: print "filepath: N"
-            let count = result.count.unwrap_or(0);
-            println!(
-                "{}: {}",
-                result.file_path.display().to_string().magenta(),
-                count.to_string().green()
+        let line_number = config.line_number;
+        let query = config.query.clone();
+        let files_with_matches = config.files_with_matches;
+        let count_per_file = config.count_per_file;
+
+        parallel_grep(root_path, args.jobs, config, stats.clone(), move |result| {
+            print_result(
+                &result,
+                files_with_matches,
+                count_per_file,
+                line_number,
+                &query,
             );
-        } else {
-            // Normal / -v / -n mode: print matching lines
-            let prefix = if line_number {
-                format!(
-                    "{}:{}",
-                    result.file_path.display().to_string().magenta(),
-                    result.line_num.to_string().green()
-                )
-            } else {
-                result.file_path.display().to_string().magenta().to_string()
-            };
-
-            let highlighted = result
-                .line_content
-                .replace(&query, &query.red().bold().to_string());
-            println!("{}: {}", prefix, highlighted.trim_end());
-        }
-    });
+        });
+    }
 
     let duration = start_time.elapsed();
 
@@ -153,5 +140,90 @@ fn main() {
                 .bold()
         );
         eprintln!("Execution time:      {:.2?}", duration);
+    }
+}
+
+/// Reads lines from stdin and prints those matching the config query.
+/// Used when argrep is invoked as part of a pipeline: cmd | argrep "pattern"
+fn grep_stdin(config: &argrep::SearchConfig) {
+    let stdin = io::stdin();
+    let mut line_num = 0usize;
+    let mut match_count = 0usize;
+
+    for line in stdin.lock().lines().map_while(Result::ok) {
+        line_num += 1;
+
+        let line_matches = if config.ignore_case {
+            line.to_lowercase().contains(&config.normalized_query)
+        } else {
+            line.contains(&config.query)
+        };
+
+        let should_emit = if config.invert {
+            !line_matches
+        } else {
+            line_matches
+        };
+
+        if should_emit {
+            match_count += 1;
+
+            if config.count_per_file {
+                // accumulate — print after EOF
+            } else if config.files_with_matches {
+                // stdin has no filename — print "<stdin>" once then stop
+                println!("{}", "<stdin>".magenta());
+                break;
+            } else {
+                let highlighted =
+                    line.replace(&config.query, &config.query.red().bold().to_string());
+                if config.line_number {
+                    println!("{}:{}", line_num.to_string().green(), highlighted);
+                } else {
+                    println!("{}", highlighted);
+                }
+            }
+        }
+    }
+
+    if config.count_per_file {
+        println!(
+            "{}: {}",
+            "<stdin>".magenta(),
+            match_count.to_string().green()
+        );
+    }
+}
+
+/// Shared output formatter for parallel_grep results.
+fn print_result(
+    result: &argrep::MatchResult,
+    files_with_matches: bool,
+    count_per_file: bool,
+    line_number: bool,
+    query: &str,
+) {
+    if files_with_matches {
+        println!("{}", result.file_path.display().to_string().magenta());
+    } else if count_per_file {
+        println!(
+            "{}: {}",
+            result.file_path.display().to_string().magenta(),
+            result.count.unwrap_or(0).to_string().green()
+        );
+    } else {
+        let prefix = if line_number {
+            format!(
+                "{}:{}",
+                result.file_path.display().to_string().magenta(),
+                result.line_num.to_string().green()
+            )
+        } else {
+            result.file_path.display().to_string().magenta().to_string()
+        };
+        let highlighted = result
+            .line_content
+            .replace(query, &query.red().bold().to_string());
+        println!("{}: {}", prefix, highlighted.trim_end());
     }
 }

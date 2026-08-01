@@ -1,5 +1,10 @@
 # artools 🦀
 
+[![Lint](https://github.com/Emperorex/artools/actions/workflows/lint.yml/badge.svg)](https://github.com/Emperorex/artools/actions/workflows/lint.yml)
+[![Test](https://github.com/Emperorex/artools/actions/workflows/test.yml/badge.svg)](https://github.com/Emperorex/artools/actions/workflows/test.yml)
+[![Release](https://github.com/Emperorex/artools/actions/workflows/release_tool.yaml/badge.svg)](https://github.com/Emperorex/artools/actions/workflows/release_tool.yaml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://github.com/Emperorex/artools/blob/main/LICENSE.md)
+
 A collection of ultra-fast, reliable, and production-ready CLI utilities written in Rust to enhance filesystem navigation, auditing, and system operations.
 
 ## Repository Structure

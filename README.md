@@ -71,11 +71,16 @@ The compiled binaries will be located inside the global `target/release/` worksp
 
 ### One-line install (all tools)
 ```bash
+curl -fsSL https://artools.io/install.sh | bash
+```
+
+### One-line install (all tools) - using GitHub API
+```bash
 export GITHUB_TOKEN=github_pat_...
 curl -fsSL \
   -H "Authorization: token $GITHUB_TOKEN" \
   -H "Accept: application/vnd.github.v3.raw" \
-  "https://api.github.com/repos/Emperorex/artools/contents/install.sh" \
+  "https://api.github.com/repos/Emperorex/artools/contents/install-private.sh" \
   | bash
 ```
 

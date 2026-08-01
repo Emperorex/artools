@@ -1,0 +1,647 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>artools — Fast parallel CLI utilities in Rust</title>
+  <meta name="description" content="arfind, ardisk, and argrep — blazing-fast parallel alternatives to find, du, and grep written in Rust." />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600&family=Inter:wght@400;500;600&display=swap" rel="stylesheet" />
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --bg:        #0d1117;
+      --bg2:       #161b22;
+      --bg3:       #21262d;
+      --border:    #30363d;
+      --text:      #e6edf3;
+      --muted:     #7d8590;
+      --rust:      #e05d2a;
+      --rust-dim:  #7a3318;
+      --green:     #3fb950;
+      --blue:      #58a6ff;
+      --purple:    #bc8cff;
+      --yellow:    #d29922;
+      --mono:      'JetBrains Mono', monospace;
+      --sans:      'Inter', sans-serif;
+    }
+
+    html { scroll-behavior: smooth; }
+
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: var(--sans);
+      font-size: 16px;
+      line-height: 1.6;
+      -webkit-font-smoothing: antialiased;
+    }
+
+    /* ── NAV ── */
+    nav {
+      position: sticky;
+      top: 0;
+      z-index: 100;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 0 2rem;
+      height: 56px;
+      background: rgba(13,17,23,0.85);
+      backdrop-filter: blur(12px);
+      border-bottom: 1px solid var(--border);
+    }
+
+    .nav-logo {
+      font-family: var(--mono);
+      font-weight: 600;
+      font-size: 1.1rem;
+      color: var(--text);
+      text-decoration: none;
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+    }
+
+    .nav-logo .crab { font-size: 1.3rem; }
+
+    .nav-links {
+      display: flex;
+      gap: 1.5rem;
+      list-style: none;
+    }
+
+    .nav-links a {
+      color: var(--muted);
+      text-decoration: none;
+      font-size: 0.875rem;
+      transition: color 0.15s;
+    }
+
+    .nav-links a:hover { color: var(--text); }
+
+    .nav-github {
+      display: flex;
+      align-items: center;
+      gap: 0.4rem;
+      background: var(--bg3);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 0.35rem 0.75rem;
+      color: var(--text) !important;
+      font-size: 0.8rem;
+      text-decoration: none;
+      transition: background 0.15s, border-color 0.15s;
+    }
+
+    .nav-github:hover {
+      background: var(--border);
+      border-color: var(--muted);
+      color: var(--text) !important;
+    }
+
+    /* ── HERO ── */
+    .hero {
+      max-width: 760px;
+      margin: 0 auto;
+      padding: 6rem 2rem 4rem;
+      text-align: center;
+    }
+
+    .hero-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.4rem;
+      background: rgba(224,93,42,0.12);
+      border: 1px solid rgba(224,93,42,0.3);
+      border-radius: 999px;
+      padding: 0.25rem 0.75rem;
+      font-family: var(--mono);
+      font-size: 0.75rem;
+      color: var(--rust);
+      margin-bottom: 1.75rem;
+      letter-spacing: 0.04em;
+    }
+
+    h1 {
+      font-size: clamp(2.2rem, 5vw, 3.5rem);
+      font-weight: 600;
+      letter-spacing: -0.02em;
+      line-height: 1.15;
+      margin-bottom: 1.25rem;
+    }
+
+    h1 .ar { color: var(--rust); }
+
+    .hero-sub {
+      font-size: 1.1rem;
+      color: var(--muted);
+      max-width: 520px;
+      margin: 0 auto 2.5rem;
+      line-height: 1.7;
+    }
+
+    /* ── INSTALL BOX ── */
+    .install-box {
+      background: var(--bg2);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      overflow: hidden;
+      max-width: 620px;
+      margin: 0 auto 1rem;
+      text-align: left;
+    }
+
+    .install-box-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 0.6rem 1rem;
+      background: var(--bg3);
+      border-bottom: 1px solid var(--border);
+    }
+
+    .install-box-header span {
+      font-family: var(--mono);
+      font-size: 0.72rem;
+      color: var(--muted);
+      letter-spacing: 0.05em;
+      text-transform: uppercase;
+    }
+
+    .copy-btn {
+      background: none;
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      color: var(--muted);
+      cursor: pointer;
+      font-family: var(--mono);
+      font-size: 0.7rem;
+      padding: 0.2rem 0.5rem;
+      transition: color 0.15s, border-color 0.15s;
+      display: flex;
+      align-items: center;
+      gap: 0.3rem;
+    }
+
+    .copy-btn:hover { color: var(--text); border-color: var(--muted); }
+    .copy-btn.copied { color: var(--green); border-color: var(--green); }
+
+    .install-cmd {
+      font-family: var(--mono);
+      font-size: 0.9rem;
+      padding: 1.1rem 1.25rem;
+      color: var(--text);
+      white-space: nowrap;
+      overflow-x: auto;
+    }
+
+    .install-cmd .prompt { color: var(--muted); user-select: none; }
+    .install-cmd .cmd-curl { color: var(--blue); }
+    .install-cmd .cmd-url { color: var(--green); }
+    .install-cmd .cmd-pipe { color: var(--muted); }
+    .install-cmd .cmd-bash { color: var(--purple); }
+
+    .install-note {
+      font-size: 0.8rem;
+      color: var(--muted);
+      text-align: center;
+    }
+
+    .install-note a { color: var(--blue); text-decoration: none; }
+    .install-note a:hover { text-decoration: underline; }
+
+    /* ── PLATFORM BADGES ── */
+    .platforms {
+      display: flex;
+      justify-content: center;
+      gap: 0.75rem;
+      margin: 2rem 0 0;
+      flex-wrap: wrap;
+    }
+
+    .platform-badge {
+      display: flex;
+      align-items: center;
+      gap: 0.35rem;
+      background: var(--bg2);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 0.3rem 0.7rem;
+      font-size: 0.78rem;
+      color: var(--muted);
+    }
+
+    .platform-badge .dot {
+      width: 6px;
+      height: 6px;
+      border-radius: 50%;
+      background: var(--green);
+      flex-shrink: 0;
+    }
+
+    /* ── TOOLS SECTION ── */
+    .tools {
+      max-width: 900px;
+      margin: 5rem auto 0;
+      padding: 0 2rem;
+    }
+
+    .section-label {
+      font-family: var(--mono);
+      font-size: 0.72rem;
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+      color: var(--muted);
+      margin-bottom: 2rem;
+      display: flex;
+      align-items: center;
+      gap: 0.75rem;
+    }
+
+    .section-label::after {
+      content: '';
+      flex: 1;
+      height: 1px;
+      background: var(--border);
+    }
+
+    .tool-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+      gap: 1px;
+      background: var(--border);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      overflow: hidden;
+    }
+
+    .tool-card {
+      background: var(--bg);
+      padding: 1.75rem;
+      transition: background 0.15s;
+    }
+
+    .tool-card:hover { background: var(--bg2); }
+
+    .tool-card-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 0.75rem;
+    }
+
+    .tool-name {
+      font-family: var(--mono);
+      font-size: 1.05rem;
+      font-weight: 600;
+    }
+
+    .tool-name .ar { color: var(--rust); }
+
+    .tool-alt {
+      font-family: var(--mono);
+      font-size: 0.7rem;
+      color: var(--muted);
+      background: var(--bg3);
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      padding: 0.15rem 0.4rem;
+    }
+
+    .tool-desc {
+      font-size: 0.875rem;
+      color: var(--muted);
+      line-height: 1.6;
+      margin-bottom: 1.25rem;
+    }
+
+    .tool-flags {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.4rem;
+    }
+
+    .flag {
+      font-family: var(--mono);
+      font-size: 0.72rem;
+      background: var(--bg3);
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      padding: 0.15rem 0.45rem;
+      color: var(--text);
+    }
+
+    /* ── USAGE SECTION ── */
+    .usage {
+      max-width: 900px;
+      margin: 5rem auto 0;
+      padding: 0 2rem;
+    }
+
+    .usage-grid {
+      display: flex;
+      flex-direction: column;
+      gap: 1.25rem;
+    }
+
+    .usage-block {
+      background: var(--bg2);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      overflow: hidden;
+    }
+
+    .usage-block-header {
+      display: flex;
+      align-items: center;
+      gap: 0.6rem;
+      padding: 0.6rem 1rem;
+      background: var(--bg3);
+      border-bottom: 1px solid var(--border);
+    }
+
+    .usage-tool-tag {
+      font-family: var(--mono);
+      font-size: 0.72rem;
+      font-weight: 600;
+      padding: 0.15rem 0.45rem;
+      border-radius: 4px;
+    }
+
+    .tag-arfind  { background: rgba(88,166,255,0.15);  color: var(--blue); }
+    .tag-ardisk  { background: rgba(188,140,255,0.15); color: var(--purple); }
+    .tag-argrep  { background: rgba(63,185,80,0.15);   color: var(--green); }
+
+    .usage-block-title {
+      font-size: 0.78rem;
+      color: var(--muted);
+    }
+
+    .usage-code {
+      font-family: var(--mono);
+      font-size: 0.82rem;
+      padding: 1rem 1.25rem;
+      line-height: 2;
+      overflow-x: auto;
+    }
+
+    .uc-comment { color: var(--muted); }
+    .uc-cmd     { color: var(--blue); }
+    .uc-flag    { color: var(--yellow); }
+    .uc-arg     { color: var(--green); }
+    .uc-pipe    { color: var(--muted); }
+
+    /* ── FOOTER ── */
+    footer {
+      max-width: 900px;
+      margin: 5rem auto 0;
+      padding: 2rem 2rem 3rem;
+      border-top: 1px solid var(--border);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      flex-wrap: gap;
+      gap: 1rem;
+    }
+
+    .footer-left {
+      font-family: var(--mono);
+      font-size: 0.78rem;
+      color: var(--muted);
+    }
+
+    .footer-left .rust-heart { color: var(--rust); }
+
+    .footer-links {
+      display: flex;
+      gap: 1.25rem;
+      list-style: none;
+    }
+
+    .footer-links a {
+      color: var(--muted);
+      font-size: 0.78rem;
+      text-decoration: none;
+      transition: color 0.15s;
+    }
+
+    .footer-links a:hover { color: var(--text); }
+
+    /* ── RESPONSIVE ── */
+    @media (max-width: 600px) {
+      nav { padding: 0 1rem; }
+      .nav-links { display: none; }
+      .hero { padding: 4rem 1.25rem 3rem; }
+      .install-cmd { font-size: 0.78rem; }
+      .tools, .usage { padding: 0 1.25rem; }
+      footer { flex-direction: column; align-items: flex-start; padding: 1.5rem 1.25rem 2.5rem; }
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      *, *::before, *::after { transition: none !important; }
+    }
+  </style>
+</head>
+<body>
+
+<!-- NAV -->
+<nav>
+  <a href="/" class="nav-logo">
+    <span class="crab">🦀</span>artools
+  </a>
+  <ul class="nav-links">
+    <li><a href="#tools">Tools</a></li>
+    <li><a href="#usage">Usage</a></li>
+    <li><a href="https://github.com/Emperorex/artools/releases">Releases</a></li>
+  </ul>
+  <a href="https://github.com/Emperorex/artools" class="nav-links nav-github">
+    <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
+    GitHub
+  </a>
+</nav>
+
+<!-- HERO -->
+<section class="hero">
+  <div class="hero-badge">Written in Rust · Open Source · MIT License</div>
+
+  <h1>Fast parallel CLI tools<br>for the <span class="ar">terminal</span></h1>
+
+  <p class="hero-sub">
+    Drop-in alternatives to <code style="font-family:var(--mono);color:var(--text);background:var(--bg3);padding:.1rem .3rem;border-radius:3px">find</code>,
+    <code style="font-family:var(--mono);color:var(--text);background:var(--bg3);padding:.1rem .3rem;border-radius:3px">du</code>, and
+    <code style="font-family:var(--mono);color:var(--text);background:var(--bg3);padding:.1rem .3rem;border-radius:3px">grep</code>
+    built with parallel worker threads for speed on modern multi-core hardware.
+  </p>
+
+  <div class="install-box">
+    <div class="install-box-header">
+      <span>Install all tools</span>
+      <button class="copy-btn" id="copy-btn" onclick="copyInstall()">
+        <svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor"><path d="M0 6.75C0 5.784.784 5 1.75 5h1.5a.75.75 0 010 1.5h-1.5a.25.25 0 00-.25.25v7.5c0 .138.112.25.25.25h7.5a.25.25 0 00.25-.25v-1.5a.75.75 0 011.5 0v1.5A1.75 1.75 0 019.25 16h-7.5A1.75 1.75 0 010 14.25v-7.5z"/><path d="M5 1.75C5 .784 5.784 0 6.75 0h7.5C15.216 0 16 .784 16 1.75v7.5A1.75 1.75 0 0114.25 11h-7.5A1.75 1.75 0 015 9.25v-7.5zm1.75-.25a.25.25 0 00-.25.25v7.5c0 .138.112.25.25.25h7.5a.25.25 0 00.25-.25v-7.5a.25.25 0 00-.25-.25h-7.5z"/></svg>
+        Copy
+      </button>
+    </div>
+    <div class="install-cmd">
+      <span class="prompt">$ </span><span class="cmd-curl">curl</span> -fsSL <span class="cmd-url">https://artools.io/install.sh</span> <span class="cmd-pipe">|</span> <span class="cmd-bash">bash</span>
+    </div>
+  </div>
+
+  <p class="install-note">
+    macOS &amp; Linux · x86_64 &amp; arm64 ·
+    <a href="https://github.com/Emperorex/artools/blob/main/install.sh">view script</a>
+  </p>
+
+  <div class="platforms">
+    <div class="platform-badge"><span class="dot"></span>macOS arm64</div>
+    <div class="platform-badge"><span class="dot"></span>macOS x86_64</div>
+    <div class="platform-badge"><span class="dot"></span>Linux x86_64 (musl)</div>
+  </div>
+</section>
+
+<!-- TOOLS -->
+<section class="tools" id="tools">
+  <div class="section-label">Tools</div>
+
+  <div class="tool-grid">
+    <div class="tool-card">
+      <div class="tool-card-header">
+        <span class="tool-name"><span class="ar">ar</span>find</span>
+        <span class="tool-alt">replaces find</span>
+      </div>
+      <p class="tool-desc">Parallel directory traversal with glob pattern matching, type filtering, and smart defaults that skip <code style="font-family:var(--mono);font-size:0.78rem">.git</code> and <code style="font-family:var(--mono);font-size:0.78rem">node_modules</code> automatically.</p>
+      <div class="tool-flags">
+        <span class="flag">--name</span>
+        <span class="flag">-t f/d/l</span>
+        <span class="flag">--size</span>
+        <span class="flag">--empty</span>
+        <span class="flag">--max-depth</span>
+        <span class="flag">--count</span>
+        <span class="flag">-H hidden</span>
+      </div>
+    </div>
+
+    <div class="tool-card">
+      <div class="tool-card-header">
+        <span class="tool-name"><span class="ar">ar</span>disk</span>
+        <span class="tool-alt">replaces du</span>
+      </div>
+      <p class="tool-desc">Bottom-up parallel disk usage analysis. Shows the heaviest directories first with accurate rollup sizes using a single-pass DP algorithm.</p>
+      <div class="tool-flags">
+        <span class="flag">--top N</span>
+        <span class="flag">--max-depth</span>
+        <span class="flag">--threshold</span>
+        <span class="flag">--include</span>
+        <span class="flag">--summarize</span>
+      </div>
+    </div>
+
+    <div class="tool-card">
+      <div class="tool-card-header">
+        <span class="tool-name"><span class="ar">ar</span>grep</span>
+        <span class="tool-alt">replaces grep</span>
+      </div>
+      <p class="tool-desc">Parallel text search across file trees. Skips binaries automatically, supports piped stdin, and works as a drop-in for common grep workflows.</p>
+      <div class="tool-flags">
+        <span class="flag">-i case</span>
+        <span class="flag">-n lines</span>
+        <span class="flag">-v invert</span>
+        <span class="flag">-l files</span>
+        <span class="flag">-c count</span>
+        <span class="flag">--include</span>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- USAGE -->
+<section class="usage" id="usage">
+  <div class="section-label">Usage</div>
+
+  <div class="usage-grid">
+
+    <div class="usage-block">
+      <div class="usage-block-header">
+        <span class="usage-tool-tag tag-arfind">arfind</span>
+        <span class="usage-block-title">Find files by name, type, or size</span>
+      </div>
+      <div class="usage-code">
+<span class="uc-comment"># Find all Rust source files</span>
+<br><span class="uc-cmd">arfind</span> <span class="uc-arg">.</span> <span class="uc-flag">--name</span> <span class="uc-arg">"*.rs"</span>
+<br>
+<br><span class="uc-comment"># Find files larger than 100MB</span>
+<br><span class="uc-cmd">arfind</span> <span class="uc-arg">.</span> <span class="uc-flag">-t</span> <span class="uc-arg">f</span> <span class="uc-flag">--size</span> <span class="uc-arg">100MB</span>
+<br>
+<br><span class="uc-comment"># Count empty files in a directory</span>
+<br><span class="uc-cmd">arfind</span> <span class="uc-arg">.</span> <span class="uc-flag">-t</span> <span class="uc-arg">f</span> <span class="uc-flag">--empty</span> <span class="uc-flag">--count</span>
+      </div>
+    </div>
+
+    <div class="usage-block">
+      <div class="usage-block-header">
+        <span class="usage-tool-tag tag-ardisk">ardisk</span>
+        <span class="usage-block-title">Analyze disk usage</span>
+      </div>
+      <div class="usage-code">
+<span class="uc-comment"># Top 10 heaviest directories</span>
+<br><span class="uc-cmd">ardisk</span> <span class="uc-arg">.</span> <span class="uc-flag">--top</span> <span class="uc-arg">10</span>
+<br>
+<br><span class="uc-comment"># How much space do .mp4 files use?</span>
+<br><span class="uc-cmd">ardisk</span> <span class="uc-arg">~/Movies</span> <span class="uc-flag">--include</span> <span class="uc-arg">"*.mp4"</span> <span class="uc-flag">--summarize</span>
+<br>
+<br><span class="uc-comment"># Show only directories over 1GB</span>
+<br><span class="uc-cmd">ardisk</span> <span class="uc-arg">/</span> <span class="uc-flag">--threshold</span> <span class="uc-arg">1GB</span>
+      </div>
+    </div>
+
+    <div class="usage-block">
+      <div class="usage-block-header">
+        <span class="usage-tool-tag tag-argrep">argrep</span>
+        <span class="usage-block-title">Search text in files or stdin</span>
+      </div>
+      <div class="usage-code">
+<span class="uc-comment"># Search Rust files case-insensitively</span>
+<br><span class="uc-cmd">argrep</span> <span class="uc-arg">"todo"</span> <span class="uc-arg">.</span> <span class="uc-flag">--include</span> <span class="uc-arg">"*.rs"</span> <span class="uc-flag">-i</span> <span class="uc-flag">-n</span>
+<br>
+<br><span class="uc-comment"># List files containing errors</span>
+<br><span class="uc-cmd">argrep</span> <span class="uc-arg">"error"</span> <span class="uc-arg">/var/log</span> <span class="uc-flag">-l</span>
+<br>
+<br><span class="uc-comment"># Use as a grep replacement in pipes</span>
+<br><span class="uc-cmd">ps aux</span> <span class="uc-pipe">|</span> <span class="uc-cmd">argrep</span> <span class="uc-arg">"rust"</span>
+      </div>
+    </div>
+
+  </div>
+</section>
+
+<!-- FOOTER -->
+<footer>
+  <div class="footer-left">
+    Built with <span class="rust-heart">♥</span> in Rust · MIT License · © 2026 Artem Shemet
+  </div>
+  <ul class="footer-links">
+    <li><a href="https://github.com/Emperorex/artools">GitHub</a></li>
+    <li><a href="https://github.com/Emperorex/artools/releases">Releases</a></li>
+    <li><a href="https://github.com/Emperorex/artools/blob/main/LICENSE.md">License</a></li>
+  </ul>
+</footer>
+
+<script>
+  function copyInstall() {
+    const cmd = 'curl -fsSL https://artools.io/install.sh | bash';
+    navigator.clipboard.writeText(cmd).then(() => {
+      const btn = document.getElementById('copy-btn');
+      btn.classList.add('copied');
+      btn.innerHTML = '<svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor"><path d="M13.78 4.22a.75.75 0 010 1.06l-7.25 7.25a.75.75 0 01-1.06 0L2.22 9.28a.75.75 0 011.06-1.06L6 10.94l6.72-6.72a.75.75 0 011.06 0z"/></svg> Copied!';
+      setTimeout(() => {
+        btn.classList.remove('copied');
+        btn.innerHTML = '<svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor"><path d="M0 6.75C0 5.784.784 5 1.75 5h1.5a.75.75 0 010 1.5h-1.5a.25.25 0 00-.25.25v7.5c0 .138.112.25.25.25h7.5a.25.25 0 00.25-.25v-1.5a.75.75 0 011.5 0v1.5A1.75 1.75 0 019.25 16h-7.5A1.75 1.75 0 010 14.25v-7.5z"/><path d="M5 1.75C5 .784 5.784 0 6.75 0h7.5C15.216 0 16 .784 16 1.75v7.5A1.75 1.75 0 0114.25 11h-7.5A1.75 1.75 0 015 9.25v-7.5zm1.75-.25a.25.25 0 00-.25.25v7.5c0 .138.112.25.25.25h7.5a.25.25 0 00.25-.25v-7.5a.25.25 0 00-.25-.25h-7.5z"/></svg> Copy';
+      }, 2000);
+    });
+  }
+</script>
+
+</body>
+</html>

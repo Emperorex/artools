@@ -18,6 +18,34 @@ success() { echo -e "${GREEN}[artools]${NC} $*"; }
 warn()    { echo -e "${YELLOW}[artools]${NC} $*"; }
 error()   { echo -e "${RED}[artools]${NC} $*" >&2; exit 1; }
 
+# ── Token handling ────────────────────────────────────────────────────────────
+# Reads GITHUB_TOKEN from the environment.
+# Fine-grained token needs: Contents (read) + Metadata (read)
+check_token() {
+    if [ -z "${GITHUB_TOKEN:-}" ]; then
+        error "GITHUB_TOKEN is not set.
+
+Generate a fine-grained personal access token at:
+  https://github.com/settings/tokens
+
+Required permissions (fine-grained):
+  - Contents: Read-only
+  - Metadata: Read-only
+
+Then export it before running:
+  export GITHUB_TOKEN=github_pat_...
+  $(basename "$0")"
+    fi
+}
+
+# Wrapper: injects auth header into every curl call
+gh_curl() {
+    curl -fsSL \
+        -H "Authorization: token ${GITHUB_TOKEN}" \
+        -H "Accept: application/vnd.github.v3+json" \
+        "$@"
+}
+
 # ── OS / arch detection ───────────────────────────────────────────────────────
 detect_platform() {
     local os arch
@@ -47,7 +75,7 @@ check_deps() {
 # ── Resolve the latest release tag for a given tool ──────────────────────────
 latest_tag() {
     local tool="$1"
-    curl -fsSL "https://api.github.com/repos/${REPO}/releases" \
+    gh_curl "https://api.github.com/repos/${REPO}/releases" \
         | jq -r '.[].tag_name' \
         | grep "^${tool}-v" \
         | head -n1
@@ -68,13 +96,14 @@ install_tool() {
     local version="${tag#"${tool}-v"}"
     local binary_name="${tool}-${platform}"
 
-    # Public repo: use browser_download_url for direct unauthenticated download
-    local download_url
-    download_url=$(curl -fsSL "https://api.github.com/repos/${REPO}/releases/tags/${tag}" \
+    # Private repo release assets must be downloaded via the API, not direct URL.
+    # The API returns a redirect to a pre-signed S3 URL — -L follows it.
+    local asset_url
+    asset_url=$(gh_curl "https://api.github.com/repos/${REPO}/releases/tags/${tag}" \
         | jq -r --arg name "$binary_name" \
-            '.assets[] | select(.name == $name) | .browser_download_url')
+            '.assets[] | select(.name == $name) | .url')
 
-    if [ -z "$download_url" ]; then
+    if [ -z "$asset_url" ]; then
         error "Asset '$binary_name' not found in release '$tag'."
     fi
 
@@ -85,7 +114,13 @@ install_tool() {
 
     info "Installing $tool v${version} (${platform})..."
 
-    curl -fsSL --progress-bar "$download_url" -o "$tmp_file"
+    # Must use application/octet-stream Accept header to get the actual binary,
+    # not the JSON metadata envelope that the API returns by default.
+    curl -fsSL -L \
+        -H "Authorization: token ${GITHUB_TOKEN}" \
+        -H "Accept: application/octet-stream" \
+        "$asset_url" \
+        -o "$tmp_file"
 
     chmod +x "$tmp_file"
 
@@ -137,6 +172,7 @@ main() {
     echo -e "${CYAN}╚══════════════════════════════╝${NC}"
     echo ""
 
+    check_token
     check_deps
 
     local platform

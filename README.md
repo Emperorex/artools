@@ -66,8 +66,6 @@ The compiled binaries will be located inside the global `target/release/` worksp
 ### Requirements
 - macOS or Linux (x86_64 or arm64)
 - `curl` and `jq` available in PATH
-- A GitHub personal access token with **Contents: Read** and **Metadata: Read** permissions
-  → Generate one at https://github.com/settings/tokens
 
 ### One-line install (all tools)
 ```bash
@@ -94,7 +92,7 @@ curl -fsSL \
 INSTALL_DIR=~/.local/bin ... | bash
 ```
 ---
-### ⚠️ Apple Gatekeeper Note (macOS Users)
+### ⚠️ Apple Gatekeeper Note (macOS Users) - skip if installing via install.sh
 When downloading pre-compiled binaries from GitHub Releases on Apple Silicon (M1/M2/M3), macOS may block execution with a malware warning. To bypass this, clear the browser quarantine attribute via your terminal:
 
 ```bash

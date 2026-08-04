@@ -26,16 +26,16 @@ argrep [OPTIONS] QUERY [PATH]
 
 ## Options
 
-| Flag | Short | Default | Description |
-|---|---|---|---|
-| `--ignore-case` | `-i` | — | Case-insensitive matching |
-| `--line-number` | `-n` | — | Show line numbers in output |
-| `--invert` | `-v` | — | Print lines that do NOT match the query |
-| `--files-with-matches` | `-l` | — | Print only filenames of files containing a match |
-| `--count` | `-c` | — | Print count of matching lines per file |
-| `--include PATTERN` | — | — | Only search files matching this glob (e.g. `"*.rs"`, `"*.log"`) |
-| `--jobs N` | `-j` | `4` | Number of parallel worker threads |
-| `--debug` | `-d` | — | Print scan statistics and errors to stderr |
+| Flag                   | Short | Default | Description                                                     |
+|------------------------|-------|---------|-----------------------------------------------------------------|
+| `--ignore-case`        | `-i`  | —       | Case-insensitive matching                                       |
+| `--line-number`        | `-n`  | —       | Show line numbers in output                                     |
+| `--invert`             | `-v`  | —       | Print lines that do NOT match the query                         |
+| `--files-with-matches` | `-l`  | —       | Print only filenames of files containing a match                |
+| `--count`              | `-c`  | —       | Print count of matching lines per file                          |
+| `--include PATTERN`    | —     | —       | Only search files matching this glob (e.g. `"*.rs"`, `"*.log"`) |
+| `--jobs N`             | `-j`  | `4`     | Number of parallel worker threads                               |
+| `--debug`              | `-d`  | —       | Print scan statistics and errors to stderr                      |
 
 ## Default ignores
 
@@ -126,18 +126,18 @@ argrep "deprecated" /large/project -j 8 --include "*.py" -n
 
 ## Comparison with `grep`
 
-| Task | `grep` | `argrep` |
-|---|---|---|
-| Recursive search | `grep -r "query" .` | `argrep "query" .` |
-| Case-insensitive | `grep -ri "query" .` | `argrep "query" . -i` |
-| Show line numbers | `grep -rn "query" .` | `argrep "query" . -n` |
-| Files only | `grep -rl "query" .` | `argrep "query" . -l` |
-| Count per file | `grep -rc "query" .` | `argrep "query" . -c` |
-| Invert match | `grep -rv "query" .` | `argrep "query" . -v` |
-| File type filter | `grep -r --include="*.rs"` | `argrep "query" . --include "*.rs"` |
-| Skip binary files | `grep -rI "query" .` | automatic |
-| Skip node_modules | `grep -r --exclude-dir=node_modules` | automatic |
-| Pipe from stdin | `cmd \| grep "query"` | `cmd \| argrep "query"` |
+| Task              | `grep`                               | `argrep`                            |
+|-------------------|--------------------------------------|-------------------------------------|
+| Recursive search  | `grep -r "query" .`                  | `argrep "query" .`                  |
+| Case-insensitive  | `grep -ri "query" .`                 | `argrep "query" . -i`               |
+| Show line numbers | `grep -rn "query" .`                 | `argrep "query" . -n`               |
+| Files only        | `grep -rl "query" .`                 | `argrep "query" . -l`               |
+| Count per file    | `grep -rc "query" .`                 | `argrep "query" . -c`               |
+| Invert match      | `grep -rv "query" .`                 | `argrep "query" . -v`               |
+| File type filter  | `grep -r --include="*.rs"`           | `argrep "query" . --include "*.rs"` |
+| Skip binary files | `grep -rI "query" .`                 | automatic                           |
+| Skip node_modules | `grep -r --exclude-dir=node_modules` | automatic                           |
+| Pipe from stdin   | `cmd \| grep "query"`                | `cmd \| argrep "query"`             |
 
 ## Key advantages over `grep`
 
@@ -149,7 +149,7 @@ argrep "deprecated" /large/project -j 8 --include "*.py" -n
 
 ## Exit codes
 
-| Code | Meaning |
-|---|---|
-| `0` | Success (even if no matches found) |
-| `1` | Invalid arguments or configuration error |
+| Code | Meaning                                  |
+|------|------------------------------------------|
+| `0`  | Success (even if no matches found)       |
+| `1`  | Invalid arguments or configuration error |

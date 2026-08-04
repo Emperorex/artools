@@ -24,18 +24,18 @@ arfind [OPTIONS] [PATH]
 
 ## Options
 
-| Flag | Short | Default | Description |
-|---|---|---|---|
-| `--name PATTERN` | `-n` | `*` | Glob pattern to match filenames (e.g. `"*.rs"`, `"Cargo.*"`) |
-| `--type TYPE` | `-t` | — | Filter by entry type: `f` (file), `d` (directory), `l` (symlink) |
-| `--size SIZE` | — | — | Filter by file size: `100MB` or `+100MB` (larger than), `-1KB` (smaller than) |
-| `--empty` | `-e` | — | Match only empty files (0 bytes) or empty directories (no children) |
-| `--count` | `-c` | — | Print total match count instead of paths |
-| `--max-depth N` | — | unlimited | Maximum directory depth to recurse into |
-| `--ignore DIR` | — | — | Additional directory names to skip (repeatable) |
-| `--hidden` | `-H` | — | Include hidden files and directories (dotfiles) |
-| `--jobs N` | `-j` | `4` | Number of parallel worker threads |
-| `--debug` | `-d` | — | Print scan statistics and errors to stderr |
+| Flag             | Short | Default   | Description                                                                   |
+|------------------|-------|-----------|-------------------------------------------------------------------------------|
+| `--name PATTERN` | `-n`  | `*`       | Glob pattern to match filenames (e.g. `"*.rs"`, `"Cargo.*"`)                  |
+| `--type TYPE`    | `-t`  | —         | Filter by entry type: `f` (file), `d` (directory), `l` (symlink)              |
+| `--size SIZE`    | —     | —         | Filter by file size: `100MB` or `+100MB` (larger than), `-1KB` (smaller than) |
+| `--empty`        | `-e`  | —         | Match only empty files (0 bytes) or empty directories (no children)           |
+| `--count`        | `-c`  | —         | Print total match count instead of paths                                      |
+| `--max-depth N`  | —     | unlimited | Maximum directory depth to recurse into                                       |
+| `--ignore DIR`   | —     | —         | Additional directory names to skip (repeatable)                               |
+| `--hidden`       | `-H`  | —         | Include hidden files and directories (dotfiles)                               |
+| `--jobs N`       | `-j`  | `4`       | Number of parallel worker threads                                             |
+| `--debug`        | `-d`  | —         | Print scan statistics and errors to stderr                                    |
 
 ## Default ignores
 
@@ -78,15 +78,15 @@ arfind /home -j 8 --name "*.txt"
 
 ## Comparison with `find`
 
-| Task | `find` | `arfind` |
-|---|---|---|
-| Find by name | `find . -name "*.rs"` | `arfind . --name "*.rs"` |
-| Find files only | `find . -type f` | `arfind . -t f` |
-| Limit depth | `find . -maxdepth 2` | `arfind . --max-depth 2` |
-| Skip directory | `find . -not -path '*/node_modules/*'` | automatic |
-| Count results | `find . \| wc -l` | `arfind . --count` |
-| Find empty files | `find . -empty -type f` | `arfind . -t f --empty` |
-| Find large files | `find . -size +100M` | `arfind . --size +100MB` |
+| Task             | `find`                                 | `arfind`                 |
+|------------------|----------------------------------------|--------------------------|
+| Find by name     | `find . -name "*.rs"`                  | `arfind . --name "*.rs"` |
+| Find files only  | `find . -type f`                       | `arfind . -t f`          |
+| Limit depth      | `find . -maxdepth 2`                   | `arfind . --max-depth 2` |
+| Skip directory   | `find . -not -path '*/node_modules/*'` | automatic                |
+| Count results    | `find . \| wc -l`                      | `arfind . --count`       |
+| Find empty files | `find . -empty -type f`                | `arfind . -t f --empty`  |
+| Find large files | `find . -size +100M`                   | `arfind . --size +100MB` |
 
 ## Performance
 
@@ -94,7 +94,7 @@ arfind /home -j 8 --name "*.txt"
 
 ## Exit codes
 
-| Code | Meaning |
-|---|---|
-| `0` | Success (even if no matches found) |
-| `1` | Invalid arguments or configuration error |
+| Code | Meaning                                  |
+|------|------------------------------------------|
+| `0`  | Success (even if no matches found)       |
+| `1`  | Invalid arguments or configuration error |

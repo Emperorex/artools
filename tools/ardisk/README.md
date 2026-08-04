@@ -24,15 +24,15 @@ ardisk [OPTIONS] [PATH]
 
 ## Options
 
-| Flag | Short | Default | Description |
-|---|---|---|---|
-| `--top N` | `-n` | `20` | Number of top directories to display |
-| `--max-depth N` | — | unlimited | Maximum depth of directories to display in the report |
-| `--threshold SIZE` | — | — | Only show directories larger than this size (e.g. `100MB`, `1GB`) |
-| `--summarize` | `-s` | — | Print only the grand total for the root directory |
-| `--include PATTERN` | — | — | Only count files matching this glob pattern (e.g. `"*.rs"`, `"*.mp4"`) |
-| `--jobs N` | `-j` | `4` | Number of parallel worker threads |
-| `--debug` | `-d` | — | Print scan statistics and errors to stderr |
+| Flag                | Short | Default   | Description                                                            |
+|---------------------|-------|-----------|------------------------------------------------------------------------|
+| `--top N`           | `-n`  | `20`      | Number of top directories to display                                   |
+| `--max-depth N`     | —     | unlimited | Maximum depth of directories to display in the report                  |
+| `--threshold SIZE`  | —     | —         | Only show directories larger than this size (e.g. `100MB`, `1GB`)      |
+| `--summarize`       | `-s`  | —         | Print only the grand total for the root directory                      |
+| `--include PATTERN` | —     | —         | Only count files matching this glob pattern (e.g. `"*.rs"`, `"*.mp4"`) |
+| `--jobs N`          | `-j`  | `4`       | Number of parallel worker threads                                      |
+| `--debug`           | `-d`  | —         | Print scan statistics and errors to stderr                             |
 
 ## Size units
 
@@ -90,14 +90,14 @@ ardisk / -j 8 --top 20
 
 ## Comparison with `du`
 
-| Task | `du` | `ardisk` |
-|---|---|---|
-| Top heaviest dirs | `du -sh * \| sort -rh \| head -10` | `ardisk . --top 10` |
-| Limit depth | `du -d 1` | `ardisk . --max-depth 1` |
-| Total only | `du -sh .` | `ardisk . --summarize` |
-| Filter by size | not supported | `ardisk . --threshold 1GB` |
-| Filter by file type | not supported | `ardisk . --include "*.mp4"` |
-| Skip node_modules | `--exclude=node_modules` | automatic |
+| Task                | `du`                               | `ardisk`                     |
+|---------------------|------------------------------------|------------------------------|
+| Top heaviest dirs   | `du -sh * \| sort -rh \| head -10` | `ardisk . --top 10`          |
+| Limit depth         | `du -d 1`                          | `ardisk . --max-depth 1`     |
+| Total only          | `du -sh .`                         | `ardisk . --summarize`       |
+| Filter by size      | not supported                      | `ardisk . --threshold 1GB`   |
+| Filter by file type | not supported                      | `ardisk . --include "*.mp4"` |
+| Skip node_modules   | `--exclude=node_modules`           | automatic                    |
 
 ## Key advantages over `du`
 
@@ -108,7 +108,7 @@ ardisk / -j 8 --top 20
 
 ## Exit codes
 
-| Code | Meaning |
-|---|---|
-| `0` | Success |
-| `1` | Invalid arguments or configuration error |
+| Code | Meaning                                  |
+|------|------------------------------------------|
+| `0`  | Success                                  |
+| `1`  | Invalid arguments or configuration error |

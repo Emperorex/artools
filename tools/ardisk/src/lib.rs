@@ -30,6 +30,9 @@ pub struct ScanConfig {
     /// directory sizes. Directories themselves are always traversed regardless.
     pub include_pattern: Option<Pattern>,
     pub debug: bool,
+    /// When true, use logical file size (metadata.len()) matching du -sh.
+    /// When false (default), use physical block allocation (blocks * 512).
+    pub apparent_size: bool,
 }
 
 /// Builds a `ScanConfig` from the given parameters.
@@ -37,11 +40,13 @@ pub fn build_config(
     ignore_dirs: HashSet<String>,
     include_pattern: Option<Pattern>,
     debug: bool,
+    apparent_size: bool,
 ) -> Arc<ScanConfig> {
     Arc::new(ScanConfig {
         ignore_dirs,
         include_pattern,
         debug,
+        apparent_size,
     })
 }
 
@@ -149,7 +154,13 @@ pub fn scan_directory(
             if let Ok(metadata) = entry.metadata() {
                 #[cfg(unix)]
                 {
-                    local_dir_size += metadata.blocks() * 512;
+                    if config.apparent_size {
+                        // Logical size — matches du -sh on macOS/Linux
+                        local_dir_size += metadata.len();
+                    } else {
+                        // Physical block allocation — actual on-disk usage
+                        local_dir_size += metadata.blocks() * 512;
+                    }
                 }
                 #[cfg(not(unix))]
                 {

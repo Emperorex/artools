@@ -22,7 +22,7 @@ fn make_tree(files: &[&str]) -> (TempDir, PathBuf) {
 
 fn default_config(debug: bool) -> std::sync::Arc<ardisk::ScanConfig> {
     let ignore_dirs: HashSet<String> = DEFAULT_IGNORES.iter().map(|s| s.to_string()).collect();
-    build_config(ignore_dirs, None, debug)
+    build_config(ignore_dirs, None, debug, false)
 }
 
 fn run(root: PathBuf) -> std::collections::HashMap<PathBuf, u64> {
@@ -133,7 +133,7 @@ fn custom_ignore_excludes_specified_dir() {
 
     let mut ignore_dirs: HashSet<String> = DEFAULT_IGNORES.iter().map(|s| s.to_string()).collect();
     ignore_dirs.insert("vendor".to_string());
-    let config = build_config(ignore_dirs, None, false);
+    let config = build_config(ignore_dirs, None, false, false);
 
     let raw = parallel_scan(root.clone(), 4, config);
     let sizes = aggregate_sizes(&raw, &root);
@@ -243,7 +243,12 @@ fn format_size_zero() {
 
 fn config_with_include(pattern: &str) -> std::sync::Arc<ardisk::ScanConfig> {
     let ignore_dirs: HashSet<String> = DEFAULT_IGNORES.iter().map(|s| s.to_string()).collect();
-    build_config(ignore_dirs, Some(Pattern::new(pattern).unwrap()), false)
+    build_config(
+        ignore_dirs,
+        Some(Pattern::new(pattern).unwrap()),
+        false,
+        false,
+    )
 }
 
 #[test]
@@ -278,6 +283,7 @@ fn include_pattern_rolls_up_correctly_to_root() {
     let config_all = build_config(
         DEFAULT_IGNORES.iter().map(|s| s.to_string()).collect(),
         None,
+        false,
         false,
     );
     let config_rs = config_with_include("*.rs");
@@ -321,6 +327,7 @@ fn include_pattern_wildcard_matches_all_files() {
         DEFAULT_IGNORES.iter().map(|s| s.to_string()).collect(),
         None,
         false,
+        false,
     );
 
     let raw_wildcard = parallel_scan(root.clone(), 4, config_wildcard);
@@ -333,5 +340,75 @@ fn include_pattern_wildcard_matches_all_files() {
     assert_eq!(
         sizes_wildcard[&root], sizes_none[&root],
         "'*' include should match all files, same as no filter"
+    );
+}
+
+// ── apparent_size ─────────────────────────────────────────────────────────────
+
+#[test]
+fn apparent_size_uses_logical_file_length() {
+    let (_dir, root) = make_tree(&["file.txt"]);
+
+    // apparent_size=true uses metadata.len() (logical size = 5 bytes)
+    let config_apparent = build_config(
+        DEFAULT_IGNORES.iter().map(|s| s.to_string()).collect(),
+        None,
+        false,
+        true, // apparent_size
+    );
+
+    let raw = parallel_scan(root.clone(), 4, config_apparent);
+
+    // File content is b"hello" = 5 bytes — logical size must be exactly 5
+    assert_eq!(
+        raw[&root], 5,
+        "apparent size should equal logical file length"
+    );
+}
+
+#[test]
+fn apparent_size_false_uses_block_allocation() {
+    let (_dir, root) = make_tree(&["file.txt"]);
+
+    let config_blocks = build_config(
+        DEFAULT_IGNORES.iter().map(|s| s.to_string()).collect(),
+        None,
+        false,
+        false, // apparent_size = false → blocks * 512
+    );
+
+    let raw = parallel_scan(root.clone(), 4, config_blocks);
+
+    // Block allocation is always >= logical size
+    assert!(raw[&root] >= 5, "block size should be >= logical size");
+}
+
+#[test]
+fn apparent_size_produces_smaller_or_equal_size_than_blocks() {
+    let (_dir, root) = make_tree(&["a.txt", "b.txt", "sub/c.txt"]);
+
+    let config_apparent = build_config(
+        DEFAULT_IGNORES.iter().map(|s| s.to_string()).collect(),
+        None,
+        false,
+        true,
+    );
+    let config_blocks = build_config(
+        DEFAULT_IGNORES.iter().map(|s| s.to_string()).collect(),
+        None,
+        false,
+        false,
+    );
+
+    let raw_apparent = parallel_scan(root.clone(), 4, config_apparent);
+    let raw_blocks = parallel_scan(root.clone(), 4, config_blocks);
+
+    let agg_apparent = aggregate_sizes(&raw_apparent, &root);
+    let agg_blocks = aggregate_sizes(&raw_blocks, &root);
+
+    // Logical size is always <= physical block allocation
+    assert!(
+        agg_apparent[&root] <= agg_blocks[&root],
+        "apparent size should be <= block allocation"
     );
 }

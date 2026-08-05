@@ -31,6 +31,7 @@ ardisk [OPTIONS] [PATH]
 | `--threshold SIZE`  | —     | —         | Only show directories larger than this size (e.g. `100MB`, `1GB`)      |
 | `--summarize`       | `-s`  | —         | Print only the grand total for the root directory                      |
 | `--include PATTERN` | —     | —         | Only count files matching this glob pattern (e.g. `"*.rs"`, `"*.mp4"`) |
+| `--apparent-size`   | —     | —         | Use logical file sizes instead of block allocation — matches `du -sh`  |
 | `--jobs N`          | `-j`  | `4`       | Number of parallel worker threads                                      |
 | `--debug`           | `-d`  | —         | Print scan statistics and errors to stderr                             |
 
@@ -53,9 +54,15 @@ The following directories are always skipped:
 
 ## How sizing works
 
-On **macOS and Linux**, `ardisk` uses `blocks * 512` to report physical on-disk space (matching `du` behavior). On **Windows**, it uses the logical file length. Symlinks are never counted to prevent double-counting.
+`ardisk` supports two sizing modes:
 
-Sizes are rolled up bottom-up in a single pass — parent directories always include the full recursive size of all children.
+**Physical block allocation** (default) — uses `blocks * 512` on macOS/Linux, reporting actual on-disk space including filesystem overhead. This reflects what the filesystem has reserved for each file, which can be larger than the file's logical size due to block rounding.
+
+**Logical file size** (`--apparent-size`) — uses `metadata.len()`, the logical byte count of each file. This matches `du -sh` output on macOS and Linux and is useful when you want to compare file sizes as reported by the OS rather than physical disk consumption.
+
+On **Windows**, logical file size is always used regardless of the flag.
+
+Sizes are rolled up bottom-up in a single pass — parent directories always include the full recursive size of all children. Symlinks are never counted to prevent double-counting.
 
 ## Examples
 
@@ -84,26 +91,34 @@ ardisk . --max-depth 1
 # Quick total size of a directory
 ardisk /var/log -s
 
+# Match du -sh output exactly
+ardisk . --summarize --apparent-size
+
+# Top directories using logical sizes
+ardisk . --top 10 --apparent-size
+
 # Use more threads on large filesystems
 ardisk / -j 8 --top 20
 ```
 
 ## Comparison with `du`
 
-| Task                | `du`                               | `ardisk`                     |
-|---------------------|------------------------------------|------------------------------|
-| Top heaviest dirs   | `du -sh * \| sort -rh \| head -10` | `ardisk . --top 10`          |
-| Limit depth         | `du -d 1`                          | `ardisk . --max-depth 1`     |
-| Total only          | `du -sh .`                         | `ardisk . --summarize`       |
-| Filter by size      | not supported                      | `ardisk . --threshold 1GB`   |
-| Filter by file type | not supported                      | `ardisk . --include "*.mp4"` |
-| Skip node_modules   | `--exclude=node_modules`           | automatic                    |
+| Task                | `du`                               | `ardisk`                                    |
+|---------------------|------------------------------------|---------------------------------------------|
+| Top heaviest dirs   | `du -sh * \| sort -rh \| head -10` | `ardisk . --top 10`                         |
+| Limit depth         | `du -d 1`                          | `ardisk . --max-depth 1`                    |
+| Total only          | `du -sh .`                         | `ardisk . --summarize --apparent-size`      |
+| Physical total      | `du -s .`                          | `ardisk . --summarize`                      |
+| Filter by size      | not supported                      | `ardisk . --threshold 1GB`                  |
+| Filter by file type | not supported                      | `ardisk . --include "*.mp4"`                |
+| Skip node_modules   | `--exclude=node_modules`           | automatic                                   |
 
 ## Key advantages over `du`
 
 - `--top N` — show heaviest N directories directly, no need to pipe to `sort | head`
 - `--max-depth` filters **display only** — the full tree is always scanned so parent sizes remain accurate (unlike `du -d N` which stops scanning at depth N)
 - `--include PATTERN` — calculate space used by specific file types per directory
+- `--apparent-size` — switch between physical block allocation and logical file sizes to match `du -sh` exactly
 - Parallel scanning — significantly faster on large trees with NVMe storage
 
 ## Exit codes

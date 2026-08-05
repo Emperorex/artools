@@ -83,6 +83,11 @@ struct Args {
     /// Print only the grand total for the root directory
     #[arg(short = 's', long)]
     summarize: bool,
+
+    /// Use logical file sizes instead of physical block allocation.
+    /// Matches the output of du -sh on macOS and Linux.
+    #[arg(long)]
+    apparent_size: bool,
 }
 
 fn main() {
@@ -105,7 +110,7 @@ fn main() {
         None => None,
     };
 
-    let config = build_config(ignore_dirs, include_pattern, args.debug);
+    let config = build_config(ignore_dirs, include_pattern, args.debug, args.apparent_size);
 
     let start_time = Instant::now();
 

@@ -243,7 +243,12 @@ fn format_size_zero() {
 
 fn config_with_include(pattern: &str) -> std::sync::Arc<ardisk::ScanConfig> {
     let ignore_dirs: HashSet<String> = DEFAULT_IGNORES.iter().map(|s| s.to_string()).collect();
-    build_config(ignore_dirs, Some(Pattern::new(pattern).unwrap()), false, false)
+    build_config(
+        ignore_dirs,
+        Some(Pattern::new(pattern).unwrap()),
+        false,
+        false,
+    )
 }
 
 #[test]
@@ -355,7 +360,10 @@ fn apparent_size_uses_logical_file_length() {
     let raw = parallel_scan(root.clone(), 4, config_apparent);
 
     // File content is b"hello" = 5 bytes — logical size must be exactly 5
-    assert_eq!(raw[&root], 5, "apparent size should equal logical file length");
+    assert_eq!(
+        raw[&root], 5,
+        "apparent size should equal logical file length"
+    );
 }
 
 #[test]
@@ -381,18 +389,22 @@ fn apparent_size_produces_smaller_or_equal_size_than_blocks() {
 
     let config_apparent = build_config(
         DEFAULT_IGNORES.iter().map(|s| s.to_string()).collect(),
-        None, false, true,
+        None,
+        false,
+        true,
     );
     let config_blocks = build_config(
         DEFAULT_IGNORES.iter().map(|s| s.to_string()).collect(),
-        None, false, false,
+        None,
+        false,
+        false,
     );
 
     let raw_apparent = parallel_scan(root.clone(), 4, config_apparent);
-    let raw_blocks   = parallel_scan(root.clone(), 4, config_blocks);
+    let raw_blocks = parallel_scan(root.clone(), 4, config_blocks);
 
     let agg_apparent = aggregate_sizes(&raw_apparent, &root);
-    let agg_blocks   = aggregate_sizes(&raw_blocks, &root);
+    let agg_blocks = aggregate_sizes(&raw_blocks, &root);
 
     // Logical size is always <= physical block allocation
     assert!(

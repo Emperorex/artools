@@ -134,7 +134,9 @@ fn main() {
         None => None,
     };
 
-    println!("\n{}", "=== Top Directories ===".yellow().bold());
+    if args.debug {
+        println!("{}", "=== Top Directories ===".yellow().bold());
+    }
 
     // --summarize: print only the root total and exit
     if args.summarize {

@@ -112,13 +112,18 @@ pub fn scan_directory(
     active_tasks: &AtomicUsize,
     raw_sizes: &Mutex<HashMap<PathBuf, u64>>,
 ) {
-    let entries = match fs::read_dir(dir_path) {
-        Ok(entries) => entries,
-        Err(err) => {
-            if config.debug {
-                eprintln!("{}: {}: {}", "ardisk".red(), dir_path.display(), err);
+    // Retry on EINTR — macOS interrupts syscalls with signals from system
+    // processes (Spotlight, sandboxd, etc.). Safe to retry unconditionally.
+    let entries = loop {
+        match fs::read_dir(dir_path) {
+            Ok(entries) => break entries,
+            Err(err) if err.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(err) => {
+                if config.debug {
+                    eprintln!("{}: {}: {}", "ardisk".red(), dir_path.display(), err);
+                }
+                return;
             }
-            return;
         }
     };
 

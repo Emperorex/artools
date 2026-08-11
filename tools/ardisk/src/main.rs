@@ -115,10 +115,11 @@ fn main() {
     let start_time = Instant::now();
 
     // Phase 1: Parallel file scanning
-    let raw_sizes = parallel_scan(target_path.clone(), args.jobs, config);
+    let (raw_sizes, raw_content_sizes) = parallel_scan(target_path.clone(), args.jobs, config);
 
     // Phase 2: Aggregation and rollup from bottom to top
     let aggregated_sizes = aggregate_sizes(&raw_sizes, &target_path);
+    let aggregated_content = aggregate_sizes(&raw_content_sizes, &target_path);
 
     let duration = start_time.elapsed();
 
@@ -153,10 +154,15 @@ fn main() {
                 break;
             }
 
-            // Suppress zero-size directories when --include is active —
-            // they contain no matching files and only add noise to the output
-            if threshold_bytes.is_none() && args.include.is_some() && **size == 0 {
-                continue;
+            // Suppress directories with no matching file content when
+            // --include is active — they only add noise to the output.
+            // We check the content map (file bytes only, no inode cost)
+            // so that directory inode costs don't defeat the suppression.
+            if threshold_bytes.is_none() && args.include.is_some() {
+                let content = aggregated_content.get(*path).copied().unwrap_or(0);
+                if content == 0 {
+                    continue;
+                }
             }
 
             // Apply --threshold filter

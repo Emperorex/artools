@@ -20,6 +20,19 @@ fn make_tree(files: &[&str]) -> (TempDir, PathBuf) {
     (dir, root)
 }
 
+/// Returns the on-disk block cost of a directory's own inode (not its contents),
+/// mirroring how `scan_directory` now accounts for the directory entry itself.
+#[cfg(unix)]
+fn dir_self_size(path: &PathBuf) -> u64 {
+    use std::os::unix::fs::MetadataExt;
+    fs::metadata(path).map(|m| m.blocks() * 512).unwrap_or(0)
+}
+
+#[cfg(not(unix))]
+fn dir_self_size(path: &PathBuf) -> u64 {
+    fs::metadata(path).map(|m| m.len()).unwrap_or(0)
+}
+
 fn default_config(debug: bool) -> std::sync::Arc<ardisk::ScanConfig> {
     let ignore_dirs: HashSet<String> = DEFAULT_IGNORES.iter().map(|s| s.to_string()).collect();
     build_config(ignore_dirs, None, debug, false)
@@ -27,7 +40,7 @@ fn default_config(debug: bool) -> std::sync::Arc<ardisk::ScanConfig> {
 
 fn run(root: PathBuf) -> std::collections::HashMap<PathBuf, u64> {
     let config = default_config(false);
-    let raw = parallel_scan(root.clone(), 4, config);
+    let (raw, _content) = parallel_scan(root.clone(), 4, config);
     aggregate_sizes(&raw, &root)
 }
 
@@ -63,17 +76,21 @@ fn nested_child_size_rolls_up_to_parent() {
 }
 
 #[test]
-fn empty_directory_has_zero_size() {
+fn empty_directory_has_only_its_own_inode_size() {
     let (_dir, root) = make_tree(&[]);
     // create an explicit empty subdirectory
     let empty_sub = root.join("empty");
     fs::create_dir_all(&empty_sub).unwrap();
 
     let config = default_config(false);
-    let raw = parallel_scan(root.clone(), 4, config);
+    let (raw, _content) = parallel_scan(root.clone(), 4, config);
     let sizes = aggregate_sizes(&raw, &root);
 
-    assert_eq!(sizes.get(&empty_sub).copied().unwrap_or(0), 0);
+    let expected_self_size = dir_self_size(&empty_sub);
+    assert_eq!(
+        sizes.get(&empty_sub).copied().unwrap_or(0),
+        expected_self_size
+    );
 }
 
 #[test]
@@ -117,7 +134,7 @@ fn deeply_nested_tree_rolls_up_correctly() {
 fn ignored_directory_is_excluded_from_scan() {
     let (_dir, root) = make_tree(&["node_modules/package/index.js", "src/main.rs"]);
     let config = default_config(false);
-    let raw = parallel_scan(root.clone(), 4, config);
+    let (raw, _content) = parallel_scan(root.clone(), 4, config);
     let sizes = aggregate_sizes(&raw, &root);
 
     let node_modules = root.join("node_modules");
@@ -135,7 +152,7 @@ fn custom_ignore_excludes_specified_dir() {
     ignore_dirs.insert("vendor".to_string());
     let config = build_config(ignore_dirs, None, false, false);
 
-    let raw = parallel_scan(root.clone(), 4, config);
+    let (raw, _content) = parallel_scan(root.clone(), 4, config);
     let sizes = aggregate_sizes(&raw, &root);
 
     assert!(!sizes.contains_key(&root.join("vendor")));
@@ -153,12 +170,11 @@ fn symlinked_files_are_not_counted() {
     symlink(root.join("real.txt"), root.join("link.txt")).unwrap();
 
     let config = default_config(false);
-    let raw = parallel_scan(root.clone(), 4, config);
+    let (raw, _content) = parallel_scan(root.clone(), 4, config);
 
-    // raw size of root should equal one file, not two
+    // raw size of root should equal one file's blocks plus the root
+    // directory's own inode cost, not two files' worth of blocks
     let root_raw = raw[&root];
-    // A single 5-byte file occupies at least 1 block (512 bytes on most FS)
-    // Confirm it's not double-counted by checking raw == single file blocks
     let single_file_size = fs::metadata(root.join("real.txt"))
         .map(|m| {
             #[cfg(unix)]
@@ -168,8 +184,9 @@ fn symlinked_files_are_not_counted() {
             }
         })
         .unwrap_or(0);
+    let expected = single_file_size + dir_self_size(&root);
 
-    assert_eq!(root_raw, single_file_size, "symlink should not be counted");
+    assert_eq!(root_raw, expected, "symlink should not be counted");
 }
 
 // ── parallel_scan raw output ──────────────────────────────────────────────────
@@ -178,7 +195,7 @@ fn symlinked_files_are_not_counted() {
 fn raw_scan_produces_entry_for_every_directory() {
     let (_dir, root) = make_tree(&["a/b/c.txt", "d/e.txt"]);
     let config = default_config(false);
-    let raw = parallel_scan(root.clone(), 4, config);
+    let (raw, _content) = parallel_scan(root.clone(), 4, config);
 
     assert!(raw.contains_key(&root));
     assert!(raw.contains_key(&root.join("a")));
@@ -192,7 +209,7 @@ fn multiple_workers_produce_same_aggregated_sizes() {
 
     let run_with = |workers: usize| {
         let config = default_config(false);
-        let raw = parallel_scan(root.clone(), workers, config);
+        let (raw, _content) = parallel_scan(root.clone(), workers, config);
         let agg = aggregate_sizes(&raw, &root);
         // Return just the root size as a stable scalar to compare
         agg[&root]
@@ -261,19 +278,24 @@ fn include_pattern_counts_only_matching_files() {
     ]);
 
     let config = config_with_include("*.rs");
-    let raw = parallel_scan(root.clone(), 4, config);
+    let (raw, _content) = parallel_scan(root.clone(), 4, config);
     let sizes = aggregate_sizes(&raw, &root);
 
     let src = root.join("src");
     let docs = root.join("docs");
 
-    // src has two .rs files — must have non-zero size
-    assert!(
-        sizes[&src] > 0,
-        "src should have non-zero size for .rs files"
+    // docs has no matching .rs files, so its size should be exactly its own
+    // directory inode cost — no file contribution on top of that.
+    let docs_baseline = dir_self_size(&docs);
+    assert_eq!(
+        sizes[&docs], docs_baseline,
+        "docs should equal only its own inode size — no .rs files"
     );
-    // docs has no .rs files — must be zero
-    assert_eq!(sizes[&docs], 0, "docs should be 0 — no .rs files");
+    // src has two .rs files, so it must exceed the same kind of baseline
+    assert!(
+        sizes[&src] > dir_self_size(&src),
+        "src should have extra size from matching .rs files"
+    );
 }
 
 #[test]
@@ -288,8 +310,8 @@ fn include_pattern_rolls_up_correctly_to_root() {
     );
     let config_rs = config_with_include("*.rs");
 
-    let raw_all = parallel_scan(root.clone(), 4, config_all);
-    let raw_rs = parallel_scan(root.clone(), 4, config_rs);
+    let (raw_all, _content_all) = parallel_scan(root.clone(), 4, config_all);
+    let (raw_rs, _content_rs) = parallel_scan(root.clone(), 4, config_rs);
 
     let sizes_all = aggregate_sizes(&raw_all, &root);
     let sizes_rs = aggregate_sizes(&raw_rs, &root);
@@ -305,17 +327,34 @@ fn include_pattern_rolls_up_correctly_to_root() {
 }
 
 #[test]
-fn include_pattern_no_match_gives_zero_everywhere() {
+fn include_pattern_no_match_gives_directory_self_size_only() {
     let (_dir, root) = make_tree(&["a/file.txt", "b/other.md"]);
 
     let config = config_with_include("*.rs");
-    let raw = parallel_scan(root.clone(), 4, config);
+    let (raw, _content) = parallel_scan(root.clone(), 4, config);
     let sizes = aggregate_sizes(&raw, &root);
 
-    // No .rs files exist — every directory should be zero
-    for (_, size) in &sizes {
-        assert_eq!(*size, 0, "all dirs should be 0 when no files match");
-    }
+    // No .rs files exist, so no directory should carry file contribution —
+    // but each leaf directory still carries its own inode cost, and every
+    // ancestor rolls up its descendants' inode costs too.
+    let a = root.join("a");
+    let b = root.join("b");
+
+    assert_eq!(
+        sizes[&a],
+        dir_self_size(&a),
+        "a should equal only its own inode size — no .rs files"
+    );
+    assert_eq!(
+        sizes[&b],
+        dir_self_size(&b),
+        "b should equal only its own inode size — no .rs files"
+    );
+    assert_eq!(
+        sizes[&root],
+        dir_self_size(&root) + dir_self_size(&a) + dir_self_size(&b),
+        "root should roll up only inode costs, no file bytes"
+    );
 }
 
 #[test]
@@ -330,8 +369,8 @@ fn include_pattern_wildcard_matches_all_files() {
         false,
     );
 
-    let raw_wildcard = parallel_scan(root.clone(), 4, config_wildcard);
-    let raw_none = parallel_scan(root.clone(), 4, config_none);
+    let (raw_wildcard, _content_wildcard) = parallel_scan(root.clone(), 4, config_wildcard);
+    let (raw_none, _content_none) = parallel_scan(root.clone(), 4, config_none);
 
     let sizes_wildcard = aggregate_sizes(&raw_wildcard, &root);
     let sizes_none = aggregate_sizes(&raw_none, &root);
@@ -340,6 +379,49 @@ fn include_pattern_wildcard_matches_all_files() {
     assert_eq!(
         sizes_wildcard[&root], sizes_none[&root],
         "'*' include should match all files, same as no filter"
+    );
+}
+
+// ── include suppression with inode costs ──────────────────────────────────────
+
+#[test]
+fn include_suppression_works_with_inode_costs() {
+    // Regression test: after adding directory inode costs, every directory
+    // has non-zero total size. The content map must still report 0 for
+    // directories that have no matching files so main.rs can suppress them.
+    let (_dir, root) = make_tree(&[
+        "src/main.rs",
+        "src/lib.rs",
+        "docs/guide.md",
+        "assets/logo.png",
+    ]);
+
+    let config = config_with_include("*.rs");
+    let (raw, content) = parallel_scan(root.clone(), 4, config);
+    let agg_total = aggregate_sizes(&raw, &root);
+    let agg_content = aggregate_sizes(&content, &root);
+
+    let docs = root.join("docs");
+    let assets = root.join("assets");
+    let src = root.join("src");
+
+    // docs and assets have NO .rs files:
+    // content size must be 0 — this is what main.rs checks for suppression.
+    // (total size may or may not be 0 depending on filesystem inode accounting)
+    assert_eq!(
+        agg_content[&docs], 0,
+        "docs content should be 0 — no .rs files"
+    );
+    assert_eq!(
+        agg_content[&assets], 0,
+        "assets content should be 0 — no .rs files"
+    );
+
+    // src has .rs files: both total and content must be > 0
+    assert!(agg_total[&src] > 0, "src total should be non-zero");
+    assert!(
+        agg_content[&src] > 0,
+        "src content should be non-zero — has .rs files"
     );
 }
 
@@ -357,12 +439,15 @@ fn apparent_size_uses_logical_file_length() {
         true, // apparent_size
     );
 
-    let raw = parallel_scan(root.clone(), 4, config_apparent);
+    let (raw, _content) = parallel_scan(root.clone(), 4, config_apparent);
 
-    // File content is b"hello" = 5 bytes — logical size must be exactly 5
+    // File content is b"hello" = 5 bytes. Root's raw size also includes the
+    // root directory's own logical (apparent) size
+    let root_dir_apparent_size = fs::metadata(&root).map(|m| m.len()).unwrap_or(0);
     assert_eq!(
-        raw[&root], 5,
-        "apparent size should equal logical file length"
+        raw[&root],
+        5 + root_dir_apparent_size,
+        "apparent size should equal logical file length plus root dir's own size"
     );
 }
 
@@ -377,7 +462,7 @@ fn apparent_size_false_uses_block_allocation() {
         false, // apparent_size = false → blocks * 512
     );
 
-    let raw = parallel_scan(root.clone(), 4, config_blocks);
+    let (raw, _content) = parallel_scan(root.clone(), 4, config_blocks);
 
     // Block allocation is always >= logical size
     assert!(raw[&root] >= 5, "block size should be >= logical size");
@@ -400,8 +485,8 @@ fn apparent_size_produces_smaller_or_equal_size_than_blocks() {
         false,
     );
 
-    let raw_apparent = parallel_scan(root.clone(), 4, config_apparent);
-    let raw_blocks = parallel_scan(root.clone(), 4, config_blocks);
+    let (raw_apparent, _content_apparent) = parallel_scan(root.clone(), 4, config_apparent);
+    let (raw_blocks, _content_blocks) = parallel_scan(root.clone(), 4, config_blocks);
 
     let agg_apparent = aggregate_sizes(&raw_apparent, &root);
     let agg_blocks = aggregate_sizes(&raw_blocks, &root);

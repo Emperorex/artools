@@ -23,9 +23,9 @@ struct Args {
     #[arg(required = true)]
     query: String,
 
-    /// Root directory to start the search
-    #[arg(default_value = ".")]
-    path: String,
+    /// Root directory or file to start the search
+    #[arg()]
+    path: Option<String>,
 
     /// Case-insensitive search
     #[arg(short = 'i', long)]
@@ -58,6 +58,18 @@ struct Args {
     /// Only search files whose names match this glob (e.g. "*.rs", "*.log")
     #[arg(long)]
     include: Option<String>,
+
+    /// Show NUM lines of leading context before matching lines
+    #[arg(short = 'B', long = "before-context")]
+    before_context: Option<usize>,
+
+    /// Show NUM lines of trailing context after matching lines
+    #[arg(short = 'A', long = "after-context")]
+    after_context: Option<usize>,
+
+    /// Show NUM lines of leading and trailing context around matching lines
+    #[arg(short = 'C', long = "context")]
+    context: Option<usize>,
 }
 
 fn main() {
@@ -79,6 +91,9 @@ fn main() {
         None => None,
     };
 
+    let before_context = args.before_context.or(args.context).unwrap_or(0);
+    let after_context = args.after_context.or(args.context).unwrap_or(0);
+
     let config = Arc::new(SearchConfig {
         normalized_query: normalize_query(&args.query, args.ignore_case),
         query: args.query,
@@ -90,17 +105,24 @@ fn main() {
         files_with_matches: args.files_with_matches,
         count_per_file: args.count_per_file,
         include_pattern,
+        before_context,
+        after_context,
     });
 
     let stats = SearchStats::new();
     let start_time = Instant::now();
 
-    // If stdin is a pipe (not a terminal), read from it directly instead of
-    // traversing the filesystem — mirrors grep behaviour with piped input.
-    if !io::stdin().is_terminal() {
+    let use_stdin = match &args.path {
+        Some(p) if p == "-" => true,
+        Some(_) => false,
+        None => !io::stdin().is_terminal(),
+    };
+
+    if use_stdin {
         grep_stdin(&config);
     } else {
-        let root_path = fs::canonicalize(&args.path).unwrap_or_else(|_| PathBuf::from(&args.path));
+        let raw_path = args.path.as_deref().unwrap_or(".");
+        let root_path = fs::canonicalize(raw_path).unwrap_or_else(|_| PathBuf::from(raw_path));
 
         let line_number = config.line_number;
         let query = config.query.clone();
@@ -150,6 +172,16 @@ fn grep_stdin(config: &argrep::SearchConfig) {
     let mut line_num = 0usize;
     let mut match_count = 0usize;
 
+    let before_ctx = config.before_context;
+    let after_ctx = config.after_context;
+    let has_context = before_ctx > 0 || after_ctx > 0;
+
+    let mut before_buffer: std::collections::VecDeque<(usize, String)> =
+        std::collections::VecDeque::with_capacity(before_ctx);
+    let mut after_remaining = 0usize;
+    let mut last_printed_line = 0usize;
+    let mut has_printed_anything = false;
+
     for line in stdin.lock().lines().map_while(Result::ok) {
         line_num += 1;
 
@@ -175,13 +207,46 @@ fn grep_stdin(config: &argrep::SearchConfig) {
                 println!("{}", "<stdin>".magenta());
                 break;
             } else {
-                let highlighted =
-                    line.replace(&config.query, &config.query.red().bold().to_string());
-                if config.line_number {
-                    println!("{}:{}", line_num.to_string().green(), highlighted);
-                } else {
-                    println!("{}", highlighted);
+                if has_context {
+                    let first_line_to_print = if let Some((b_num, _)) = before_buffer.front() {
+                        std::cmp::min(*b_num, line_num)
+                    } else {
+                        line_num
+                    };
+
+                    if has_printed_anything && first_line_to_print > last_printed_line + 1 {
+                        println!("{}", "--".cyan());
+                    }
+
+                    while let Some((b_num, b_content)) = before_buffer.pop_front() {
+                        if b_num > last_printed_line {
+                            print_stdin_line(&b_content, b_num, true, config);
+                            last_printed_line = b_num;
+                        }
+                    }
                 }
+
+                print_stdin_line(&line, line_num, false, config);
+                last_printed_line = line_num;
+                has_printed_anything = true;
+                after_remaining = after_ctx;
+
+                if before_ctx > 0 {
+                    before_buffer.push_back((line_num, line.clone()));
+                }
+            }
+        } else if has_context && !config.count_per_file && !config.files_with_matches {
+            if after_remaining > 0 {
+                print_stdin_line(&line, line_num, true, config);
+                last_printed_line = line_num;
+                after_remaining -= 1;
+            }
+
+            if before_ctx > 0 {
+                if before_buffer.len() == before_ctx {
+                    before_buffer.pop_front();
+                }
+                before_buffer.push_back((line_num, line.clone()));
             }
         }
     }
@@ -195,6 +260,27 @@ fn grep_stdin(config: &argrep::SearchConfig) {
     }
 }
 
+fn print_stdin_line(line: &str, line_num: usize, is_context: bool, config: &argrep::SearchConfig) {
+    if is_context {
+        if config.line_number {
+            println!("{}-{}", line_num.to_string().green(), line.trim_end());
+        } else {
+            println!("{}", line.trim_end());
+        }
+    } else {
+        let highlighted = line.replace(&config.query, &config.query.red().bold().to_string());
+        if config.line_number {
+            println!(
+                "{}:{}",
+                line_num.to_string().green(),
+                highlighted.trim_end()
+            );
+        } else {
+            println!("{}", highlighted.trim_end());
+        }
+    }
+}
+
 /// Shared output formatter for parallel_grep results.
 fn print_result(
     result: &argrep::MatchResult,
@@ -203,6 +289,11 @@ fn print_result(
     line_number: bool,
     query: &str,
 ) {
+    if result.is_separator {
+        println!("{}", "--".cyan());
+        return;
+    }
+
     if files_with_matches {
         println!("{}", result.file_path.display().to_string().magenta());
     } else if count_per_file {
@@ -212,18 +303,28 @@ fn print_result(
             result.count.unwrap_or(0).to_string().green()
         );
     } else {
+        let sep = if result.is_context { "-" } else { ":" };
         let prefix = if line_number {
             format!(
-                "{}:{}",
+                "{}{}{}",
                 result.file_path.display().to_string().magenta(),
+                sep,
                 result.line_num.to_string().green()
             )
         } else {
             result.file_path.display().to_string().magenta().to_string()
         };
-        let highlighted = result
-            .line_content
-            .replace(query, &query.red().bold().to_string());
-        println!("{}: {}", prefix, highlighted.trim_end());
+
+        let content = if result.is_context {
+            result.line_content.trim_end().to_string()
+        } else {
+            result
+                .line_content
+                .replace(query, &query.red().bold().to_string())
+                .trim_end()
+                .to_string()
+        };
+
+        println!("{}{}{}", prefix, sep, content);
     }
 }

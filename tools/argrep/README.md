@@ -30,6 +30,9 @@ argrep [OPTIONS] QUERY [PATH]
 |------------------------|-------|---------|-----------------------------------------------------------------|
 | `--ignore-case`        | `-i`  | —       | Case-insensitive matching                                       |
 | `--line-number`        | `-n`  | —       | Show line numbers in output                                     |
+| `--before-context NUM` | `-B`  | —       | Show NUM lines of leading context before matches                |
+| `--after-context NUM`  | `-A`  | —       | Show NUM lines of trailing context after matches                |
+| `--context NUM`        | `-C`  | —       | Show NUM lines of leading and trailing context around matches   |
 | `--invert`             | `-v`  | —       | Print lines that do NOT match the query                         |
 | `--files-with-matches` | `-l`  | —       | Print only filenames of files containing a match                |
 | `--count`              | `-c`  | —       | Print count of matching lines per file                          |
@@ -131,6 +134,7 @@ argrep "deprecated" /large/project -j 8 --include "*.py" -n
 | Recursive search  | `grep -r "query" .`                  | `argrep "query" .`                  |
 | Case-insensitive  | `grep -ri "query" .`                 | `argrep "query" . -i`               |
 | Show line numbers | `grep -rn "query" .`                 | `argrep "query" . -n`               |
+| Context lines     | `grep -C 2 "query" .`                | `argrep "query" . -C 2`             |
 | Files only        | `grep -rl "query" .`                 | `argrep "query" . -l`               |
 | Count per file    | `grep -rc "query" .`                 | `argrep "query" . -c`               |
 | Invert match      | `grep -rv "query" .`                 | `argrep "query" . -v`               |

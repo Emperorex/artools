@@ -38,6 +38,8 @@ fn default_config(query: &str, ignore_case: bool) -> std::sync::Arc<argrep::Sear
         files_with_matches: false,
         count_per_file: false,
         include_pattern: None,
+        before_context: 0,
+        after_context: 0,
     })
 }
 
@@ -216,6 +218,8 @@ fn custom_ignore_dir_is_excluded() {
         files_with_matches: false,
         count_per_file: false,
         include_pattern: None,
+        before_context: 0,
+        after_context: 0,
     });
     let stats = SearchStats::new();
     let results: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
@@ -258,6 +262,8 @@ fn stats_counts_are_accurate() {
         files_with_matches: false,
         count_per_file: false,
         include_pattern: None,
+        before_context: 0,
+        after_context: 0,
     });
     let stats = SearchStats::new();
     let stats_clone = stats.clone();
@@ -294,6 +300,8 @@ fn multiple_workers_find_same_matches_as_single_worker() {
             files_with_matches: false,
             count_per_file: false,
             include_pattern: None,
+            before_context: 0,
+            after_context: 0,
         });
         let results: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
         let r = Arc::clone(&results);
@@ -358,6 +366,8 @@ fn invert_returns_non_matching_lines() {
         files_with_matches: false,
         count_per_file: false,
         include_pattern: None,
+        before_context: 0,
+        after_context: 0,
     });
     let results: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
     let r = Arc::clone(&results);
@@ -387,6 +397,8 @@ fn invert_with_no_matches_returns_all_lines() {
         files_with_matches: false,
         count_per_file: false,
         include_pattern: None,
+        before_context: 0,
+        after_context: 0,
     });
     let results: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
     let r = Arc::clone(&results);
@@ -422,6 +434,8 @@ fn files_with_matches_returns_only_filenames() {
         files_with_matches: true,
         count_per_file: false,
         include_pattern: None,
+        before_context: 0,
+        after_context: 0,
     });
     let results: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
     let r = Arc::clone(&results);
@@ -456,6 +470,8 @@ fn files_with_matches_emits_each_file_once() {
         files_with_matches: true,
         count_per_file: false,
         include_pattern: None,
+        before_context: 0,
+        after_context: 0,
     });
     let results: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
     let r = Arc::clone(&results);
@@ -497,6 +513,8 @@ fn count_per_file_returns_correct_counts() {
         files_with_matches: false,
         count_per_file: true,
         include_pattern: None,
+        before_context: 0,
+        after_context: 0,
     });
     let results: Arc<Mutex<Vec<(String, usize)>>> = Arc::new(Mutex::new(Vec::new()));
     let r = Arc::clone(&results);
@@ -540,6 +558,8 @@ fn count_per_file_emits_result_for_every_file() {
         files_with_matches: false,
         count_per_file: true,
         include_pattern: None,
+        before_context: 0,
+        after_context: 0,
     });
     let results: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
     let r = Arc::clone(&results);
@@ -581,6 +601,8 @@ fn include_pattern_searches_only_matching_files() {
         files_with_matches: false,
         count_per_file: false,
         include_pattern: Some(Pattern::new("*.rs").unwrap()),
+        before_context: 0,
+        after_context: 0,
     });
     let results: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
     let r = Arc::clone(&results);
@@ -612,6 +634,8 @@ fn include_pattern_no_files_match_returns_empty() {
         files_with_matches: false,
         count_per_file: false,
         include_pattern: Some(Pattern::new("*.txt").unwrap()),
+        before_context: 0,
+        after_context: 0,
     });
     let results: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
     let r = Arc::clone(&results);
@@ -639,6 +663,8 @@ fn include_wildcard_matches_all_files() {
         files_with_matches: false,
         count_per_file: false,
         include_pattern: None,
+        before_context: 0,
+        after_context: 0,
     });
     let config_wild = StdArc::new(SearchConfig {
         normalized_query: normalize_query("needle", false),
@@ -651,6 +677,8 @@ fn include_wildcard_matches_all_files() {
         files_with_matches: false,
         count_per_file: false,
         include_pattern: Some(Pattern::new("*").unwrap()),
+        before_context: 0,
+        after_context: 0,
     });
 
     let run = |config: std::sync::Arc<argrep::SearchConfig>| {
@@ -674,5 +702,147 @@ fn include_wildcard_matches_all_files() {
         run(config_all),
         run(config_wild),
         "'*' include should match same as no filter"
+    );
+}
+
+// ── Context lines (-A, -B, -C) ────────────────────────────────────────────────
+
+#[test]
+fn before_context_includes_leading_lines() {
+    let (_dir, root) = make_tree(&[("file.txt", "line1\nline2\nline3\nMATCH\nline5\n")]);
+
+    let ignore_dirs: HashSet<String> = DEFAULT_IGNORES.iter().map(|s| s.to_string()).collect();
+    let config = StdArc::new(SearchConfig {
+        normalized_query: normalize_query("MATCH", false),
+        query: "MATCH".to_string(),
+        ignore_case: false,
+        line_number: true,
+        ignore_dirs,
+        debug: false,
+        invert: false,
+        files_with_matches: false,
+        count_per_file: false,
+        include_pattern: None,
+        before_context: 2,
+        after_context: 0,
+    });
+
+    let results: Arc<Mutex<Vec<(usize, String, bool)>>> = Arc::new(Mutex::new(Vec::new()));
+    let r = Arc::clone(&results);
+    parallel_grep(root, 4, config, SearchStats::new(), move |item| {
+        if !item.is_separator {
+            r.lock().unwrap().push((
+                item.line_num,
+                item.line_content.trim_end().to_string(),
+                item.is_context,
+            ));
+        }
+    });
+
+    let res = results.lock().unwrap().clone();
+    assert_eq!(
+        res,
+        vec![
+            (2, "line2".to_string(), true),
+            (3, "line3".to_string(), true),
+            (4, "MATCH".to_string(), false),
+        ]
+    );
+}
+
+#[test]
+fn after_context_includes_trailing_lines() {
+    let (_dir, root) = make_tree(&[("file.txt", "line1\nMATCH\nline3\nline4\nline5\n")]);
+
+    let ignore_dirs: HashSet<String> = DEFAULT_IGNORES.iter().map(|s| s.to_string()).collect();
+    let config = StdArc::new(SearchConfig {
+        normalized_query: normalize_query("MATCH", false),
+        query: "MATCH".to_string(),
+        ignore_case: false,
+        line_number: true,
+        ignore_dirs,
+        debug: false,
+        invert: false,
+        files_with_matches: false,
+        count_per_file: false,
+        include_pattern: None,
+        before_context: 0,
+        after_context: 2,
+    });
+
+    let results: Arc<Mutex<Vec<(usize, String, bool)>>> = Arc::new(Mutex::new(Vec::new()));
+    let r = Arc::clone(&results);
+    parallel_grep(root, 4, config, SearchStats::new(), move |item| {
+        if !item.is_separator {
+            r.lock().unwrap().push((
+                item.line_num,
+                item.line_content.trim_end().to_string(),
+                item.is_context,
+            ));
+        }
+    });
+
+    let res = results.lock().unwrap().clone();
+    assert_eq!(
+        res,
+        vec![
+            (2, "MATCH".to_string(), false),
+            (3, "line3".to_string(), true),
+            (4, "line4".to_string(), true),
+        ]
+    );
+}
+
+#[test]
+fn context_both_and_group_separator() {
+    let (_dir, root) = make_tree(&[(
+        "file.txt",
+        "line1\nline2\nMATCH1\nline4\nline5\nline6\nline7\nline8\nMATCH2\nline10\n",
+    )]);
+
+    let ignore_dirs: HashSet<String> = DEFAULT_IGNORES.iter().map(|s| s.to_string()).collect();
+    let config = StdArc::new(SearchConfig {
+        normalized_query: normalize_query("MATCH", false),
+        query: "MATCH".to_string(),
+        ignore_case: false,
+        line_number: true,
+        ignore_dirs,
+        debug: false,
+        invert: false,
+        files_with_matches: false,
+        count_per_file: false,
+        include_pattern: None,
+        before_context: 1,
+        after_context: 1,
+    });
+
+    let results: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let r = Arc::clone(&results);
+    parallel_grep(root, 4, config, SearchStats::new(), move |item| {
+        if item.is_separator {
+            r.lock().unwrap().push("--".to_string());
+        } else {
+            let sep = if item.is_context { "-" } else { ":" };
+            r.lock().unwrap().push(format!(
+                "{}{}{}",
+                item.line_num,
+                sep,
+                item.line_content.trim_end()
+            ));
+        }
+    });
+
+    let res = results.lock().unwrap().clone();
+    assert_eq!(
+        res,
+        vec![
+            "2-line2",
+            "3:MATCH1",
+            "4-line4",
+            "--",
+            "8-line8",
+            "9:MATCH2",
+            "10-line10",
+        ]
     );
 }

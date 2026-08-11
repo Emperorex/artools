@@ -2,7 +2,7 @@ use colored::Colorize;
 use crossbeam_channel::unbounded;
 use glob::Pattern;
 use std::{
-    collections::HashSet,
+    collections::{HashSet, VecDeque},
     fs::{self, File},
     io::{BufRead, BufReader, Read, Seek, SeekFrom},
     path::{Path, PathBuf},
@@ -32,6 +32,10 @@ pub struct SearchConfig {
     pub count_per_file: bool,
     /// --include: only search files matching this glob pattern
     pub include_pattern: Option<Pattern>,
+    /// -B: number of leading context lines before a match
+    pub before_context: usize,
+    /// -A: number of trailing context lines after a match
+    pub after_context: usize,
 }
 
 /// Shared statistics counters
@@ -65,6 +69,10 @@ pub struct MatchResult {
     pub line_content: String,
     /// Set when --count is active: total matching lines in this file
     pub count: Option<usize>,
+    /// True if this result is a context line around a match (not the match itself)
+    pub is_context: bool,
+    /// True if this result is a group separator ("--") between non-adjacent matches
+    pub is_separator: bool,
 }
 
 /// Normalizes a query string for case-insensitive matching.
@@ -157,6 +165,12 @@ pub fn scan_and_grep(
     active_tasks: &AtomicUsize,
     stats: &SearchStats,
 ) {
+    if dir_path.is_file() {
+        stats.total_files.fetch_add(1, Ordering::Relaxed);
+        grep_file(dir_path, config, output_tx, stats);
+        return;
+    }
+
     stats.total_dirs.fetch_add(1, Ordering::Relaxed);
 
     let entries = match fs::read_dir(dir_path) {
@@ -239,6 +253,15 @@ pub fn grep_file(
     let mut line_num = 0usize;
     let mut match_count = 0usize;
 
+    let before_ctx = config.before_context;
+    let after_ctx = config.after_context;
+    let has_context = before_ctx > 0 || after_ctx > 0;
+
+    let mut before_buffer: VecDeque<(usize, String)> = VecDeque::with_capacity(before_ctx);
+    let mut after_remaining = 0usize;
+    let mut last_printed_line = 0usize;
+    let mut has_printed_anything = false;
+
     while let Ok(bytes) = reader.read_line(&mut line) {
         if bytes == 0 {
             break; // EOF
@@ -269,18 +292,82 @@ pub fn grep_file(
                     line_num: 0,
                     line_content: String::new(),
                     count: None,
+                    is_context: false,
+                    is_separator: false,
                 });
                 break;
             } else if !config.count_per_file {
-                // Normal mode: emit each matching line
+                if has_context {
+                    let first_line_to_print = if let Some((b_num, _)) = before_buffer.front() {
+                        std::cmp::min(*b_num, line_num)
+                    } else {
+                        line_num
+                    };
+
+                    if has_printed_anything && first_line_to_print > last_printed_line + 1 {
+                        let _ = output_tx.send(MatchResult {
+                            file_path: file_path.to_path_buf(),
+                            line_num: 0,
+                            line_content: String::new(),
+                            count: None,
+                            is_context: false,
+                            is_separator: true,
+                        });
+                    }
+
+                    while let Some((b_num, b_content)) = before_buffer.pop_front() {
+                        if b_num > last_printed_line {
+                            let _ = output_tx.send(MatchResult {
+                                file_path: file_path.to_path_buf(),
+                                line_num: b_num,
+                                line_content: b_content,
+                                count: None,
+                                is_context: true,
+                                is_separator: false,
+                            });
+                            last_printed_line = b_num;
+                        }
+                    }
+                }
+
+                // Normal mode: emit matching line
                 let _ = output_tx.send(MatchResult {
                     file_path: file_path.to_path_buf(),
                     line_num,
                     line_content: line.clone(),
                     count: None,
+                    is_context: false,
+                    is_separator: false,
                 });
+                last_printed_line = line_num;
+                has_printed_anything = true;
+                after_remaining = after_ctx;
+
+                if before_ctx > 0 {
+                    before_buffer.push_back((line_num, line.clone()));
+                }
             }
             // -c mode: accumulate count, emit at end
+        } else if has_context && !config.count_per_file && !config.files_with_matches {
+            if after_remaining > 0 {
+                let _ = output_tx.send(MatchResult {
+                    file_path: file_path.to_path_buf(),
+                    line_num,
+                    line_content: line.clone(),
+                    count: None,
+                    is_context: true,
+                    is_separator: false,
+                });
+                last_printed_line = line_num;
+                after_remaining -= 1;
+            }
+
+            if before_ctx > 0 {
+                if before_buffer.len() == before_ctx {
+                    before_buffer.pop_front();
+                }
+                before_buffer.push_back((line_num, line.clone()));
+            }
         }
 
         line.clear();
@@ -293,6 +380,8 @@ pub fn grep_file(
             line_num: 0,
             line_content: String::new(),
             count: Some(match_count),
+            is_context: false,
+            is_separator: false,
         });
     }
 }

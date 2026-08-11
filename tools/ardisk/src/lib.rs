@@ -50,16 +50,20 @@ pub fn build_config(
     })
 }
 
-/// Runs a parallel scan rooted at `root` and returns raw per-directory sizes
-/// (immediate files only — not yet rolled up to ancestors).
+/// Runs a parallel scan rooted at `root` and returns two maps of raw
+/// per-directory sizes (immediate files only — not yet rolled up):
+///
+/// * `raw_sizes`     – total cost: file bytes + directory inode cost
+/// * `content_sizes` – file bytes only (filtered by `--include`), no inode
 pub fn parallel_scan(
     root: PathBuf,
     workers: usize,
     config: Arc<ScanConfig>,
-) -> HashMap<PathBuf, u64> {
+) -> (HashMap<PathBuf, u64>, HashMap<PathBuf, u64>) {
     let (task_tx, task_rx) = unbounded::<Task>();
     let active_tasks = Arc::new(AtomicUsize::new(1));
     let raw_sizes = Arc::new(Mutex::new(HashMap::<PathBuf, u64>::new()));
+    let content_sizes = Arc::new(Mutex::new(HashMap::<PathBuf, u64>::new()));
 
     task_tx.send(Task { path: root }).unwrap();
 
@@ -70,6 +74,7 @@ pub fn parallel_scan(
         let task_tx = task_tx.clone();
         let config = Arc::clone(&config);
         let raw_sizes = Arc::clone(&raw_sizes);
+        let content_sizes = Arc::clone(&content_sizes);
         let active_tasks = Arc::clone(&active_tasks);
 
         let handle = thread::spawn(move || {
@@ -88,7 +93,14 @@ pub fn parallel_scan(
                     }
                 };
 
-                scan_directory(&task.path, &config, &task_tx, &active_tasks, &raw_sizes);
+                scan_directory(
+                    &task.path,
+                    &config,
+                    &task_tx,
+                    &active_tasks,
+                    &raw_sizes,
+                    &content_sizes,
+                );
                 active_tasks.fetch_sub(1, Ordering::SeqCst);
             }
         });
@@ -102,7 +114,31 @@ pub fn parallel_scan(
         handle.join().unwrap();
     }
 
-    Arc::try_unwrap(raw_sizes).unwrap().into_inner().unwrap()
+    let raw = Arc::try_unwrap(raw_sizes).unwrap().into_inner().unwrap();
+    let content = Arc::try_unwrap(content_sizes)
+        .unwrap()
+        .into_inner()
+        .unwrap();
+    (raw, content)
+}
+
+/// Computes the on-disk contribution of a single metadata entry, honoring
+/// `apparent_size` (logical length) vs. physical block allocation.
+#[inline]
+fn size_from_metadata(metadata: &fs::Metadata, apparent_size: bool) -> u64 {
+    #[cfg(unix)]
+    {
+        if apparent_size {
+            metadata.len()
+        } else {
+            metadata.blocks() * 512
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = apparent_size;
+        metadata.len()
+    }
 }
 
 pub fn scan_directory(
@@ -111,6 +147,7 @@ pub fn scan_directory(
     task_tx: &crossbeam_channel::Sender<Task>,
     active_tasks: &AtomicUsize,
     raw_sizes: &Mutex<HashMap<PathBuf, u64>>,
+    content_sizes: &Mutex<HashMap<PathBuf, u64>>,
 ) {
     // Retry on EINTR — macOS interrupts syscalls with signals from system
     // processes (Spotlight, sandboxd, etc.). Safe to retry unconditionally.
@@ -127,7 +164,8 @@ pub fn scan_directory(
         }
     };
 
-    let mut local_dir_size = 0u64;
+    let mut local_content_size = 0u64; // only matching file bytes
+    let mut local_dir_size = 0u64; // files + directory inode cost
 
     for entry in entries.flatten() {
         let file_type = match entry.file_type() {
@@ -157,26 +195,28 @@ pub fn scan_directory(
             }
 
             if let Ok(metadata) = entry.metadata() {
-                #[cfg(unix)]
-                {
-                    if config.apparent_size {
-                        // Logical size — matches du -sh on macOS/Linux
-                        local_dir_size += metadata.len();
-                    } else {
-                        // Physical block allocation — actual on-disk usage
-                        local_dir_size += metadata.blocks() * 512;
-                    }
-                }
-                #[cfg(not(unix))]
-                {
-                    local_dir_size += metadata.len();
-                }
+                let file_size = size_from_metadata(&metadata, config.apparent_size);
+                local_content_size += file_size;
+                local_dir_size += file_size;
             }
         }
     }
 
-    let mut guard = raw_sizes.lock().unwrap();
-    guard.insert(dir_path.to_path_buf(), local_dir_size);
+    // Count the directory's own inode/entry size, if possible.
+    // This goes only into the total map, NOT the content map, so that
+    // main.rs can still suppress dirs with no matching file content.
+    if let Ok(dir_metadata) = fs::metadata(dir_path) {
+        local_dir_size += size_from_metadata(&dir_metadata, config.apparent_size);
+    }
+
+    raw_sizes
+        .lock()
+        .unwrap()
+        .insert(dir_path.to_path_buf(), local_dir_size);
+    content_sizes
+        .lock()
+        .unwrap()
+        .insert(dir_path.to_path_buf(), local_content_size);
 }
 
 /// Propagates weights from deeply nested folders up the tree

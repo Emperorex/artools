@@ -243,25 +243,43 @@ pub fn scan_directory(
             };
 
             if type_matches {
-                // --empty: check whether the entry is empty
-                let is_empty = if is_dir {
-                    // A directory is empty if it has no children
-                    fs::read_dir(entry.path())
-                        .map(|mut d| d.next().is_none())
-                        .unwrap_or(false)
-                } else {
-                    entry.metadata().map(|m| m.len() == 0).unwrap_or(false)
-                };
+                // Metadata is only fetched lazily, at most once per entry, and
+                // reused by both the --empty and --size checks below (they used
+                // to each call entry.metadata() independently).
+                let mut metadata_cache: Option<fs::Metadata> = None;
 
-                if config.empty_only && !is_empty {
-                    continue;
+                // --empty: only pay the extra syscall (read_dir/metadata) when
+                // the flag is actually set; previously this ran unconditionally
+                // for every matched entry.
+                if config.empty_only {
+                    let is_empty = if is_dir {
+                        // A directory is empty if it has no children
+                        fs::read_dir(entry.path())
+                            .map(|mut d| d.next().is_none())
+                            .unwrap_or(false)
+                    } else {
+                        if metadata_cache.is_none() {
+                            metadata_cache = entry.metadata().ok();
+                        }
+                        metadata_cache
+                            .as_ref()
+                            .map(|m| m.len() == 0)
+                            .unwrap_or(false)
+                    };
+
+                    if !is_empty {
+                        continue;
+                    }
                 }
 
                 // --size: apply size filter to files only (dirs have no single size)
                 let size_ok = if !is_dir && !is_symlink {
                     match &config.size_filter {
                         Some(f) => {
-                            let len = entry.metadata().map(|m| m.len()).unwrap_or(0);
+                            if metadata_cache.is_none() {
+                                metadata_cache = entry.metadata().ok();
+                            }
+                            let len = metadata_cache.as_ref().map(|m| m.len()).unwrap_or(0);
                             f.min.is_none_or(|min| len > min) && f.max.is_none_or(|max| len < max)
                         }
                         None => true,

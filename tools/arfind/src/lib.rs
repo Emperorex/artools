@@ -27,6 +27,10 @@ pub struct Args {
     #[arg(short, long, default_value = "*")]
     pub name: String,
 
+    /// Case-insensitive pattern matching
+    #[arg(short = 'i', long = "case-insensitive")]
+    pub case_insensitive: bool,
+
     /// Number of worker threads
     #[arg(short = 'j', long, default_value_t = 4)]
     pub jobs: usize,
@@ -87,6 +91,7 @@ pub struct SearchConfig {
     pub debug: bool,
     pub size_filter: Option<SizeFilter>,
     pub empty_only: bool,
+    pub case_insensitive: bool,
 }
 
 /// Shared atomic counters for runtime statistics
@@ -199,6 +204,14 @@ pub fn scan_directory(
 ) {
     stats.total_dirs.fetch_add(1, Ordering::Relaxed);
 
+    // Computed once per directory (not per-entry) since it's constant for the
+    // whole search.
+    let match_options = glob::MatchOptions {
+        case_sensitive: !config.case_insensitive,
+        require_literal_separator: false,
+        require_literal_leading_dot: false,
+    };
+
     let entries = match fs::read_dir(&task.path) {
         Ok(entries) => entries,
         Err(err) => {
@@ -232,7 +245,7 @@ pub fn scan_directory(
             stats.total_files.fetch_add(1, Ordering::Relaxed);
         }
 
-        if config.pattern.matches(&file_name) {
+        if config.pattern.matches_with(&file_name, match_options) {
             let type_matches = match &config.file_type {
                 Some(t) => {
                     (t == "f" && !is_dir && !is_symlink)

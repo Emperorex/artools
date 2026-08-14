@@ -49,6 +49,7 @@ fn collect_names(
         debug: false,
         size_filter: None,
         empty_only: false,
+        case_insensitive: false,
     });
 
     let stats = SearchStats::new();
@@ -216,6 +217,7 @@ fn stats_count_files_and_dirs_correctly() {
         debug: false,
         size_filter: None,
         empty_only: false,
+        case_insensitive: false,
     });
 
     let stats = SearchStats::new();
@@ -270,6 +272,7 @@ fn multiple_workers_produce_same_results_as_single_worker() {
             debug: false,
             size_filter: None,
             empty_only: false,
+            case_insensitive: false,
         });
         let results: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
         let results_clone = Arc::clone(&results);
@@ -342,6 +345,7 @@ fn size_min_filters_small_files() {
             max: None,
         }), // +1KB
         empty_only: false,
+        case_insensitive: false,
     });
 
     let names = collect_with_config(root, config);
@@ -374,6 +378,7 @@ fn size_max_filters_large_files() {
             max: Some(1024),
         }), // -1KB
         empty_only: false,
+        case_insensitive: false,
     });
 
     let names = collect_with_config(root, config);
@@ -406,6 +411,7 @@ fn size_filter_does_not_affect_directories() {
             max: None,
         }),
         empty_only: false,
+        case_insensitive: false,
     });
 
     let names = collect_with_config(root, config);
@@ -431,6 +437,7 @@ fn empty_finds_zero_byte_files() {
         debug: false,
         size_filter: None,
         empty_only: true,
+        case_insensitive: false,
     });
 
     let names = collect_with_config(root, config);
@@ -455,6 +462,7 @@ fn empty_finds_empty_directories() {
         debug: false,
         size_filter: None,
         empty_only: true,
+        case_insensitive: false,
     });
 
     let names = collect_with_config(root, config);
@@ -482,8 +490,74 @@ fn empty_false_returns_all_files() {
         debug: false,
         size_filter: None,
         empty_only: false,
+        case_insensitive: false,
     });
 
     let names = collect_with_config(root, config);
     assert_eq!(names, vec!["empty.txt", "nonempty.txt"]);
+}
+
+// ── --case-insensitive ────────────────────────────────────────────────────────
+
+#[test]
+fn case_sensitive_by_default_misses_different_case() {
+    let (_dir, root) = make_tree(&["README.md", "readme.txt"]);
+
+    let ignore_dirs: HashSet<String> = DEFAULT_IGNORES.iter().map(|s| s.to_string()).collect();
+    let config = Arc::new(SearchConfig {
+        pattern: Pattern::new("readme*").unwrap(),
+        ignore_dirs,
+        max_depth: None,
+        file_type: None,
+        hidden: false,
+        debug: false,
+        size_filter: None,
+        empty_only: false,
+        case_insensitive: false,
+    });
+
+    let names = collect_with_config(root, config);
+    assert_eq!(names, vec!["readme.txt"]);
+}
+
+#[test]
+fn case_insensitive_matches_regardless_of_case() {
+    let (_dir, root) = make_tree(&["README.md", "readme.txt", "Readme.rs"]);
+
+    let ignore_dirs: HashSet<String> = DEFAULT_IGNORES.iter().map(|s| s.to_string()).collect();
+    let config = Arc::new(SearchConfig {
+        pattern: Pattern::new("readme*").unwrap(),
+        ignore_dirs,
+        max_depth: None,
+        file_type: None,
+        hidden: false,
+        debug: false,
+        size_filter: None,
+        empty_only: false,
+        case_insensitive: true,
+    });
+
+    let names = collect_with_config(root, config);
+    assert_eq!(names, vec!["README.md", "Readme.rs", "readme.txt"]);
+}
+
+#[test]
+fn case_insensitive_with_extension_pattern() {
+    let (_dir, root) = make_tree(&["a.TXT", "b.txt", "c.Txt", "d.rs"]);
+
+    let ignore_dirs: HashSet<String> = DEFAULT_IGNORES.iter().map(|s| s.to_string()).collect();
+    let config = Arc::new(SearchConfig {
+        pattern: Pattern::new("*.txt").unwrap(),
+        ignore_dirs,
+        max_depth: None,
+        file_type: None,
+        hidden: false,
+        debug: false,
+        size_filter: None,
+        empty_only: false,
+        case_insensitive: true,
+    });
+
+    let names = collect_with_config(root, config);
+    assert_eq!(names, vec!["a.TXT", "b.txt", "c.Txt"]);
 }

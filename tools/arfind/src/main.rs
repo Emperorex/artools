@@ -123,6 +123,7 @@ fn main() {
         debug: args.debug,
         size_filter,
         empty_only: args.empty,
+        case_insensitive: args.case_insensitive,
     });
 
     let stats = SearchStats::new();

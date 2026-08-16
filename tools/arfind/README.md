@@ -24,30 +24,33 @@ arfind [OPTIONS] [PATH]
 
 ## Options
 
-| Flag                 | Short | Default   | Description                                                                   |
-|----------------------|-------|-----------|-------------------------------------------------------------------------------|
-| `--name PATTERN`     | `-n`  | `*`       | Glob pattern to match filenames (e.g. `"*.rs"`, `"Cargo.*"`)                  |
-| `--case-insensitive` | `-i`  | —         | Match `--name` pattern case-insensitively                                     |
-| `--type TYPE`        | `-t`  | —         | Filter by entry type: `f` (file), `d` (directory), `l` (symlink)              |
-| `--size SIZE`        | —     | —         | Filter by file size: `100MB` or `+100MB` (larger than), `-1KB` (smaller than) |
-| `--empty`            | `-e`  | —         | Match only empty files (0 bytes) or empty directories (no children)           |
-| `--count`            | `-c`  | —         | Print total match count instead of paths                                      |
-| `--max-depth N`      | —     | unlimited | Maximum directory depth to recurse into                                       |
-| `--ignore DIR`       | —     | —         | Additional directory names to skip (repeatable)                               |
-| `--no-ignore`        | —     | —         | Do not respect `.gitignore` / `.ignore` files (search everything)             |
-| `--hidden`           | `-H`  | —         | Include hidden files and directories (dotfiles)                               |
-| `--jobs N`           | `-j`  | `4`       | Number of parallel worker threads                                             |
-| `--debug`            | `-d`  | —         | Print scan statistics and errors to stderr                                    |
+| Flag                 | Short | Default   | Description                                                                     |
+|----------------------|-------|-----------|---------------------------------------------------------------------------------|
+| `--name PATTERN`     | `-n`  | `*`       | Glob pattern to match filenames (e.g. `"*.rs"`, `"Cargo.*"`)                    |
+| `--case-insensitive` | `-i`  | —         | Match `--name` pattern case-insensitively                                       |
+| `--type TYPE`        | `-t`  | —         | Filter by entry type: `f` (file), `d` (directory), `l` (symlink)                |
+| `--size SIZE`        | —     | —         | Filter by file size: `100MB` or `+100MB` (larger than), `-1KB` (smaller than)   |
+| `--empty`            | `-e`  | —         | Match only empty files (0 bytes) or empty directories (no children)             |
+| `--count`            | `-c`  | —         | Print total match count instead of paths                                        |
+| `--max-depth N`      | —     | unlimited | Maximum directory depth to recurse into                                         |
+| `--ignore DIR`       | —     | —         | Additional directory names to skip (repeatable)                                 |
+| `--no-ignore`        | —     | —         | Search everything — disables `.gitignore`/`.ignore` respect and default ignores |
+| `--hidden`           | `-H`  | —         | Include hidden files and directories (dotfiles)                                 |
+| `--jobs N`           | `-j`  | `4`       | Number of parallel worker threads                                               |
+| `--debug`            | `-d`  | —         | Print scan statistics and errors to stderr                                      |
 
 ## Default ignores
 
-The following directories are always skipped, regardless of `.gitignore`:
+The following directories are skipped by default:
 
 - `.git`
 - `node_modules`
 - `__pycache__`
 
-Use `--ignore DIR` to skip additional directories by name.
+Use `--ignore DIR` to skip additional directories by name (this is always
+honored, even with `--no-ignore`). Use `--no-ignore` to disable the defaults
+above as well as `.gitignore`/`.ignore` respect — i.e. to search truly
+everything.
 
 ## Gitignore support
 
@@ -57,8 +60,8 @@ an ignored directory) are excluded automatically, the same way `fd` behaves.
 Nested `.gitignore` files are supported, including `!negation` patterns that
 re-include something an ancestor `.gitignore` excluded.
 
-Pass `--no-ignore` to search everything, ignoring `.gitignore`/`.ignore` files
-entirely:
+Pass `--no-ignore` to search everything: this disables both `.gitignore`/`.ignore`
+respect and the built-in default ignores (`.git`, `node_modules`, `__pycache__`):
 
 ```bash
 arfind . --name "*.log" --no-ignore

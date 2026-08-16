@@ -1,6 +1,6 @@
 [package]
 name = "arfind"
-version = "0.1.5"
+version = "0.1.6"
 edition = "2024"
 authors = ["Artem Shemet"]
 
@@ -9,6 +9,7 @@ clap = { version = "4", features = ["derive"] }
 glob = "0.3"
 crossbeam-channel = "0.5"
 colored = "3.1"
+ignore = "0.4"
 
 [dev-dependencies]
 tempfile = "3"

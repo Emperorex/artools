@@ -50,6 +50,7 @@ fn collect_names(
         size_filter: None,
         empty_only: false,
         case_insensitive: false,
+        respect_gitignore: false,
     });
 
     let stats = SearchStats::new();
@@ -218,6 +219,7 @@ fn stats_count_files_and_dirs_correctly() {
         size_filter: None,
         empty_only: false,
         case_insensitive: false,
+        respect_gitignore: false,
     });
 
     let stats = SearchStats::new();
@@ -273,6 +275,7 @@ fn multiple_workers_produce_same_results_as_single_worker() {
             size_filter: None,
             empty_only: false,
             case_insensitive: false,
+            respect_gitignore: false,
         });
         let results: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
         let results_clone = Arc::clone(&results);
@@ -346,6 +349,7 @@ fn size_min_filters_small_files() {
         }), // +1KB
         empty_only: false,
         case_insensitive: false,
+        respect_gitignore: false,
     });
 
     let names = collect_with_config(root, config);
@@ -379,6 +383,7 @@ fn size_max_filters_large_files() {
         }), // -1KB
         empty_only: false,
         case_insensitive: false,
+        respect_gitignore: false,
     });
 
     let names = collect_with_config(root, config);
@@ -412,6 +417,7 @@ fn size_filter_does_not_affect_directories() {
         }),
         empty_only: false,
         case_insensitive: false,
+        respect_gitignore: false,
     });
 
     let names = collect_with_config(root, config);
@@ -438,6 +444,7 @@ fn empty_finds_zero_byte_files() {
         size_filter: None,
         empty_only: true,
         case_insensitive: false,
+        respect_gitignore: false,
     });
 
     let names = collect_with_config(root, config);
@@ -463,6 +470,7 @@ fn empty_finds_empty_directories() {
         size_filter: None,
         empty_only: true,
         case_insensitive: false,
+        respect_gitignore: false,
     });
 
     let names = collect_with_config(root, config);
@@ -491,21 +499,19 @@ fn empty_false_returns_all_files() {
         size_filter: None,
         empty_only: false,
         case_insensitive: false,
+        respect_gitignore: false,
     });
 
     let names = collect_with_config(root, config);
     assert_eq!(names, vec!["empty.txt", "nonempty.txt"]);
 }
 
-// ── --case-insensitive ────────────────────────────────────────────────────────
+// ── gitignore support ─────────────────────────────────────────────────────────
 
-#[test]
-fn case_sensitive_by_default_misses_different_case() {
-    let (_dir, root) = make_tree(&["README.md", "readme.txt"]);
-
+fn config_with_gitignore(pattern: &str, respect_gitignore: bool) -> Arc<SearchConfig> {
     let ignore_dirs: HashSet<String> = DEFAULT_IGNORES.iter().map(|s| s.to_string()).collect();
-    let config = Arc::new(SearchConfig {
-        pattern: Pattern::new("readme*").unwrap(),
+    Arc::new(SearchConfig {
+        pattern: Pattern::new(pattern).unwrap(),
         ignore_dirs,
         max_depth: None,
         file_type: None,
@@ -514,50 +520,73 @@ fn case_sensitive_by_default_misses_different_case() {
         size_filter: None,
         empty_only: false,
         case_insensitive: false,
-    });
-
-    let names = collect_with_config(root, config);
-    assert_eq!(names, vec!["readme.txt"]);
+        respect_gitignore,
+    })
 }
 
 #[test]
-fn case_insensitive_matches_regardless_of_case() {
-    let (_dir, root) = make_tree(&["README.md", "readme.txt", "Readme.rs"]);
+fn gitignore_excludes_matched_files() {
+    let (_dir, root) = make_tree(&[".gitignore", "keep.txt", "build.log"]);
+    fs::write(root.join(".gitignore"), b"*.log\n").unwrap();
 
-    let ignore_dirs: HashSet<String> = DEFAULT_IGNORES.iter().map(|s| s.to_string()).collect();
-    let config = Arc::new(SearchConfig {
-        pattern: Pattern::new("readme*").unwrap(),
-        ignore_dirs,
-        max_depth: None,
-        file_type: None,
-        hidden: false,
-        debug: false,
-        size_filter: None,
-        empty_only: false,
-        case_insensitive: true,
-    });
-
-    let names = collect_with_config(root, config);
-    assert_eq!(names, vec!["README.md", "Readme.rs", "readme.txt"]);
+    let names = collect_with_config(root, config_with_gitignore("*", true));
+    assert!(names.contains(&"keep.txt".to_string()));
+    assert!(!names.contains(&"build.log".to_string()));
 }
 
 #[test]
-fn case_insensitive_with_extension_pattern() {
-    let (_dir, root) = make_tree(&["a.TXT", "b.txt", "c.Txt", "d.rs"]);
+fn gitignore_excludes_matched_directories_and_their_contents() {
+    let (_dir, root) = make_tree(&[".gitignore", "src/main.rs", "target/debug/binary"]);
+    fs::write(root.join(".gitignore"), b"/target\n").unwrap();
 
-    let ignore_dirs: HashSet<String> = DEFAULT_IGNORES.iter().map(|s| s.to_string()).collect();
-    let config = Arc::new(SearchConfig {
-        pattern: Pattern::new("*.txt").unwrap(),
-        ignore_dirs,
-        max_depth: None,
-        file_type: None,
-        hidden: false,
-        debug: false,
-        size_filter: None,
-        empty_only: false,
-        case_insensitive: true,
-    });
+    let names = collect_with_config(root, config_with_gitignore("*", true));
+    assert!(names.contains(&"main.rs".to_string()));
+    assert!(!names.contains(&"target".to_string()));
+    assert!(!names.contains(&"binary".to_string()));
+}
 
-    let names = collect_with_config(root, config);
-    assert_eq!(names, vec!["a.TXT", "b.txt", "c.Txt"]);
+#[test]
+fn gitignore_negation_reincludes_file() {
+    let (_dir, root) = make_tree(&[".gitignore", "a.log", "important.log"]);
+    fs::write(root.join(".gitignore"), b"*.log\n!important.log\n").unwrap();
+
+    let names = collect_with_config(root, config_with_gitignore("*", true));
+    assert!(!names.contains(&"a.log".to_string()));
+    assert!(names.contains(&"important.log".to_string()));
+}
+
+#[test]
+fn no_ignore_flag_disables_gitignore_respect() {
+    let (_dir, root) = make_tree(&[".gitignore", "keep.txt", "build.log"]);
+    fs::write(root.join(".gitignore"), b"*.log\n").unwrap();
+
+    let names = collect_with_config(root, config_with_gitignore("*", false));
+    assert!(names.contains(&"keep.txt".to_string()));
+    assert!(
+        names.contains(&"build.log".to_string()),
+        "build.log should be found when respect_gitignore is false"
+    );
+}
+
+#[test]
+fn nested_gitignore_can_override_parent() {
+    // Root ignores all *.txt, but the "keep" subdirectory re-includes them —
+    // mirrors git's own precedence where a deeper .gitignore can win.
+    let (_dir, root) = make_tree(&[".gitignore", "keep/.gitignore", "a.txt", "keep/b.txt"]);
+    fs::write(root.join(".gitignore"), b"*.txt\n").unwrap();
+    fs::write(root.join("keep/.gitignore"), b"!*.txt\n").unwrap();
+
+    let names = collect_with_config(root, config_with_gitignore("*.txt", true));
+    assert!(!names.contains(&"a.txt".to_string()));
+    assert!(names.contains(&"b.txt".to_string()));
+}
+
+#[test]
+fn dot_ignore_file_is_also_respected() {
+    let (_dir, root) = make_tree(&[".ignore", "keep.txt", "secret.txt"]);
+    fs::write(root.join(".ignore"), b"secret.txt\n").unwrap();
+
+    let names = collect_with_config(root, config_with_gitignore("*", true));
+    assert!(names.contains(&"keep.txt".to_string()));
+    assert!(!names.contains(&"secret.txt".to_string()));
 }

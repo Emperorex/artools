@@ -124,6 +124,7 @@ fn main() {
         size_filter,
         empty_only: args.empty,
         case_insensitive: args.case_insensitive,
+        respect_gitignore: !args.no_ignore,
     });
 
     let stats = SearchStats::new();

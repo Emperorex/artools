@@ -24,26 +24,49 @@ arfind [OPTIONS] [PATH]
 
 ## Options
 
-| Flag             | Short | Default   | Description                                                                   |
-|------------------|-------|-----------|-------------------------------------------------------------------------------|
-| `--name PATTERN` | `-n`  | `*`       | Glob pattern to match filenames (e.g. `"*.rs"`, `"Cargo.*"`)                  |
-| `--type TYPE`    | `-t`  | —         | Filter by entry type: `f` (file), `d` (directory), `l` (symlink)              |
-| `--size SIZE`    | —     | —         | Filter by file size: `100MB` or `+100MB` (larger than), `-1KB` (smaller than) |
-| `--empty`        | `-e`  | —         | Match only empty files (0 bytes) or empty directories (no children)           |
-| `--count`        | `-c`  | —         | Print total match count instead of paths                                      |
-| `--max-depth N`  | —     | unlimited | Maximum directory depth to recurse into                                       |
-| `--ignore DIR`   | —     | —         | Additional directory names to skip (repeatable)                               |
-| `--hidden`       | `-H`  | —         | Include hidden files and directories (dotfiles)                               |
-| `--jobs N`       | `-j`  | `4`       | Number of parallel worker threads                                             |
-| `--debug`        | `-d`  | —         | Print scan statistics and errors to stderr                                    |
+| Flag                 | Short | Default   | Description                                                                   |
+|----------------------|-------|-----------|-------------------------------------------------------------------------------|
+| `--name PATTERN`     | `-n`  | `*`       | Glob pattern to match filenames (e.g. `"*.rs"`, `"Cargo.*"`)                  |
+| `--case-insensitive` | `-i`  | —         | Match `--name` pattern case-insensitively                                     |
+| `--type TYPE`        | `-t`  | —         | Filter by entry type: `f` (file), `d` (directory), `l` (symlink)              |
+| `--size SIZE`        | —     | —         | Filter by file size: `100MB` or `+100MB` (larger than), `-1KB` (smaller than) |
+| `--empty`            | `-e`  | —         | Match only empty files (0 bytes) or empty directories (no children)           |
+| `--count`            | `-c`  | —         | Print total match count instead of paths                                      |
+| `--max-depth N`      | —     | unlimited | Maximum directory depth to recurse into                                       |
+| `--ignore DIR`       | —     | —         | Additional directory names to skip (repeatable)                               |
+| `--no-ignore`        | —     | —         | Do not respect `.gitignore` / `.ignore` files (search everything)             |
+| `--hidden`           | `-H`  | —         | Include hidden files and directories (dotfiles)                               |
+| `--jobs N`           | `-j`  | `4`       | Number of parallel worker threads                                             |
+| `--debug`            | `-d`  | —         | Print scan statistics and errors to stderr                                    |
 
 ## Default ignores
 
-The following directories are always skipped unless overridden:
+The following directories are always skipped, regardless of `.gitignore`:
 
 - `.git`
 - `node_modules`
 - `__pycache__`
+
+Use `--ignore DIR` to skip additional directories by name.
+
+## Gitignore support
+
+By default, `arfind` respects `.gitignore` and `.ignore` files found within the
+searched directory tree — matched files and directories (and everything under
+an ignored directory) are excluded automatically, the same way `fd` behaves.
+Nested `.gitignore` files are supported, including `!negation` patterns that
+re-include something an ancestor `.gitignore` excluded.
+
+Pass `--no-ignore` to search everything, ignoring `.gitignore`/`.ignore` files
+entirely:
+
+```bash
+arfind . --name "*.log" --no-ignore
+```
+
+**Note:** only `.gitignore`/`.ignore` files inside the path you're searching
+are read. `arfind` does not walk up to a repository root for parent ignore
+files, and does not read `.git/info/exclude` or a global git ignore file.
 
 ## Examples
 
@@ -69,6 +92,12 @@ arfind /var/log --name "*.log" --count
 # Include hidden files in the search
 arfind . --name "*.env" -H
 
+# Case-insensitive name matching
+arfind . --name "readme*" -i
+
+# Search everything, including .gitignore'd files (e.g. build output)
+arfind . --name "*.log" --no-ignore
+
 # Search a specific directory, skip vendor
 arfind ./src --name "*.go" --ignore vendor
 
@@ -78,15 +107,16 @@ arfind /home -j 8 --name "*.txt"
 
 ## Comparison with `find`
 
-| Task             | `find`                                 | `arfind`                 |
-|------------------|----------------------------------------|--------------------------|
-| Find by name     | `find . -name "*.rs"`                  | `arfind . --name "*.rs"` |
-| Find files only  | `find . -type f`                       | `arfind . -t f`          |
-| Limit depth      | `find . -maxdepth 2`                   | `arfind . --max-depth 2` |
-| Skip directory   | `find . -not -path '*/node_modules/*'` | automatic                |
-| Count results    | `find . \| wc -l`                      | `arfind . --count`       |
-| Find empty files | `find . -empty -type f`                | `arfind . -t f --empty`  |
-| Find large files | `find . -size +100M`                   | `arfind . --size +100MB` |
+| Task                 | `find`                                 | `arfind`                             |
+|----------------------|----------------------------------------|--------------------------------------|
+| Find by name         | `find . -name "*.rs"`                  | `arfind . --name "*.rs"`             |
+| Find files only      | `find . -type f`                       | `arfind . -t f`                      |
+| Limit depth          | `find . -maxdepth 2`                   | `arfind . --max-depth 2`             |
+| Skip directory       | `find . -not -path '*/node_modules/*'` | automatic                            |
+| Respect `.gitignore` | manual (`grep`/exclude flags)          | automatic (`--no-ignore` to disable) |
+| Count results        | `find . \| wc -l`                      | `arfind . --count`                   |
+| Find empty files     | `find . -empty -type f`                | `arfind . -t f --empty`              |
+| Find large files     | `find . -size +100M`                   | `arfind . --size +100MB`             |
 
 ## Performance
 

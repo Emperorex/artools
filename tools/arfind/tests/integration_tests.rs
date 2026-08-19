@@ -231,17 +231,78 @@ fn stats_count_files_and_dirs_correctly() {
     assert_eq!(stats.total_dirs.load(Ordering::Relaxed), 2);
     // a.txt, b.txt, c.txt = 3 files
     assert_eq!(stats.total_files.load(Ordering::Relaxed), 3);
-    // all match wildcard = files + dirs = 3 files + 1 subdir "sub"
-    assert_eq!(stats.matched_count.load(Ordering::Relaxed), 4);
+    // all match wildcard = files + dirs + the root itself =
+    // 3 files + 1 subdir "sub" + 1 root
+    assert_eq!(stats.matched_count.load(Ordering::Relaxed), 5);
+}
+
+// ── Root matching ────────────────────────────────────────────────────────────
+//
+// `arfind foo --name foo` must decide whether the root itself (`foo`) is a
+// candidate, the same way `find foo -name foo` matches its own starting
+// point — not just foo's children.
+
+#[test]
+fn root_itself_matches_when_name_equals_root_basename() {
+    let (_dir, root) = make_tree(&["a.txt"]);
+    let root_name = root.file_name().unwrap().to_string_lossy().to_string();
+
+    let names = collect_names(root, &root_name, None, None, false, &[]);
+    assert!(
+        names.contains(&root_name),
+        "expected root directory itself to be reported as a match"
+    );
+}
+
+#[test]
+fn root_itself_excluded_when_name_does_not_match() {
+    let (_dir, root) = make_tree(&["a.txt"]);
+    let root_name = root.file_name().unwrap().to_string_lossy().to_string();
+
+    let names = collect_names(root, "definitely-not-the-root-name", None, None, false, &[]);
+    assert!(!names.contains(&root_name));
+    assert!(names.is_empty());
+}
+
+#[test]
+fn root_itself_excluded_by_type_filter() {
+    let (_dir, root) = make_tree(&["a.txt"]);
+    let root_name = root.file_name().unwrap().to_string_lossy().to_string();
+
+    // Root is a directory; filtering for files only should not report it.
+    let names = collect_names(root, &root_name, None, Some("f"), false, &[]);
+    assert!(!names.contains(&root_name));
+}
+
+#[test]
+fn root_itself_matches_type_filter_for_directories() {
+    let (_dir, root) = make_tree(&["a.txt"]);
+    let root_name = root.file_name().unwrap().to_string_lossy().to_string();
+
+    let names = collect_names(root, &root_name, None, Some("d"), false, &[]);
+    assert!(names.contains(&root_name));
+}
+
+#[test]
+fn root_itself_matched_only_once() {
+    let (_dir, root) = make_tree(&["a.txt"]);
+    let root_name = root.file_name().unwrap().to_string_lossy().to_string();
+
+    let names = collect_names(root, &root_name, None, None, false, &[]);
+    assert_eq!(names.iter().filter(|n| **n == root_name).count(), 1);
 }
 
 // ── Edge cases ────────────────────────────────────────────────────────────────
 
 #[test]
-fn empty_directory_returns_no_results() {
+fn empty_directory_returns_no_child_results() {
     let (_dir, root) = make_tree(&[]);
+    let root_name = root.file_name().unwrap().to_string_lossy().to_string();
+
+    // No children exist to match, but the root itself is a valid "*"
+    // candidate, so it's the sole result.
     let names = collect_names(root, "*", None, None, false, &[]);
-    assert!(names.is_empty());
+    assert_eq!(names, vec![root_name]);
 }
 
 #[test]

@@ -128,19 +128,41 @@ fn type_d_with_name_pattern() {
 }
 
 // ── Depth limiting ────────────────────────────────────────────────────────────
+//
+// `--max-depth N` follows `find`'s model: depth 0 is the root itself, depth
+// 1 is its direct children, depth 2 their children, and so on. At each
+// depth limit, matches up to and including that depth are reported, but
+// nothing deeper is ever examined.
 
 #[test]
-fn max_depth_zero_finds_only_root_children() {
+fn max_depth_zero_examines_root_only() {
     let (_dir, root) = make_tree(&["top.txt", "sub/deep.txt"]);
+    // The root's own basename doesn't end in .txt, and at depth 0 its
+    // contents are never scanned, so nothing should match.
     let names = collect_names(root, "*.txt", Some(0), None, false, &[]);
+    assert!(names.is_empty());
+}
+
+#[test]
+fn max_depth_zero_still_matches_the_root_itself() {
+    let (_dir, root) = make_tree(&["top.txt", "sub/deep.txt"]);
+    let root_name = root.file_name().unwrap().to_string_lossy().to_string();
+    let names = collect_names(root, &root_name, Some(0), None, false, &[]);
+    assert_eq!(names, vec![root_name]);
+}
+
+#[test]
+fn max_depth_one_reaches_direct_children_only() {
+    let (_dir, root) = make_tree(&["top.txt", "sub/deep.txt"]);
+    let names = collect_names(root, "*.txt", Some(1), None, false, &[]);
     assert!(names.contains(&"top.txt".to_string()));
     assert!(!names.contains(&"deep.txt".to_string()));
 }
 
 #[test]
-fn max_depth_one_reaches_first_level_subdirs() {
+fn max_depth_two_reaches_grandchildren() {
     let (_dir, root) = make_tree(&["a/b.txt", "a/c/d.txt"]);
-    let names = collect_names(root, "*.txt", Some(1), None, false, &[]);
+    let names = collect_names(root, "*.txt", Some(2), None, false, &[]);
     assert!(names.contains(&"b.txt".to_string()));
     assert!(!names.contains(&"d.txt".to_string()));
 }

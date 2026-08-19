@@ -512,6 +512,7 @@
     <div class="platform-badge"><span class="dot"></span>macOS arm64</div>
     <div class="platform-badge"><span class="dot"></span>macOS x86_64</div>
     <div class="platform-badge"><span class="dot"></span>Linux x86_64 (musl)</div>
+    <div class="platform-badge"><span class="dot"></span>Linux arm64 (musl)</div>
   </div>
 </section>
 
@@ -582,14 +583,14 @@
         <span class="usage-block-title">Find files by name, type, or size</span>
       </div>
       <div class="usage-code">
-<span class="uc-comment"># Find all Rust source files</span>
-<br><span class="uc-cmd">arfind</span> <span class="uc-arg">.</span> <span class="uc-flag">--name</span> <span class="uc-arg">"*.rs"</span>
-<br>
-<br><span class="uc-comment"># Find files larger than 100MB</span>
-<br><span class="uc-cmd">arfind</span> <span class="uc-arg">.</span> <span class="uc-flag">-t</span> <span class="uc-arg">f</span> <span class="uc-flag">--size</span> <span class="uc-arg">100MB</span>
-<br>
-<br><span class="uc-comment"># Count empty files in a directory</span>
-<br><span class="uc-cmd">arfind</span> <span class="uc-arg">.</span> <span class="uc-flag">-t</span> <span class="uc-arg">f</span> <span class="uc-flag">--empty</span> <span class="uc-flag">--count</span>
+        <span class="uc-comment"># Find all Rust source files</span>
+        <br><span class="uc-cmd">arfind</span> <span class="uc-arg">.</span> <span class="uc-flag">--name</span> <span class="uc-arg">"*.rs"</span>
+        <br>
+        <br><span class="uc-comment"># Find files larger than 100MB</span>
+        <br><span class="uc-cmd">arfind</span> <span class="uc-arg">.</span> <span class="uc-flag">-t</span> <span class="uc-arg">f</span> <span class="uc-flag">--size</span> <span class="uc-arg">100MB</span>
+        <br>
+        <br><span class="uc-comment"># Count empty files in a directory</span>
+        <br><span class="uc-cmd">arfind</span> <span class="uc-arg">.</span> <span class="uc-flag">-t</span> <span class="uc-arg">f</span> <span class="uc-flag">--empty</span> <span class="uc-flag">--count</span>
       </div>
     </div>
 
@@ -599,14 +600,14 @@
         <span class="usage-block-title">Analyze disk usage</span>
       </div>
       <div class="usage-code">
-<span class="uc-comment"># Top 10 heaviest directories</span>
-<br><span class="uc-cmd">ardisk</span> <span class="uc-arg">.</span> <span class="uc-flag">--top</span> <span class="uc-arg">10</span>
-<br>
-<br><span class="uc-comment"># How much space do .mp4 files use?</span>
-<br><span class="uc-cmd">ardisk</span> <span class="uc-arg">~/Movies</span> <span class="uc-flag">--include</span> <span class="uc-arg">"*.mp4"</span> <span class="uc-flag">--summarize</span>
-<br>
-<br><span class="uc-comment"># Show only directories over 1GB</span>
-<br><span class="uc-cmd">ardisk</span> <span class="uc-arg">/</span> <span class="uc-flag">--threshold</span> <span class="uc-arg">1GB</span>
+        <span class="uc-comment"># Top 10 heaviest directories</span>
+        <br><span class="uc-cmd">ardisk</span> <span class="uc-arg">.</span> <span class="uc-flag">--top</span> <span class="uc-arg">10</span>
+        <br>
+        <br><span class="uc-comment"># How much space do .mp4 files use?</span>
+        <br><span class="uc-cmd">ardisk</span> <span class="uc-arg">~/Movies</span> <span class="uc-flag">--include</span> <span class="uc-arg">"*.mp4"</span> <span class="uc-flag">--summarize</span>
+        <br>
+        <br><span class="uc-comment"># Show only directories over 1GB</span>
+        <br><span class="uc-cmd">ardisk</span> <span class="uc-arg">/</span> <span class="uc-flag">--threshold</span> <span class="uc-arg">1GB</span>
       </div>
     </div>
 
@@ -616,14 +617,14 @@
         <span class="usage-block-title">Search text in files or stdin</span>
       </div>
       <div class="usage-code">
-<span class="uc-comment"># Search Rust files case-insensitively</span>
-<br><span class="uc-cmd">argrep</span> <span class="uc-arg">"todo"</span> <span class="uc-arg">.</span> <span class="uc-flag">--include</span> <span class="uc-arg">"*.rs"</span> <span class="uc-flag">-i</span> <span class="uc-flag">-n</span>
-<br>
-<br><span class="uc-comment"># List files containing errors</span>
-<br><span class="uc-cmd">argrep</span> <span class="uc-arg">"error"</span> <span class="uc-arg">/var/log</span> <span class="uc-flag">-l</span>
-<br>
-<br><span class="uc-comment"># Use as a grep replacement in pipes</span>
-<br><span class="uc-cmd">ps aux</span> <span class="uc-pipe">|</span> <span class="uc-cmd">argrep</span> <span class="uc-arg">"rust"</span>
+        <span class="uc-comment"># Search Rust files case-insensitively</span>
+        <br><span class="uc-cmd">argrep</span> <span class="uc-arg">"todo"</span> <span class="uc-arg">.</span> <span class="uc-flag">--include</span> <span class="uc-arg">"*.rs"</span> <span class="uc-flag">-i</span> <span class="uc-flag">-n</span>
+        <br>
+        <br><span class="uc-comment"># List files containing errors</span>
+        <br><span class="uc-cmd">argrep</span> <span class="uc-arg">"error"</span> <span class="uc-arg">/var/log</span> <span class="uc-flag">-l</span>
+        <br>
+        <br><span class="uc-comment"># Use as a grep replacement in pipes</span>
+        <br><span class="uc-cmd">ps aux</span> <span class="uc-pipe">|</span> <span class="uc-cmd">argrep</span> <span class="uc-arg">"rust"</span>
       </div>
     </div>
 

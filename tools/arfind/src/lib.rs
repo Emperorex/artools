@@ -146,6 +146,78 @@ pub struct MatchResult {
     pub is_dir: bool,
 }
 
+/// Tests the search root itself against the same criteria used for
+/// descendants in `scan_directory`. Without this, `arfind foo --name foo`
+/// would only ever inspect `foo`'s *children* and could never report `foo`
+/// itself, even though it's a perfectly valid candidate — mirroring how
+/// `find foo -name foo` also matches the starting point.
+///
+/// Unlike descendants, the root is never skipped for being "hidden": the
+/// user named it explicitly on the command line, so `--hidden` doesn't come
+/// into play here (matching `find`'s treatment of explicit start points).
+fn check_root(root: &Path, config: &SearchConfig) -> Option<MatchResult> {
+    let file_name = root.file_name()?.to_string_lossy();
+
+    let match_options = glob::MatchOptions {
+        case_sensitive: !config.case_insensitive,
+        require_literal_separator: false,
+        require_literal_leading_dot: false,
+    };
+
+    if !config.pattern.matches_with(&file_name, match_options) {
+        return None;
+    }
+
+    let metadata = fs::symlink_metadata(root).ok()?;
+    let is_symlink = metadata.file_type().is_symlink();
+    // symlink_metadata reports the link itself; resolve through it for
+    // is_dir() the same way read_dir's per-entry file_type() would.
+    let is_dir = if is_symlink {
+        fs::metadata(root).map(|m| m.is_dir()).unwrap_or(false)
+    } else {
+        metadata.is_dir()
+    };
+
+    if let Some(t) = &config.file_type {
+        let type_matches = (t == "f" && !is_dir && !is_symlink)
+            || (t == "d" && is_dir)
+            || (t == "l" && is_symlink);
+        if !type_matches {
+            return None;
+        }
+    }
+
+    if config.empty_only {
+        let is_empty = if is_dir {
+            fs::read_dir(root)
+                .map(|mut d| d.next().is_none())
+                .unwrap_or(false)
+        } else {
+            metadata.len() == 0
+        };
+        if !is_empty {
+            return None;
+        }
+    }
+
+    if !is_dir
+        && !is_symlink
+        && let Some(filter) = &config.size_filter
+    {
+        let len = metadata.len();
+        let size_ok =
+            filter.min.is_none_or(|min| len > min) && filter.max.is_none_or(|max| len < max);
+        if !size_ok {
+            return None;
+        }
+    }
+
+    Some(MatchResult {
+        path: root.to_path_buf(),
+        is_dir,
+    })
+}
+
 pub fn parallel_find(
     root: PathBuf,
     workers: usize,
@@ -157,6 +229,11 @@ pub fn parallel_find(
     let (output_tx, output_rx) = unbounded::<MatchResult>();
 
     let active_tasks = Arc::new(AtomicUsize::new(1));
+
+    if let Some(result) = check_root(&root, &config) {
+        stats.matched_count.fetch_add(1, Ordering::Relaxed);
+        let _ = output_tx.send(result);
+    }
 
     task_tx
         .send(Task {

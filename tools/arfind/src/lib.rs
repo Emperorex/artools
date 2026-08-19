@@ -345,6 +345,20 @@ pub fn scan_directory(
     active_tasks: &AtomicUsize,
     stats: &SearchStats,
 ) {
+    // `--max-depth N` follows `find`'s semantics: depth 0 is the root itself
+    // (already tested by `check_root`, before this function is ever called),
+    // depth 1 is the root's direct children, depth 2 their children, and so
+    // on. `task.depth` is the depth of the directory *being scanned*, so once
+    // it has reached the limit, its contents are one level too deep to
+    // report and must not be examined at all — not read, not matched, and
+    // not recursed into.
+    if config
+        .max_depth
+        .is_some_and(|max_depth| task.depth >= max_depth)
+    {
+        return;
+    }
+
     stats.total_dirs.fetch_add(1, Ordering::Relaxed);
 
     // Computed once per directory (not per-entry) since it's constant for the

@@ -146,17 +146,70 @@ pub struct MatchResult {
     pub is_dir: bool,
 }
 
+/// Extracts the name `find`'s `-name` test would compare the root against.
+/// Unlike `Path::file_name()` — which returns `None` for `.` and `..`,
+/// since it only reports "normal" components — this treats them as valid
+/// names in their own right, mirroring POSIX `basename` semantics. `find`
+/// never canonicalizes its starting argument before testing it, which is
+/// exactly why `find . -name .` matches: the argument's own name really is
+/// ".". If arfind canonicalized first, "." would resolve to the real
+/// directory name (e.g. "arfind") and the comparison would silently fail.
+fn root_match_name(original_root: &Path) -> Option<String> {
+    use std::path::Component;
+    match original_root.components().next_back() {
+        Some(Component::Normal(s)) => Some(s.to_string_lossy().into_owned()),
+        Some(Component::CurDir) => Some(".".to_string()),
+        Some(Component::ParentDir) => Some("..".to_string()),
+        Some(Component::RootDir) => Some("/".to_string()),
+        _ => None,
+    }
+}
+
 /// Tests the search root itself against the same criteria used for
 /// descendants in `scan_directory`. Without this, `arfind foo --name foo`
 /// would only ever inspect `foo`'s *children* and could never report `foo`
 /// itself, even though it's a perfectly valid candidate — mirroring how
 /// `find foo -name foo` also matches the starting point.
 ///
+/// Takes both the resolved `canonical_root` (used for metadata and as the
+/// reported match path, so output stays consistent with the rest of the
+/// tool) and the `original_root` exactly as given on the command line
+/// (used only to compute the name tested against `--name`) — see
+/// `root_match_name` for why these must be kept separate.
+///
+/// The root is also counted in `stats` (`total_dirs`/`total_files`) the same
+/// way `scan_directory` counts every entry it examines — independent of
+/// whether it ends up matching. Both counters share one meaning: "examined
+/// as a search candidate," not "had its contents read" (a directory beyond
+/// `--max-depth` is still counted here or in `scan_directory`'s entry loop,
+/// even though its own contents are never scanned).
+///
 /// Unlike descendants, the root is never skipped for being "hidden": the
 /// user named it explicitly on the command line, so `--hidden` doesn't come
 /// into play here (matching `find`'s treatment of explicit start points).
-fn check_root(root: &Path, config: &SearchConfig) -> Option<MatchResult> {
-    let file_name = root.file_name()?.to_string_lossy();
+fn check_root(
+    canonical_root: &Path,
+    original_root: &Path,
+    config: &SearchConfig,
+    stats: &SearchStats,
+) -> Option<MatchResult> {
+    let metadata = fs::symlink_metadata(canonical_root).ok()?;
+    let is_symlink = metadata.file_type().is_symlink();
+    // symlink_metadata reports the link itself; resolve through it for
+    // is_dir() the same way read_dir's per-entry file_type() would.
+    let is_dir = if is_symlink {
+        fs::metadata(canonical_root).map(|m| m.is_dir()).unwrap_or(false)
+    } else {
+        metadata.is_dir()
+    };
+
+    if is_dir {
+        stats.total_dirs.fetch_add(1, Ordering::Relaxed);
+    } else {
+        stats.total_files.fetch_add(1, Ordering::Relaxed);
+    }
+
+    let file_name = root_match_name(original_root)?;
 
     let match_options = glob::MatchOptions {
         case_sensitive: !config.case_insensitive,
@@ -167,16 +220,6 @@ fn check_root(root: &Path, config: &SearchConfig) -> Option<MatchResult> {
     if !config.pattern.matches_with(&file_name, match_options) {
         return None;
     }
-
-    let metadata = fs::symlink_metadata(root).ok()?;
-    let is_symlink = metadata.file_type().is_symlink();
-    // symlink_metadata reports the link itself; resolve through it for
-    // is_dir() the same way read_dir's per-entry file_type() would.
-    let is_dir = if is_symlink {
-        fs::metadata(root).map(|m| m.is_dir()).unwrap_or(false)
-    } else {
-        metadata.is_dir()
-    };
 
     if let Some(t) = &config.file_type {
         let type_matches = (t == "f" && !is_dir && !is_symlink)
@@ -189,7 +232,7 @@ fn check_root(root: &Path, config: &SearchConfig) -> Option<MatchResult> {
 
     if config.empty_only {
         let is_empty = if is_dir {
-            fs::read_dir(root)
+            fs::read_dir(canonical_root)
                 .map(|mut d| d.next().is_none())
                 .unwrap_or(false)
         } else {
@@ -213,7 +256,7 @@ fn check_root(root: &Path, config: &SearchConfig) -> Option<MatchResult> {
     }
 
     Some(MatchResult {
-        path: root.to_path_buf(),
+        path: canonical_root.to_path_buf(),
         is_dir,
     })
 }
@@ -225,19 +268,26 @@ pub fn parallel_find(
     stats: SearchStats,
     on_match: impl Fn(MatchResult) + Send + 'static,
 ) {
+    // Resolve symlinks and relative components (e.g. "." or "..") to a real
+    // absolute path for traversal and for the paths reported in output —
+    // but keep the original `root` argument around too, exactly as given.
+    // `find`'s `-name` test against the starting point uses that argument's
+    // own literal name, and canonicalizing loses it (see `root_match_name`).
+    let canonical_root = fs::canonicalize(&root).unwrap_or_else(|_| root.clone());
+
     let (task_tx, task_rx) = unbounded::<Task>();
     let (output_tx, output_rx) = unbounded::<MatchResult>();
 
     let active_tasks = Arc::new(AtomicUsize::new(1));
 
-    if let Some(result) = check_root(&root, &config) {
+    if let Some(result) = check_root(&canonical_root, &root, &config, &stats) {
         stats.matched_count.fetch_add(1, Ordering::Relaxed);
         let _ = output_tx.send(result);
     }
 
     task_tx
         .send(Task {
-            path: root,
+            path: canonical_root,
             depth: 0,
             ignore_stack: Arc::new(Vec::new()),
         })
@@ -352,14 +402,16 @@ pub fn scan_directory(
     // it has reached the limit, its contents are one level too deep to
     // report and must not be examined at all — not read, not matched, and
     // not recursed into.
-    if config
-        .max_depth
-        .is_some_and(|max_depth| task.depth >= max_depth)
-    {
+    if config.max_depth.is_some_and(|max_depth| task.depth >= max_depth) {
         return;
     }
 
-    stats.total_dirs.fetch_add(1, Ordering::Relaxed);
+    // Note: this directory itself is not counted here. It was already
+    // counted in `stats.total_dirs` either by `check_root` (if it's the
+    // search root) or by the entries loop of the parent directory that
+    // discovered it (see the `is_dir` branch below) — both count a
+    // directory the moment it's examined as a candidate, not when its
+    // contents get read.
 
     // Computed once per directory (not per-entry) since it's constant for the
     // whole search.
@@ -422,6 +474,12 @@ pub fn scan_directory(
 
         if !is_dir {
             stats.total_files.fetch_add(1, Ordering::Relaxed);
+        } else {
+            // Counted here, at discovery, not when (or whether) we later
+            // read its contents — see the note above `scan_directory`'s
+            // max-depth check. A directory beyond `--max-depth` still gets
+            // counted: it was genuinely examined as a candidate.
+            stats.total_dirs.fetch_add(1, Ordering::Relaxed);
         }
 
         if config.pattern.matches_with(&file_name, match_options) {
@@ -504,5 +562,60 @@ pub fn scan_directory(
                 });
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::root_match_name;
+    use std::path::Path;
+
+    #[test]
+    fn root_match_name_current_dir_is_dot() {
+        assert_eq!(root_match_name(Path::new(".")), Some(".".to_string()));
+    }
+
+    #[test]
+    fn root_match_name_parent_dir_is_dotdot() {
+        assert_eq!(root_match_name(Path::new("..")), Some("..".to_string()));
+    }
+
+    #[test]
+    fn root_match_name_normal_relative_path() {
+        assert_eq!(root_match_name(Path::new("foo")), Some("foo".to_string()));
+        assert_eq!(
+            root_match_name(Path::new("./foo")),
+            Some("foo".to_string())
+        );
+    }
+
+    #[test]
+    fn root_match_name_absolute_path() {
+        assert_eq!(
+            root_match_name(Path::new("/tmp/foo")),
+            Some("foo".to_string())
+        );
+    }
+
+    #[test]
+    fn root_match_name_trailing_dot_on_absolute_path() {
+        // `Path::components()` normalizes away `.` components except when
+        // they're the very first component of the path (documented Rust
+        // behavior), so "/tmp/foo/." collapses to "/tmp/foo" before
+        // `root_match_name` ever sees it — the trailing "." is gone, not
+        // preserved as a literal name. This isn't the scenario the fix
+        // targets (that's a bare "." or ".." as the whole argument, as
+        // covered by the tests above); this test just documents that
+        // Rust's own path parsing, not our matching logic, is what
+        // resolves this particular edge case.
+        assert_eq!(
+            root_match_name(Path::new("/tmp/foo/.")),
+            Some("foo".to_string())
+        );
+    }
+
+    #[test]
+    fn root_match_name_filesystem_root() {
+        assert_eq!(root_match_name(Path::new("/")), Some("/".to_string()));
     }
 }

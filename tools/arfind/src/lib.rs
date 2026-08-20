@@ -350,10 +350,21 @@ pub fn parallel_find(
 /// present directly in `dir`. Returns `None` if neither file exists (or
 /// exists but contributes zero patterns), so callers can skip extending the
 /// ignore stack for the common case of a directory with no ignore files.
-fn build_dir_gitignore(dir: &Path, debug: bool) -> Option<Gitignore> {
+///
+/// `present_files` must list only filenames the caller has already
+/// confirmed exist in `dir` (from a directory listing it already has) —
+/// this function never attempts to open a file that isn't there. Most
+/// directories have neither `.gitignore` nor `.ignore`, so at scale that
+/// avoids both a wasted open() per directory and, when `--debug` is on, a
+/// flood of harmless "No such file" pseudo-errors for the common case.
+fn build_dir_gitignore(dir: &Path, present_files: &[&str], debug: bool) -> Option<Gitignore> {
+    if present_files.is_empty() {
+        return None;
+    }
+
     let mut builder = GitignoreBuilder::new(dir);
 
-    for filename in [".gitignore", ".ignore"] {
+    for filename in present_files {
         if let Some(err) = builder.add(dir.join(filename))
             && debug
         {
@@ -426,24 +437,8 @@ pub fn scan_directory(
         require_literal_leading_dot: false,
     };
 
-    // Extend the inherited gitignore stack with this directory's own
-    // .gitignore/.ignore, if present. Computed once per directory, not
-    // per-entry — only pays the extra file reads when --no-ignore isn't set.
-    let ignore_stack: Arc<Vec<Arc<Gitignore>>> = if config.respect_gitignore {
-        match build_dir_gitignore(&task.path, config.debug) {
-            Some(gi) => {
-                let mut stack = (*task.ignore_stack).clone();
-                stack.push(Arc::new(gi));
-                Arc::new(stack)
-            }
-            None => Arc::clone(&task.ignore_stack),
-        }
-    } else {
-        Arc::clone(&task.ignore_stack)
-    };
-
-    let entries = match fs::read_dir(&task.path) {
-        Ok(entries) => entries,
+    let entries: Vec<_> = match fs::read_dir(&task.path) {
+        Ok(entries) => entries.flatten().collect(),
         Err(err) => {
             if config.debug {
                 eprintln!(
@@ -455,7 +450,35 @@ pub fn scan_directory(
         }
     };
 
-    for entry in entries.flatten() {
+    // Extend the inherited gitignore stack with this directory's own
+    // .gitignore/.ignore, if present. We already have this directory's full
+    // listing above, so check presence against that instead of attempting
+    // to open files that, for the overwhelming majority of directories,
+    // aren't there — avoids both a wasted syscall and (with --debug) a
+    // flood of harmless "No such file" noise for every directory searched.
+    let ignore_stack: Arc<Vec<Arc<Gitignore>>> = if config.respect_gitignore {
+        let present_ignore_files: Vec<&str> = [".gitignore", ".ignore"]
+            .into_iter()
+            .filter(|name| {
+                entries
+                    .iter()
+                    .any(|e| e.file_name().as_os_str() == std::ffi::OsStr::new(name))
+            })
+            .collect();
+
+        match build_dir_gitignore(&task.path, &present_ignore_files, config.debug) {
+            Some(gi) => {
+                let mut stack = (*task.ignore_stack).clone();
+                stack.push(Arc::new(gi));
+                Arc::new(stack)
+            }
+            None => Arc::clone(&task.ignore_stack),
+        }
+    } else {
+        Arc::clone(&task.ignore_stack)
+    };
+
+    for entry in entries {
         let file_type = match entry.file_type() {
             Ok(ft) => ft,
             Err(_) => continue,
@@ -619,5 +642,78 @@ mod tests {
     #[test]
     fn root_match_name_filesystem_root() {
         assert_eq!(root_match_name(Path::new("/")), Some("/".to_string()));
+    }
+
+    // ── build_dir_gitignore ──────────────────────────────────────────────────
+    //
+    // Presence must be determined by the caller (from a directory listing it
+    // already has) rather than by attempting to open ".gitignore"/".ignore"
+    // speculatively — most directories have neither file, so at scale that
+    // was a wasted open() per directory plus, with --debug on, a flood of
+    // harmless "No such file" noise.
+
+    #[test]
+    fn build_dir_gitignore_touches_nothing_when_no_files_present() {
+        use super::build_dir_gitignore;
+
+        // A path that doesn't exist at all. If this function ever tried to
+        // open a file here, it would surface as an `Err`/panic path deeper
+        // in the `ignore` crate; with an empty `present_files`, it must
+        // return `None` immediately without touching the filesystem.
+        let result = build_dir_gitignore(Path::new("/definitely/does/not/exist"), &[], true);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn build_dir_gitignore_builds_from_present_gitignore() {
+        use super::build_dir_gitignore;
+        use std::fs;
+
+        let dir = tempfile::TempDir::new().unwrap();
+        fs::write(dir.path().join(".gitignore"), b"*.log\n").unwrap();
+
+        let gi = build_dir_gitignore(dir.path(), &[".gitignore"], false);
+        assert!(gi.is_some());
+    }
+
+    #[test]
+    fn build_dir_gitignore_ignores_unlisted_files_even_if_present() {
+        use super::build_dir_gitignore;
+        use std::fs;
+
+        // ".ignore" exists on disk, but the caller only vouches for
+        // ".gitignore" being present — build_dir_gitignore must not go
+        // looking for files the caller didn't list, even if they happen to
+        // be there.
+        let dir = tempfile::TempDir::new().unwrap();
+        fs::write(dir.path().join(".gitignore"), b"*.log\n").unwrap();
+        fs::write(dir.path().join(".ignore"), b"*.tmp\n").unwrap();
+
+        let gi = build_dir_gitignore(dir.path(), &[".gitignore"], false).unwrap();
+        // Matches from .gitignore...
+        assert!(matches!(
+            gi.matched(dir.path().join("a.log"), false),
+            super::Match::Ignore(_)
+        ));
+        // ...but not from the unlisted .ignore.
+        assert!(matches!(
+            gi.matched(dir.path().join("a.tmp"), false),
+            super::Match::None
+        ));
+    }
+
+    #[test]
+    fn build_dir_gitignore_returns_none_for_empty_ignore_file() {
+        use super::build_dir_gitignore;
+        use std::fs;
+
+        // A present-but-empty (or comments/whitespace-only) ignore file
+        // contributes zero patterns, so callers can still skip extending
+        // the ignore stack for it.
+        let dir = tempfile::TempDir::new().unwrap();
+        fs::write(dir.path().join(".gitignore"), b"# just a comment\n").unwrap();
+
+        let gi = build_dir_gitignore(dir.path(), &[".gitignore"], false);
+        assert!(gi.is_none());
     }
 }

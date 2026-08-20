@@ -249,13 +249,80 @@ fn stats_count_files_and_dirs_correctly() {
 
     parallel_find(root, 4, config, stats_clone, |_| {});
 
-    // root + sub = 2 dirs scanned
+    // root + sub = 2 directories examined as candidates (root via
+    // check_root, "sub" when discovered in root's entry list)
     assert_eq!(stats.total_dirs.load(Ordering::Relaxed), 2);
     // a.txt, b.txt, c.txt = 3 files
     assert_eq!(stats.total_files.load(Ordering::Relaxed), 3);
     // all match wildcard = files + dirs + the root itself =
     // 3 files + 1 subdir "sub" + 1 root
     assert_eq!(stats.matched_count.load(Ordering::Relaxed), 5);
+}
+
+#[test]
+fn stats_count_root_even_when_max_depth_stops_recursion() {
+    use std::sync::atomic::Ordering;
+
+    // "Directories checked" means "examined as a search candidate," not
+    // "had its contents read." At --max-depth 0 the root's contents are
+    // never scanned, but the root itself was still examined and must be
+    // counted — this is the exact scenario the review flagged.
+    let (_dir, root) = make_tree(&["a.txt", "sub/b.txt"]);
+
+    let config = Arc::new(SearchConfig {
+        pattern: Pattern::new("*").unwrap(),
+        ignore_dirs: HashSet::new(),
+        max_depth: Some(0),
+        file_type: None,
+        hidden: false,
+        debug: false,
+        size_filter: None,
+        empty_only: false,
+        case_insensitive: false,
+        respect_gitignore: false,
+    });
+
+    let stats = SearchStats::new();
+    let stats_clone = stats.clone();
+
+    parallel_find(root, 4, config, stats_clone, |_| {});
+
+    assert_eq!(stats.total_dirs.load(Ordering::Relaxed), 1);
+    assert_eq!(stats.total_files.load(Ordering::Relaxed), 0);
+    assert_eq!(stats.matched_count.load(Ordering::Relaxed), 1);
+}
+
+#[test]
+fn stats_count_child_dir_examined_even_when_not_recursed_into() {
+    use std::sync::atomic::Ordering;
+
+    // At --max-depth 1, "sub" is discovered (and counted) while scanning
+    // the root, even though its own contents are never read.
+    let (_dir, root) = make_tree(&["a.txt", "sub/b.txt"]);
+
+    let config = Arc::new(SearchConfig {
+        pattern: Pattern::new("*").unwrap(),
+        ignore_dirs: HashSet::new(),
+        max_depth: Some(1),
+        file_type: None,
+        hidden: false,
+        debug: false,
+        size_filter: None,
+        empty_only: false,
+        case_insensitive: false,
+        respect_gitignore: false,
+    });
+
+    let stats = SearchStats::new();
+    let stats_clone = stats.clone();
+
+    parallel_find(root, 4, config, stats_clone, |_| {});
+
+    // root + "sub" = 2 dirs examined, even though "sub"'s contents
+    // (b.txt) are never scanned at --max-depth 1.
+    assert_eq!(stats.total_dirs.load(Ordering::Relaxed), 2);
+    // only a.txt is discovered; b.txt lives one level too deep
+    assert_eq!(stats.total_files.load(Ordering::Relaxed), 1);
 }
 
 // ── Root matching ────────────────────────────────────────────────────────────
@@ -313,6 +380,21 @@ fn root_itself_matched_only_once() {
     let names = collect_names(root, &root_name, None, None, false, &[]);
     assert_eq!(names.iter().filter(|n| **n == root_name).count(), 1);
 }
+
+// `arfind . --name "."` (and `arfind .. --name ".."`) must behave like
+// `find`: the starting argument's own literal name is "." or "..", not
+// whatever directory it happens to resolve to. This can only be exercised
+// for real when "." is the *entire*, sole path component — `Path`
+// normalizes a "." away everywhere except that leading position (see the
+// `root_match_name_trailing_dot_on_absolute_path` unit test in lib.rs), so
+// there's no way to build an equivalent multi-segment PathBuf like
+// `root.join(".")` without it losing the trailing dot before it's ever
+// compared — and simulating the true single-component case here would mean
+// mutating the test process's cwd, which is shared and would be flaky
+// under parallel `cargo test` execution. That logic (root_match_name's
+// CurDir/ParentDir handling) is covered directly by unit tests in lib.rs
+// instead; see `root_match_name_current_dir_is_dot` and
+// `root_match_name_parent_dir_is_dotdot`.
 
 // ── Edge cases ────────────────────────────────────────────────────────────────
 

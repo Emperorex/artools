@@ -4,7 +4,6 @@ use colored::Colorize;
 use glob::Pattern;
 use std::{
     collections::HashSet,
-    fs,
     path::PathBuf,
     sync::{Arc, atomic::Ordering},
     time::Instant,
@@ -143,7 +142,11 @@ fn main() {
 
     let stats = SearchStats::new();
     let start_time = Instant::now();
-    let root_path = fs::canonicalize(&args.path).unwrap_or_else(|_| PathBuf::from(&args.path));
+    // Passed as given — parallel_find canonicalizes internally, but keeps
+    // the original argument around too, since resolving "." or ".." away
+    // before matching would silently break `--name .`/`--name ..` against
+    // the root itself.
+    let root_path = PathBuf::from(&args.path);
     let count_only = args.count;
 
     parallel_find(root_path, args.jobs, config, stats.clone(), move |item| {

@@ -198,7 +198,9 @@ fn check_root(
     // symlink_metadata reports the link itself; resolve through it for
     // is_dir() the same way read_dir's per-entry file_type() would.
     let is_dir = if is_symlink {
-        fs::metadata(canonical_root).map(|m| m.is_dir()).unwrap_or(false)
+        fs::metadata(canonical_root)
+            .map(|m| m.is_dir())
+            .unwrap_or(false)
     } else {
         metadata.is_dir()
     };
@@ -402,7 +404,10 @@ pub fn scan_directory(
     // it has reached the limit, its contents are one level too deep to
     // report and must not be examined at all — not read, not matched, and
     // not recursed into.
-    if config.max_depth.is_some_and(|max_depth| task.depth >= max_depth) {
+    if config
+        .max_depth
+        .is_some_and(|max_depth| task.depth >= max_depth)
+    {
         return;
     }
 
@@ -583,10 +588,7 @@ mod tests {
     #[test]
     fn root_match_name_normal_relative_path() {
         assert_eq!(root_match_name(Path::new("foo")), Some("foo".to_string()));
-        assert_eq!(
-            root_match_name(Path::new("./foo")),
-            Some("foo".to_string())
-        );
+        assert_eq!(root_match_name(Path::new("./foo")), Some("foo".to_string()));
     }
 
     #[test]

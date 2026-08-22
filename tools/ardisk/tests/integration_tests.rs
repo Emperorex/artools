@@ -189,6 +189,45 @@ fn symlinked_files_are_not_counted() {
     assert_eq!(root_raw, expected, "symlink should not be counted");
 }
 
+// ── hard-link dedup ────────────────────────────────────────────────────────────
+
+#[cfg(unix)]
+#[test]
+fn hard_linked_files_are_only_counted_once() {
+    use std::os::unix::fs::MetadataExt;
+
+    let (_dir, root) = make_tree(&["a/real.txt"]);
+    fs::hard_link(root.join("a/real.txt"), root.join("b").join("linked.txt")).unwrap_or_else(
+        |_| {
+            fs::create_dir_all(root.join("b")).unwrap();
+            fs::hard_link(root.join("a/real.txt"), root.join("b/linked.txt")).unwrap();
+        },
+    );
+
+    let config = default_config(false);
+    let (raw, _content) = parallel_scan(root.clone(), 4, config);
+    let sizes = aggregate_sizes(&raw, &root);
+
+    let file_meta = fs::metadata(root.join("a/real.txt")).unwrap();
+    assert!(
+        file_meta.nlink() > 1,
+        "test setup: file should be hard-linked"
+    );
+    let single_file_size = file_meta.blocks() * 512;
+
+    // Root should carry the file's size only once, plus both dirs' and the
+    // root's own inode costs — not twice for the two hard-linked names.
+    let expected = single_file_size
+        + dir_self_size(&root)
+        + dir_self_size(&root.join("a"))
+        + dir_self_size(&root.join("b"));
+
+    assert_eq!(
+        sizes[&root], expected,
+        "hard-linked file should only be counted once across the whole tree"
+    );
+}
+
 // ── parallel_scan raw output ──────────────────────────────────────────────────
 
 #[test]

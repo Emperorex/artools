@@ -64,6 +64,10 @@ pub fn parallel_scan(
     let active_tasks = Arc::new(AtomicUsize::new(1));
     let raw_sizes = Arc::new(Mutex::new(HashMap::<PathBuf, u64>::new()));
     let content_sizes = Arc::new(Mutex::new(HashMap::<PathBuf, u64>::new()));
+    // Global (dev, ino) dedup set so hard-linked files are only counted once
+    // per invocation, mirroring GNU `du`'s behavior. Shared across all worker
+    // threads for the entire traversal, not just per-directory.
+    let seen_inodes = Arc::new(Mutex::new(HashSet::<(u64, u64)>::new()));
 
     task_tx.send(Task { path: root }).unwrap();
 
@@ -76,6 +80,7 @@ pub fn parallel_scan(
         let raw_sizes = Arc::clone(&raw_sizes);
         let content_sizes = Arc::clone(&content_sizes);
         let active_tasks = Arc::clone(&active_tasks);
+        let seen_inodes = Arc::clone(&seen_inodes);
 
         let handle = thread::spawn(move || {
             loop {
@@ -100,6 +105,7 @@ pub fn parallel_scan(
                     &active_tasks,
                     &raw_sizes,
                     &content_sizes,
+                    &seen_inodes,
                 );
                 active_tasks.fetch_sub(1, Ordering::SeqCst);
             }
@@ -148,6 +154,7 @@ pub fn scan_directory(
     active_tasks: &AtomicUsize,
     raw_sizes: &Mutex<HashMap<PathBuf, u64>>,
     content_sizes: &Mutex<HashMap<PathBuf, u64>>,
+    seen_inodes: &Mutex<HashSet<(u64, u64)>>,
 ) {
     // Retry on EINTR — macOS interrupts syscalls with signals from system
     // processes (Spotlight, sandboxd, etc.). Safe to retry unconditionally.
@@ -195,9 +202,33 @@ pub fn scan_directory(
             }
 
             if let Ok(metadata) = entry.metadata() {
-                let file_size = size_from_metadata(&metadata, config.apparent_size);
-                local_content_size += file_size;
-                local_dir_size += file_size;
+                // Hard-link dedup: if this inode has multiple links, only
+                // count its size the first time we see it across the whole
+                // traversal (GNU `du` semantics for a single invocation).
+                // Skip the lookup entirely for the common case (nlink == 1)
+                // to avoid needless mutex contention.
+                let already_counted = {
+                    #[cfg(unix)]
+                    {
+                        if metadata.nlink() > 1 {
+                            let key = (metadata.dev(), metadata.ino());
+                            let mut seen = seen_inodes.lock().unwrap();
+                            !seen.insert(key)
+                        } else {
+                            false
+                        }
+                    }
+                    #[cfg(not(unix))]
+                    {
+                        false
+                    }
+                };
+
+                if !already_counted {
+                    let file_size = size_from_metadata(&metadata, config.apparent_size);
+                    local_content_size += file_size;
+                    local_dir_size += file_size;
+                }
             }
         }
     }

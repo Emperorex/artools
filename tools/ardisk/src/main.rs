@@ -88,12 +88,35 @@ struct Args {
     /// Matches the output of du -sh on macOS and Linux.
     #[arg(long)]
     apparent_size: bool,
+
+    /// Additional ignored directories
+    #[arg(long)]
+    ignore: Vec<String>,
+
+    /// Do not respect .gitignore / .ignore files (scan everything)
+    #[arg(long = "no-ignore")]
+    no_ignore: bool,
+}
+
+/// Builds the set of directory names to skip, given `--no-ignore` and any
+/// explicit `--ignore` values. `--no-ignore` disables the built-in defaults
+/// (`.git`, `node_modules`, `__pycache__`), but an explicit `--ignore` is
+/// still honored either way, since that's the user asking for something
+/// specific rather than the tool's automatic noise filtering.
+fn build_ignore_dirs(no_ignore: bool, extra: Vec<String>) -> HashSet<String> {
+    let mut ignore_dirs: HashSet<String> = if no_ignore {
+        HashSet::new()
+    } else {
+        DEFAULT_IGNORES.iter().map(|s| s.to_string()).collect()
+    };
+    ignore_dirs.extend(extra);
+    ignore_dirs
 }
 
 fn main() {
     let args = Args::parse();
 
-    let ignore_dirs: HashSet<String> = DEFAULT_IGNORES.iter().map(|s| s.to_string()).collect();
+    let ignore_dirs = build_ignore_dirs(args.no_ignore, args.ignore);
     let target_path = fs::canonicalize(&args.path).unwrap_or_else(|_| PathBuf::from(&args.path));
 
     let include_pattern: Option<Pattern> = match &args.include {
@@ -110,7 +133,13 @@ fn main() {
         None => None,
     };
 
-    let config = build_config(ignore_dirs, include_pattern, args.debug, args.apparent_size);
+    let config = build_config(
+        ignore_dirs,
+        include_pattern,
+        args.debug,
+        args.apparent_size,
+        !args.no_ignore,
+    );
 
     let start_time = Instant::now();
 
@@ -189,7 +218,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_threshold;
+    use super::{build_ignore_dirs, parse_threshold};
 
     // ── Valid inputs ──────────────────────────────────────────────────────────
 
@@ -261,5 +290,35 @@ mod tests {
     #[test]
     fn parse_empty_string_returns_error() {
         assert!(parse_threshold("").is_err());
+    }
+
+    // ── build_ignore_dirs ────────────────────────────────────────────────────
+
+    #[test]
+    fn default_ignores_included_when_not_no_ignore() {
+        let dirs = build_ignore_dirs(false, vec![]);
+        assert!(dirs.contains(".git"));
+        assert!(dirs.contains("node_modules"));
+        assert!(dirs.contains("__pycache__"));
+    }
+
+    #[test]
+    fn no_ignore_excludes_default_ignores() {
+        let dirs = build_ignore_dirs(true, vec![]);
+        assert!(dirs.is_empty());
+    }
+
+    #[test]
+    fn explicit_ignore_honored_alongside_defaults() {
+        let dirs = build_ignore_dirs(false, vec!["vendor".to_string()]);
+        assert!(dirs.contains("vendor"));
+        assert!(dirs.contains(".git"));
+    }
+
+    #[test]
+    fn explicit_ignore_honored_even_with_no_ignore() {
+        let dirs = build_ignore_dirs(true, vec!["vendor".to_string()]);
+        assert_eq!(dirs.len(), 1);
+        assert!(dirs.contains("vendor"));
     }
 }

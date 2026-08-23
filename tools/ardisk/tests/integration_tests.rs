@@ -35,7 +35,7 @@ fn dir_self_size(path: &PathBuf) -> u64 {
 
 fn default_config(debug: bool) -> std::sync::Arc<ardisk::ScanConfig> {
     let ignore_dirs: HashSet<String> = DEFAULT_IGNORES.iter().map(|s| s.to_string()).collect();
-    build_config(ignore_dirs, None, debug, false)
+    build_config(ignore_dirs, None, debug, false, true)
 }
 
 fn run(root: PathBuf) -> std::collections::HashMap<PathBuf, u64> {
@@ -150,7 +150,7 @@ fn custom_ignore_excludes_specified_dir() {
 
     let mut ignore_dirs: HashSet<String> = DEFAULT_IGNORES.iter().map(|s| s.to_string()).collect();
     ignore_dirs.insert("vendor".to_string());
-    let config = build_config(ignore_dirs, None, false, false);
+    let config = build_config(ignore_dirs, None, false, false, true);
 
     let (raw, _content) = parallel_scan(root.clone(), 4, config);
     let sizes = aggregate_sizes(&raw, &root);
@@ -304,6 +304,7 @@ fn config_with_include(pattern: &str) -> std::sync::Arc<ardisk::ScanConfig> {
         Some(Pattern::new(pattern).unwrap()),
         false,
         false,
+        true,
     )
 }
 
@@ -346,6 +347,7 @@ fn include_pattern_rolls_up_correctly_to_root() {
         None,
         false,
         false,
+        true,
     );
     let config_rs = config_with_include("*.rs");
 
@@ -406,6 +408,7 @@ fn include_pattern_wildcard_matches_all_files() {
         None,
         false,
         false,
+        true,
     );
 
     let (raw_wildcard, _content_wildcard) = parallel_scan(root.clone(), 4, config_wildcard);
@@ -476,6 +479,7 @@ fn apparent_size_uses_logical_file_length() {
         None,
         false,
         true, // apparent_size
+        true,
     );
 
     let (raw, _content) = parallel_scan(root.clone(), 4, config_apparent);
@@ -499,6 +503,7 @@ fn apparent_size_false_uses_block_allocation() {
         None,
         false,
         false, // apparent_size = false → blocks * 512
+        true,
     );
 
     let (raw, _content) = parallel_scan(root.clone(), 4, config_blocks);
@@ -516,12 +521,14 @@ fn apparent_size_produces_smaller_or_equal_size_than_blocks() {
         None,
         false,
         true,
+        true,
     );
     let config_blocks = build_config(
         DEFAULT_IGNORES.iter().map(|s| s.to_string()).collect(),
         None,
         false,
         false,
+        true,
     );
 
     let (raw_apparent, _content_apparent) = parallel_scan(root.clone(), 4, config_apparent);

@@ -40,6 +40,7 @@ fn default_config(query: &str, ignore_case: bool) -> std::sync::Arc<argrep::Sear
         include_pattern: None,
         before_context: 0,
         after_context: 0,
+        respect_gitignore: true,
     })
 }
 
@@ -220,6 +221,7 @@ fn custom_ignore_dir_is_excluded() {
         include_pattern: None,
         before_context: 0,
         after_context: 0,
+        respect_gitignore: true,
     });
     let stats = SearchStats::new();
     let results: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
@@ -264,6 +266,7 @@ fn stats_counts_are_accurate() {
         include_pattern: None,
         before_context: 0,
         after_context: 0,
+        respect_gitignore: true,
     });
     let stats = SearchStats::new();
     let stats_clone = stats.clone();
@@ -302,6 +305,7 @@ fn multiple_workers_find_same_matches_as_single_worker() {
             include_pattern: None,
             before_context: 0,
             after_context: 0,
+            respect_gitignore: true,
         });
         let results: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
         let r = Arc::clone(&results);
@@ -368,6 +372,7 @@ fn invert_returns_non_matching_lines() {
         include_pattern: None,
         before_context: 0,
         after_context: 0,
+        respect_gitignore: true,
     });
     let results: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
     let r = Arc::clone(&results);
@@ -399,6 +404,7 @@ fn invert_with_no_matches_returns_all_lines() {
         include_pattern: None,
         before_context: 0,
         after_context: 0,
+        respect_gitignore: true,
     });
     let results: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
     let r = Arc::clone(&results);
@@ -436,6 +442,7 @@ fn files_with_matches_returns_only_filenames() {
         include_pattern: None,
         before_context: 0,
         after_context: 0,
+        respect_gitignore: true,
     });
     let results: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
     let r = Arc::clone(&results);
@@ -472,6 +479,7 @@ fn files_with_matches_emits_each_file_once() {
         include_pattern: None,
         before_context: 0,
         after_context: 0,
+        respect_gitignore: true,
     });
     let results: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
     let r = Arc::clone(&results);
@@ -515,6 +523,7 @@ fn count_per_file_returns_correct_counts() {
         include_pattern: None,
         before_context: 0,
         after_context: 0,
+        respect_gitignore: true,
     });
     let results: Arc<Mutex<Vec<(String, usize)>>> = Arc::new(Mutex::new(Vec::new()));
     let r = Arc::clone(&results);
@@ -560,6 +569,7 @@ fn count_per_file_emits_result_for_every_file() {
         include_pattern: None,
         before_context: 0,
         after_context: 0,
+        respect_gitignore: true,
     });
     let results: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
     let r = Arc::clone(&results);
@@ -603,6 +613,7 @@ fn include_pattern_searches_only_matching_files() {
         include_pattern: Some(Pattern::new("*.rs").unwrap()),
         before_context: 0,
         after_context: 0,
+        respect_gitignore: true,
     });
     let results: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
     let r = Arc::clone(&results);
@@ -636,6 +647,7 @@ fn include_pattern_no_files_match_returns_empty() {
         include_pattern: Some(Pattern::new("*.txt").unwrap()),
         before_context: 0,
         after_context: 0,
+        respect_gitignore: true,
     });
     let results: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
     let r = Arc::clone(&results);
@@ -665,6 +677,7 @@ fn include_wildcard_matches_all_files() {
         include_pattern: None,
         before_context: 0,
         after_context: 0,
+        respect_gitignore: true,
     });
     let config_wild = StdArc::new(SearchConfig {
         normalized_query: normalize_query("needle", false),
@@ -679,6 +692,7 @@ fn include_wildcard_matches_all_files() {
         include_pattern: Some(Pattern::new("*").unwrap()),
         before_context: 0,
         after_context: 0,
+        respect_gitignore: true,
     });
 
     let run = |config: std::sync::Arc<argrep::SearchConfig>| {
@@ -725,6 +739,7 @@ fn before_context_includes_leading_lines() {
         include_pattern: None,
         before_context: 2,
         after_context: 0,
+        respect_gitignore: true,
     });
 
     let results: Arc<Mutex<Vec<(usize, String, bool)>>> = Arc::new(Mutex::new(Vec::new()));
@@ -768,6 +783,7 @@ fn after_context_includes_trailing_lines() {
         include_pattern: None,
         before_context: 0,
         after_context: 2,
+        respect_gitignore: true,
     });
 
     let results: Arc<Mutex<Vec<(usize, String, bool)>>> = Arc::new(Mutex::new(Vec::new()));
@@ -814,6 +830,7 @@ fn context_both_and_group_separator() {
         include_pattern: None,
         before_context: 1,
         after_context: 1,
+        respect_gitignore: true,
     });
 
     let results: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));

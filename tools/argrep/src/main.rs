@@ -70,12 +70,35 @@ struct Args {
     /// Show NUM lines of leading and trailing context around matching lines
     #[arg(short = 'C', long = "context")]
     context: Option<usize>,
+
+    /// Additional ignored directories
+    #[arg(long)]
+    ignore: Vec<String>,
+
+    /// Do not respect .gitignore / .ignore files (search everything)
+    #[arg(long = "no-ignore")]
+    no_ignore: bool,
+}
+
+/// Builds the set of directory names to skip, given `--no-ignore` and any
+/// explicit `--ignore` values. `--no-ignore` disables the built-in defaults
+/// (`.git`, `node_modules`, `__pycache__`, `target`), but an explicit
+/// `--ignore` is still honored either way, since that's the user asking for
+/// something specific rather than the tool's automatic noise filtering.
+fn build_ignore_dirs(no_ignore: bool, extra: Vec<String>) -> HashSet<String> {
+    let mut ignore_dirs: HashSet<String> = if no_ignore {
+        HashSet::new()
+    } else {
+        DEFAULT_IGNORES.iter().map(|s| s.to_string()).collect()
+    };
+    ignore_dirs.extend(extra);
+    ignore_dirs
 }
 
 fn main() {
     let args = Args::parse();
 
-    let ignore_dirs: HashSet<String> = DEFAULT_IGNORES.iter().map(|s| s.to_string()).collect();
+    let ignore_dirs = build_ignore_dirs(args.no_ignore, args.ignore);
 
     let include_pattern: Option<Pattern> = match &args.include {
         Some(p) => match Pattern::new(p) {
@@ -93,6 +116,7 @@ fn main() {
 
     let before_context = args.before_context.or(args.context).unwrap_or(0);
     let after_context = args.after_context.or(args.context).unwrap_or(0);
+    let respect_gitignore = !args.no_ignore;
 
     let config = Arc::new(SearchConfig {
         normalized_query: normalize_query(&args.query, args.ignore_case),
@@ -107,6 +131,7 @@ fn main() {
         include_pattern,
         before_context,
         after_context,
+        respect_gitignore,
     });
 
     let stats = SearchStats::new();
@@ -326,5 +351,39 @@ fn print_result(
         };
 
         println!("{}{}{}", prefix, sep, content);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::build_ignore_dirs;
+
+    #[test]
+    fn default_ignores_included_when_not_no_ignore() {
+        let dirs = build_ignore_dirs(false, vec![]);
+        assert!(dirs.contains(".git"));
+        assert!(dirs.contains("node_modules"));
+        assert!(dirs.contains("__pycache__"));
+        assert!(dirs.contains("target"));
+    }
+
+    #[test]
+    fn no_ignore_excludes_default_ignores() {
+        let dirs = build_ignore_dirs(true, vec![]);
+        assert!(dirs.is_empty());
+    }
+
+    #[test]
+    fn explicit_ignore_honored_alongside_defaults() {
+        let dirs = build_ignore_dirs(false, vec!["vendor".to_string()]);
+        assert!(dirs.contains("vendor"));
+        assert!(dirs.contains(".git"));
+    }
+
+    #[test]
+    fn explicit_ignore_honored_even_with_no_ignore() {
+        let dirs = build_ignore_dirs(true, vec!["vendor".to_string()]);
+        assert_eq!(dirs.len(), 1);
+        assert!(dirs.contains("vendor"));
     }
 }

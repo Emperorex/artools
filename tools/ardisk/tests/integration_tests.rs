@@ -33,6 +33,12 @@ fn dir_self_size(path: &PathBuf) -> u64 {
     fs::metadata(path).map(|m| m.len()).unwrap_or(0)
 }
 
+/// Same as `dir_self_size` but using logical length (apparent size) instead
+/// of block allocation, for tests that run with `--apparent-size`.
+fn dir_self_apparent_size(path: &PathBuf) -> u64 {
+    fs::metadata(path).map(|m| m.len()).unwrap_or(0)
+}
+
 fn default_config(debug: bool) -> std::sync::Arc<ardisk::ScanConfig> {
     let ignore_dirs: HashSet<String> = DEFAULT_IGNORES.iter().map(|s| s.to_string()).collect();
     build_config(ignore_dirs, None, debug, false, true)
@@ -225,6 +231,54 @@ fn hard_linked_files_are_only_counted_once() {
     assert_eq!(
         sizes[&root], expected,
         "hard-linked file should only be counted once across the whole tree"
+    );
+}
+
+// A hard link is two directory entries pointing at the same inode — it's the
+// same filesystem object no matter which "view" of size you ask for.
+// Physical size and apparent (logical) size are just two different ways of
+// measuring *that one object*, so dedup must apply identically to both, not
+// only to the physical-size path.
+#[cfg(unix)]
+#[test]
+fn hard_linked_files_are_only_counted_once_with_apparent_size() {
+    use std::os::unix::fs::MetadataExt;
+
+    let (_dir, root) = make_tree(&["a/real.txt"]);
+    fs::hard_link(root.join("a/real.txt"), root.join("b").join("linked.txt")).unwrap_or_else(
+        |_| {
+            fs::create_dir_all(root.join("b")).unwrap();
+            fs::hard_link(root.join("a/real.txt"), root.join("b/linked.txt")).unwrap();
+        },
+    );
+
+    let file_meta = fs::metadata(root.join("a/real.txt")).unwrap();
+    assert!(
+        file_meta.nlink() > 1,
+        "test setup: file should be hard-linked"
+    );
+
+    let config = build_config(
+        DEFAULT_IGNORES.iter().map(|s| s.to_string()).collect(),
+        None,
+        false,
+        true, // apparent_size
+        true,
+    );
+    let (raw, _content) = parallel_scan(root.clone(), 4, config);
+    let sizes = aggregate_sizes(&raw, &root);
+
+    // Logical size is 5 bytes ("hello"), same as with --apparent-size off,
+    // and must still be counted only once even though it has two names.
+    let single_file_size = file_meta.len();
+    let expected = single_file_size
+        + dir_self_apparent_size(&root)
+        + dir_self_apparent_size(&root.join("a"))
+        + dir_self_apparent_size(&root.join("b"));
+
+    assert_eq!(
+        sizes[&root], expected,
+        "hard-linked file should only be counted once under --apparent-size too"
     );
 }
 

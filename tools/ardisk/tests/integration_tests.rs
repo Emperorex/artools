@@ -282,6 +282,100 @@ fn hard_linked_files_are_only_counted_once_with_apparent_size() {
     );
 }
 
+// ── sparse file size semantics ────────────────────────────────────────────────
+
+// A sparse file's logical length (st_size) can be far larger than what is
+// actually allocated on disk — the "holes" in it don't consume blocks.
+// ardisk's default (physical) mode must reflect real disk usage, exactly
+// like `du`, while --apparent-size must reflect the logical length, exactly
+// like `du --apparent-size`. This proves both halves of that contract on the
+// same file: physical < apparent, and apparent == exact logical length. We
+// deliberately do NOT assert an exact physical byte count (e.g. "4096")
+// since block size and hole-filling behavior vary by filesystem — only that
+// it's substantially smaller than the logical size.
+#[cfg(unix)]
+#[test]
+fn sparse_file_physical_size_is_smaller_than_logical_size() {
+    use std::io::{Seek, SeekFrom, Write};
+    use std::os::unix::fs::MetadataExt;
+
+    let (_dir, root) = make_tree(&[]);
+    let sparse_path = root.join("sparse.bin");
+
+    // Write a few bytes at the start, then seek far ahead and write a few
+    // more, leaving an 8 MB hole that a sparse-aware filesystem (tmpfs,
+    // ext4, xfs, apfs, ...) should not allocate blocks for.
+    const LOGICAL_SIZE: u64 = 8 * 1024 * 1024; // 8 MB
+    {
+        let mut f = fs::File::create(&sparse_path).unwrap();
+        f.write_all(b"start").unwrap();
+        f.seek(SeekFrom::Start(LOGICAL_SIZE - 5)).unwrap();
+        f.write_all(b"end!!").unwrap();
+    }
+
+    let file_meta = fs::metadata(&sparse_path).unwrap();
+    assert_eq!(
+        file_meta.len(),
+        LOGICAL_SIZE,
+        "test setup: unexpected logical file size"
+    );
+
+    // Whether write() past EOF actually leaves a hole is an environment
+    // property (filesystem, encryption, temp-dir backing store), not
+    // something ardisk controls. Skip gracefully rather than failing the
+    // build on a machine/tmpdir that happens to fully materialize the gap.
+    let physical_bytes = file_meta.blocks() * 512;
+    if physical_bytes >= file_meta.len() {
+        eprintln!(
+            "skipping sparse_file_physical_size_is_smaller_than_logical_size: \
+             this filesystem/tmpdir did not leave the file sparse (physical {} >= \
+             logical {} bytes); sparse-file behavior is environment-dependent",
+            physical_bytes,
+            file_meta.len()
+        );
+        return;
+    }
+
+    // --apparent-size mode must equal the exact logical size (st_size),
+    // holes included.
+    let apparent_config = build_config(
+        DEFAULT_IGNORES.iter().map(|s| s.to_string()).collect(),
+        None,
+        false,
+        true, // apparent_size
+        true,
+    );
+    let (raw_apparent, _content) = parallel_scan(root.clone(), 4, apparent_config);
+    let apparent_sizes = aggregate_sizes(&raw_apparent, &root);
+    let expected_apparent = LOGICAL_SIZE + dir_self_apparent_size(&root);
+    assert_eq!(
+        apparent_sizes[&root], expected_apparent,
+        "--apparent-size must report the file's exact logical size (st_size)"
+    );
+
+    // Default (physical) mode must reflect real block allocation, not the
+    // logical size: strictly smaller than apparent, and by a wide margin —
+    // not just off by a rounding block — since only ~10 bytes were actually
+    // written into an 8 MB logical file.
+    let physical_config = default_config(false);
+    let (raw_physical, _content) = parallel_scan(root.clone(), 4, physical_config);
+    let physical_sizes = aggregate_sizes(&raw_physical, &root);
+
+    assert!(
+        physical_sizes[&root] < apparent_sizes[&root],
+        "physical size ({}) should be smaller than apparent size ({}) for a sparse file",
+        physical_sizes[&root],
+        apparent_sizes[&root]
+    );
+    assert!(
+        physical_sizes[&root] <= apparent_sizes[&root] / 2,
+        "physical size ({}) should be substantially smaller than apparent size ({}) \
+         for an 8 MB file with only ~10 bytes actually written",
+        physical_sizes[&root],
+        apparent_sizes[&root]
+    );
+}
+
 // ── parallel_scan raw output ──────────────────────────────────────────────────
 
 #[test]

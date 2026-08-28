@@ -1,5 +1,6 @@
 use ardisk::{DEFAULT_IGNORES, aggregate_sizes, build_config, format_size, parallel_scan};
 use clap::Parser;
+use clap::builder::TypedValueParser as _;
 use colored::Colorize;
 use glob::Pattern;
 use std::{collections::HashSet, fs, path::PathBuf, time::Instant};
@@ -57,7 +58,12 @@ struct Args {
     path: String,
 
     /// Number of worker threads
-    #[arg(short = 'j', long, default_value_t = 4)]
+    #[arg(
+        short = 'j',
+        long,
+        default_value_t = 4,
+        value_parser = clap::value_parser!(u16).range(1..).map(|v| v as usize)
+    )]
     jobs: usize,
 
     /// Show errors and detailed execution metrics
@@ -218,7 +224,38 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{build_ignore_dirs, parse_threshold};
+    use super::{Args, build_ignore_dirs, parse_threshold};
+    use clap::Parser;
+
+    // ── -j / --jobs boundary ─────────────────────────────────────────────────
+    // `0` workers means the task queue is never drained, silently producing
+    // an empty (wrong) result with exit code 0 — worse than a crash for
+    // automation. This must be rejected at CLI parse time, not left to the
+    // worker pool to (fail to) handle.
+
+    #[test]
+    fn jobs_zero_is_rejected_at_parse_time() {
+        let result = Args::try_parse_from(["ardisk", ".", "-j", "0"]);
+        assert!(result.is_err(), "-j 0 must be a CLI parse error");
+    }
+
+    #[test]
+    fn jobs_one_is_accepted() {
+        let args = Args::try_parse_from(["ardisk", ".", "-j", "1"]).unwrap();
+        assert_eq!(args.jobs, 1);
+    }
+
+    #[test]
+    fn jobs_two_is_accepted() {
+        let args = Args::try_parse_from(["ardisk", ".", "-j", "2"]).unwrap();
+        assert_eq!(args.jobs, 2);
+    }
+
+    #[test]
+    fn jobs_default_is_four() {
+        let args = Args::try_parse_from(["ardisk", "."]).unwrap();
+        assert_eq!(args.jobs, 4);
+    }
 
     // ── Valid inputs ──────────────────────────────────────────────────────────
 

@@ -1,4 +1,5 @@
 use clap::Parser;
+use clap::builder::TypedValueParser as _;
 use colored::Colorize;
 use crossbeam_channel::{Sender, unbounded};
 use glob::Pattern;
@@ -36,7 +37,12 @@ pub struct Args {
     pub case_insensitive: bool,
 
     /// Number of worker threads
-    #[arg(short = 'j', long, default_value_t = 4)]
+    #[arg(
+        short = 'j',
+        long,
+        default_value_t = 4,
+        value_parser = clap::value_parser!(u16).range(1..).map(|v| v as usize)
+    )]
     pub jobs: usize,
 
     /// Maximum recursion depth
@@ -595,8 +601,39 @@ pub fn scan_directory(
 
 #[cfg(test)]
 mod tests {
-    use super::root_match_name;
+    use super::{Args, root_match_name};
+    use clap::Parser;
     use std::path::Path;
+
+    // ── -j / --jobs boundary ─────────────────────────────────────────────────
+    // `0` workers means the task queue is never drained. arfind additionally
+    // prints the root before spawning any workers, so `-j 0` looks like it
+    // did something even though traversal never runs — this must be
+    // rejected at CLI parse time so all three tools behave identically.
+
+    #[test]
+    fn jobs_zero_is_rejected_at_parse_time() {
+        let result = Args::try_parse_from(["arfind", ".", "-j", "0"]);
+        assert!(result.is_err(), "-j 0 must be a CLI parse error");
+    }
+
+    #[test]
+    fn jobs_one_is_accepted() {
+        let args = Args::try_parse_from(["arfind", ".", "-j", "1"]).unwrap();
+        assert_eq!(args.jobs, 1);
+    }
+
+    #[test]
+    fn jobs_two_is_accepted() {
+        let args = Args::try_parse_from(["arfind", ".", "-j", "2"]).unwrap();
+        assert_eq!(args.jobs, 2);
+    }
+
+    #[test]
+    fn jobs_default_is_four() {
+        let args = Args::try_parse_from(["arfind", "."]).unwrap();
+        assert_eq!(args.jobs, 4);
+    }
 
     #[test]
     fn root_match_name_current_dir_is_dot() {

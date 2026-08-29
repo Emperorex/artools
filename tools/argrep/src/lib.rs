@@ -355,8 +355,20 @@ pub fn grep_file(
         }
     }
 
-    // Process file line by line, reusing a single heap allocation
-    let mut line = String::new();
+    // Process file line by line, reusing a single heap allocation.
+    //
+    // We read raw bytes (read_until) rather than read_line, and decode each
+    // line with from_utf8_lossy instead of relying on String's strict UTF-8
+    // validation. read_line() returns Err on invalid UTF-8, and looping with
+    // `while let Ok(...)` silently treats that Err exactly like EOF: the
+    // rest of the file — every remaining line, including real matches — is
+    // dropped with no error and a clean exit. A grep-like tool cannot afford
+    // that. Real-world text files (logs with a stray non-UTF-8 byte, files
+    // in a legacy encoding, etc.) still deserve every other line searched;
+    // invalid sequences become U+FFFD in that one line rather than aborting
+    // the scan, matching how tools like ripgrep treat non-UTF-8 files by
+    // default.
+    let mut line_bytes: Vec<u8> = Vec::new();
     let mut line_num = 0usize;
     let mut match_count = 0usize;
 
@@ -369,11 +381,21 @@ pub fn grep_file(
     let mut last_printed_line = 0usize;
     let mut has_printed_anything = false;
 
-    while let Ok(bytes) = reader.read_line(&mut line) {
-        if bytes == 0 {
-            break; // EOF
+    loop {
+        line_bytes.clear();
+        match reader.read_until(b'\n', &mut line_bytes) {
+            Ok(0) => break, // EOF
+            Ok(_) => {}
+            Err(err) => {
+                if config.debug {
+                    eprintln!("{}: {}: {}", "argrep".red(), file_path.display(), err);
+                }
+                break;
+            }
         }
         line_num += 1;
+
+        let line = String::from_utf8_lossy(&line_bytes);
 
         let line_matches = if config.ignore_case {
             line.to_lowercase().contains(&config.normalized_query)
@@ -441,7 +463,7 @@ pub fn grep_file(
                 let _ = output_tx.send(MatchResult {
                     file_path: file_path.to_path_buf(),
                     line_num,
-                    line_content: line.clone(),
+                    line_content: line.to_string(),
                     count: None,
                     is_context: false,
                     is_separator: false,
@@ -451,7 +473,7 @@ pub fn grep_file(
                 after_remaining = after_ctx;
 
                 if before_ctx > 0 {
-                    before_buffer.push_back((line_num, line.clone()));
+                    before_buffer.push_back((line_num, line.to_string()));
                 }
             }
             // -c mode: accumulate count, emit at end
@@ -460,7 +482,7 @@ pub fn grep_file(
                 let _ = output_tx.send(MatchResult {
                     file_path: file_path.to_path_buf(),
                     line_num,
-                    line_content: line.clone(),
+                    line_content: line.to_string(),
                     count: None,
                     is_context: true,
                     is_separator: false,
@@ -473,11 +495,9 @@ pub fn grep_file(
                 if before_buffer.len() == before_ctx {
                     before_buffer.pop_front();
                 }
-                before_buffer.push_back((line_num, line.clone()));
+                before_buffer.push_back((line_num, line.to_string()));
             }
         }
-
-        line.clear();
     }
 
     // -c: emit one result per file with the total count

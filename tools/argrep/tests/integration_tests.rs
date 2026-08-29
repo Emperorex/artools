@@ -164,6 +164,42 @@ fn text_file_without_null_bytes_is_searched() {
     assert_eq!(names, vec!["text.txt"]);
 }
 
+// A line with invalid UTF-8 bytes has no NUL byte, so the binary sniffer
+// (first 1024 bytes, NUL check only) waves it through as "text" — it must
+// not then silently truncate the scan. grep_file used to read lines with
+// read_line() in a `while let Ok(...)` loop; read_line() returns Err on
+// invalid UTF-8, and that Err was indistinguishable from EOF to the loop,
+// so every line after the bad one — including real matches — was dropped
+// with a clean, silent exit (exit code 0, no error, no missing lines).
+#[test]
+fn invalid_utf8_line_does_not_truncate_remaining_matches() {
+    let dir = TempDir::new().unwrap();
+    let root = fs::canonicalize(dir.path()).unwrap();
+
+    // No NUL byte anywhere, so this file is not detected as binary — but
+    // the middle line is not valid UTF-8 (0xFF is never a valid UTF-8 lead
+    // byte), and there's a real match both before and after it.
+    let mut content = Vec::new();
+    content.extend_from_slice(b"match line one\n");
+    content.extend_from_slice(&[0xFF, 0xFE, b'\n']);
+    content.extend_from_slice(b"match line two\n");
+    fs::write(root.join("mixed.txt"), &content).unwrap();
+
+    let (names, lines) = collect_matches(root, "match", false);
+    assert_eq!(
+        names,
+        vec!["mixed.txt", "mixed.txt"],
+        "both matches around the invalid-UTF-8 line must still be found, \
+         not silently dropped after the bad line"
+    );
+    assert_eq!(
+        lines,
+        vec!["match line one", "match line two"],
+        "scanning must continue past an invalid-UTF-8 line instead of \
+         stopping there"
+    );
+}
+
 // ── Hidden file and directory skipping ───────────────────────────────────────
 
 #[test]

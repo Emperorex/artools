@@ -3,9 +3,9 @@ use glob::Pattern;
 use std::sync::Arc as StdArc;
 use std::{
     collections::HashSet,
-    fs,
+    fs::{self, File},
     path::PathBuf,
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, atomic::Ordering},
 };
 use tempfile::TempDir;
 
@@ -197,6 +197,74 @@ fn invalid_utf8_line_does_not_truncate_remaining_matches() {
         vec!["match line one", "match line two"],
         "scanning must continue past an invalid-UTF-8 line instead of \
          stopping there"
+    );
+}
+
+// ── I/O errors ───────────────────────────────────────────────────────────────
+//
+// Contract: an unreadable file must not silently vanish from the result as
+// if it simply had no matches. The scan continues past it (other files are
+// still searched and their matches still reported), but the caller must be
+// able to tell the result set is incomplete. main.rs uses io_errors to set
+// a nonzero exit code for exactly this reason — for a grep-like tool,
+// "found nothing" and "couldn't read everything" must not look the same.
+
+#[cfg(unix)]
+#[test]
+fn unreadable_file_is_skipped_but_other_matches_are_still_found() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let (_dir, root) = make_tree(&[
+        ("readable_one.txt", "needle before\n"),
+        ("blocked.txt", "needle hidden here\n"),
+        ("readable_two.txt", "needle after\n"),
+    ]);
+
+    let blocked_path = root.join("blocked.txt");
+    fs::set_permissions(&blocked_path, fs::Permissions::from_mode(0o000)).unwrap();
+
+    // Running as root (some CI containers do) ignores permission bits
+    // entirely, so this scenario can't be exercised there — skip rather
+    // than fail on an environment we can't control.
+    if File::open(&blocked_path).is_ok() {
+        fs::set_permissions(&blocked_path, fs::Permissions::from_mode(0o644)).unwrap();
+        eprintln!(
+            "skipping unreadable_file_is_skipped_but_other_matches_are_still_found: \
+             running as a user that ignores file permissions (e.g. root)"
+        );
+        return;
+    }
+
+    let config = default_config("needle", false);
+    let stats = SearchStats::new();
+    let file_names: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let fn_clone = Arc::clone(&file_names);
+
+    parallel_grep(root, 4, config, stats.clone(), move |item| {
+        fn_clone.lock().unwrap().push(
+            item.file_path
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .to_string(),
+        );
+    });
+
+    // Restore permissions so the temp dir can be cleaned up.
+    let _ = fs::set_permissions(&blocked_path, fs::Permissions::from_mode(0o644));
+
+    let mut names = file_names.lock().unwrap().clone();
+    names.sort();
+    assert_eq!(
+        names,
+        vec!["readable_one.txt", "readable_two.txt"],
+        "the readable files' matches must still be reported even though \
+         one file in the tree was unreadable"
+    );
+    assert!(
+        stats.io_errors.load(Ordering::Relaxed) > 0,
+        "an unreadable file must be counted as an io error, not silently \
+         treated as a file with no matches"
     );
 }
 

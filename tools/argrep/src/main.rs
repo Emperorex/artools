@@ -194,6 +194,31 @@ fn main() {
         );
         eprintln!("Execution time:      {:.2?}", duration);
     }
+
+    // Contract: if every file was read successfully, exit 0. If any file or
+    // directory could not be read (permission denied, I/O error mid-read),
+    // exit nonzero — even though the scan itself continued past those and
+    // printed everything it could. Silently returning 0 when part of the
+    // tree was unreadable would look like "no matches" when it might really
+    // mean "some files were never searched", which is misleading for a
+    // grep-like tool, especially in scripts checking $?.
+    let io_error_count = stats.io_errors.load(Ordering::Relaxed);
+    if io_error_count > 0 {
+        eprintln!(
+            "{}",
+            format!(
+                "argrep: {} file(s)/director(ies) could not be read{}",
+                io_error_count,
+                if args.debug {
+                    ""
+                } else {
+                    " (rerun with --debug for details)"
+                }
+            )
+            .red()
+        );
+        std::process::exit(1);
+    }
 }
 
 /// Reads lines from stdin and prints those matching the config query.

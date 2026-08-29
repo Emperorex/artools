@@ -59,6 +59,13 @@ pub struct SearchStats {
     pub total_files: Arc<AtomicUsize>,
     pub total_dirs: Arc<AtomicUsize>,
     pub matched_lines: Arc<AtomicUsize>,
+    /// Files or directories that could not be read (permission denied, I/O
+    /// error mid-read, etc). Search continues past these — they don't stop
+    /// the scan — but a nonzero count here means the result set is
+    /// incomplete, and callers (main.rs) use it to set a nonzero exit code.
+    /// Silently succeeding when some files were unreadable would be
+    /// misleading for a grep-like tool, especially in automation.
+    pub io_errors: Arc<AtomicUsize>,
 }
 
 impl SearchStats {
@@ -67,6 +74,7 @@ impl SearchStats {
             total_files: Arc::new(AtomicUsize::new(0)),
             total_dirs: Arc::new(AtomicUsize::new(0)),
             matched_lines: Arc::new(AtomicUsize::new(0)),
+            io_errors: Arc::new(AtomicUsize::new(0)),
         }
     }
 }
@@ -245,6 +253,7 @@ pub fn scan_and_grep(
     let entries: Vec<_> = match fs::read_dir(dir_path) {
         Ok(entries) => entries.flatten().collect(),
         Err(err) => {
+            stats.io_errors.fetch_add(1, Ordering::Relaxed);
             if config.debug {
                 eprintln!("{}: {}: {}", "argrep".red(), dir_path.display(), err);
             }
@@ -335,6 +344,7 @@ pub fn grep_file(
     let file = match File::open(file_path) {
         Ok(f) => f,
         Err(err) => {
+            stats.io_errors.fetch_add(1, Ordering::Relaxed);
             if config.debug {
                 eprintln!("{}: {}: {}", "argrep".red(), file_path.display(), err);
             }
@@ -387,6 +397,7 @@ pub fn grep_file(
             Ok(0) => break, // EOF
             Ok(_) => {}
             Err(err) => {
+                stats.io_errors.fetch_add(1, Ordering::Relaxed);
                 if config.debug {
                     eprintln!("{}: {}: {}", "argrep".red(), file_path.display(), err);
                 }

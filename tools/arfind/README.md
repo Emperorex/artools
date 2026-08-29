@@ -36,7 +36,7 @@ arfind [OPTIONS] [PATH]
 | `--ignore DIR`       | —     | —         | Additional directory names to skip (repeatable)                                 |
 | `--no-ignore`        | —     | —         | Search everything — disables `.gitignore`/`.ignore` respect and default ignores |
 | `--hidden`           | `-H`  | —         | Include hidden files and directories (dotfiles)                                 |
-| `--jobs N`           | `-j`  | `4`       | Number of parallel worker threads                                               |
+| `--jobs N`           | `-j`  | `4`       | Number of parallel worker threads (must be ≥ 1)                                 |
 | `--debug`            | `-d`  | —         | Print scan statistics and errors to stderr                                      |
 
 ## Default ignores
@@ -127,7 +127,8 @@ arfind /home -j 8 --name "*.txt"
 
 ## Exit codes
 
-| Code | Meaning                                  |
-|------|------------------------------------------|
-| `0`  | Success (even if no matches found)       |
-| `1`  | Invalid arguments or configuration error |
+| Code | Meaning                                                  |
+|------|----------------------------------------------------------|
+| `0`  | Success (even if no matches found)                       |
+| `1`  | Invalid `--size`/`--include`-style value or config error |
+| `2`  | Invalid CLI usage — bad or missing flag (e.g. `-j 0`)    |

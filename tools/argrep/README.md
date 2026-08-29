@@ -37,7 +37,7 @@ argrep [OPTIONS] QUERY [PATH]
 | `--files-with-matches` | `-l`  | —       | Print only filenames of files containing a match                |
 | `--count`              | `-c`  | —       | Print count of matching lines per file                          |
 | `--include PATTERN`    | —     | —       | Only search files matching this glob (e.g. `"*.rs"`, `"*.log"`) |
-| `--jobs N`             | `-j`  | `4`     | Number of parallel worker threads                               |
+| `--jobs N`             | `-j`  | `4`     | Number of parallel worker threads (must be ≥ 1)                 |
 | `--debug`              | `-d`  | —       | Print scan statistics and errors to stderr                      |
 
 ## Default ignores
@@ -54,6 +54,8 @@ Hidden files and directories (names starting with `.`) are also skipped by defau
 ## Binary file handling
 
 `argrep` automatically skips binary files by checking the first 1024 bytes for null bytes. No flag needed — compiled binaries, images, and media files are silently ignored.
+
+Text files with invalid UTF-8 (a stray byte from a legacy encoding, a corrupted line, etc.) are still searched in full: an invalid sequence becomes `U+FFFD` in that one line rather than ending the scan partway through the file. This matches how tools like `ripgrep` treat non-UTF-8 text by default.
 
 ## Examples
 
@@ -153,7 +155,10 @@ argrep "deprecated" /large/project -j 8 --include "*.py" -n
 
 ## Exit codes
 
-| Code | Meaning                                  |
-|------|------------------------------------------|
-| `0`  | Success (even if no matches found)       |
-| `1`  | Invalid arguments or configuration error |
+| Code | Meaning                                                                                                                       |
+|------|-------------------------------------------------------------------------------------------------------------------------------|
+| `0`  | Success — every file was read, matches or not                                                                                 |
+| `1`  | A file or directory could not be read (permission denied, I/O error), or another config error (e.g. invalid `--include` glob) |
+| `2`  | Invalid CLI usage — bad or missing flag (e.g. `-j 0`, missing `QUERY`)                                                        |
+
+A nonzero exit from an unreadable file doesn't mean the search stopped: every file that *could* be read is still searched and its matches printed. Run with `--debug` to see which paths failed and why; without it you still get a one-line summary and the nonzero exit code, so it can't be mistaken for "no matches found".

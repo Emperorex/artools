@@ -32,7 +32,7 @@ ardisk [OPTIONS] [PATH]
 | `--summarize`       | `-s`  | —         | Print only the grand total for the root directory                      |
 | `--include PATTERN` | —     | —         | Only count files matching this glob pattern (e.g. `"*.rs"`, `"*.mp4"`) |
 | `--apparent-size`   | —     | —         | Use logical file sizes instead of block allocation — matches `du -sh`  |
-| `--jobs N`          | `-j`  | `4`       | Number of parallel worker threads                                      |
+| `--jobs N`          | `-j`  | `4`       | Number of parallel worker threads (must be ≥ 1)                        |
 | `--debug`           | `-d`  | —         | Print scan statistics and errors to stderr                             |
 
 ## Size units
@@ -63,6 +63,8 @@ The following directories are always skipped:
 On **Windows**, logical file size is always used regardless of the flag.
 
 Sizes are rolled up bottom-up in a single pass — parent directories always include the full recursive size of all children. Symlinks are never counted to prevent double-counting.
+
+**Hard links** are also deduplicated: if two directory entries share the same inode (`fs::hard_link`, or `ln` without `-s`), that file is counted once, not once per name — in both physical and `--apparent-size` mode. A file with 100MB of content and two hard-linked names contributes 100MB to the total, matching how `du` itself counts hard links. Which of the two paths gets "credit" for that size in a per-directory breakdown can vary between runs, since scanning is parallel; the grand total is unaffected either way.
 
 ## Examples
 
@@ -123,7 +125,8 @@ ardisk / -j 8 --top 20
 
 ## Exit codes
 
-| Code | Meaning                                  |
-|------|------------------------------------------|
-| `0`  | Success                                  |
-| `1`  | Invalid arguments or configuration error |
+| Code | Meaning                                                 |
+|------|---------------------------------------------------------|
+| `0`  | Success                                                 |
+| `1`  | Invalid `--threshold`/`--include` value or config error |
+| `2`  | Invalid CLI usage — bad or missing flag (e.g. `-j 0`)   |

@@ -268,6 +268,99 @@ fn unreadable_file_is_skipped_but_other_matches_are_still_found() {
     );
 }
 
+// ── Symlinks ─────────────────────────────────────────────────────────────────
+//
+// Contract (fixed here as a regression test, not just an implementation
+// detail that a future traversal optimization could quietly change):
+//
+//   recursive traversal:   don't follow symlinks (avoids reference cycles)
+//   explicit path argument: follow the symlink
+//
+// Concretely: `argrep foo directory/` must not descend into a symlinked
+// subdirectory it discovers while walking, but `argrep foo the-symlink`
+// (or `argrep foo the-symlink-to-a-dir`), where the symlink itself is the
+// path the user named, must work exactly as if they'd named the real
+// target.
+
+#[cfg(unix)]
+#[test]
+fn symlinked_subdirectory_found_during_traversal_is_not_followed() {
+    use std::os::unix::fs::symlink;
+
+    let dir = TempDir::new().unwrap();
+    let root = fs::canonicalize(dir.path()).unwrap();
+
+    // The real content lives outside the tree we actually search, reachable
+    // only via a symlink placed inside it.
+    fs::create_dir_all(root.join("real_target")).unwrap();
+    fs::write(root.join("real_target/data.txt"), "needle inside target\n").unwrap();
+
+    fs::create_dir_all(root.join("search_here")).unwrap();
+    symlink(
+        root.join("real_target"),
+        root.join("search_here/link_to_target"),
+    )
+    .unwrap();
+
+    let (names, _) = collect_matches(root.join("search_here"), "needle", false);
+    assert!(
+        names.is_empty(),
+        "a symlinked directory discovered during traversal must not be \
+         followed — found matches: {:?}",
+        names
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn explicit_symlink_to_file_argument_is_followed() {
+    use std::os::unix::fs::symlink;
+
+    let dir = TempDir::new().unwrap();
+    let root = fs::canonicalize(dir.path()).unwrap();
+
+    fs::write(root.join("target.txt"), "needle in the real file\n").unwrap();
+    let link_path = root.join("link.txt");
+    symlink(root.join("target.txt"), &link_path).unwrap();
+
+    // The symlink itself is the path the user named on the command line —
+    // this must be followed, unlike a symlink merely encountered while
+    // walking a directory.
+    let (names, lines) = collect_matches(link_path, "needle", false);
+    assert_eq!(
+        names,
+        vec!["link.txt"],
+        "an explicitly-named symlink-to-file must be followed and searched"
+    );
+    assert_eq!(lines, vec!["needle in the real file"]);
+}
+
+#[cfg(unix)]
+#[test]
+fn explicit_symlink_to_directory_argument_is_followed() {
+    use std::os::unix::fs::symlink;
+
+    let dir = TempDir::new().unwrap();
+    let root = fs::canonicalize(dir.path()).unwrap();
+
+    fs::create_dir_all(root.join("real_dir")).unwrap();
+    fs::write(root.join("real_dir/data.txt"), "needle via linked root\n").unwrap();
+    let link_path = root.join("link_dir");
+    symlink(root.join("real_dir"), &link_path).unwrap();
+
+    // Here the symlink IS the root path argument (not something found
+    // mid-traversal) — it must be followed and scanned like a real
+    // directory, same as GNU grep / ripgrep treat an explicitly-given path.
+    let (names, lines) = collect_matches(link_path, "needle", false);
+    assert_eq!(
+        names,
+        vec!["data.txt"],
+        "an explicitly-named symlink-to-directory must be followed and \
+         its contents searched"
+    );
+    assert_eq!(lines, vec!["needle via linked root"]);
+}
+
 // ── Hidden file and directory skipping ───────────────────────────────────────
 
 #[test]

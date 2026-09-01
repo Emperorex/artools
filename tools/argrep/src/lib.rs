@@ -360,7 +360,16 @@ pub fn grep_file(
         if sniffer_buffer[..bytes_read].contains(&0u8) {
             return; // Skip compiled binaries or media files
         }
-        if reader.seek(SeekFrom::Start(0)).is_err() {
+        if let Err(err) = reader.seek(SeekFrom::Start(0)) {
+            // Rewinding after the sniff read failed — an actual I/O error,
+            // not something the loop below gets a chance to see, since we
+            // return before it runs. Per the #106 contract (I/O errors →
+            // nonzero exit), this must be counted the same as any other
+            // unreadable file, not silently skipped.
+            stats.io_errors.fetch_add(1, Ordering::Relaxed);
+            if config.debug {
+                eprintln!("{}: {}: {}", "argrep".red(), file_path.display(), err);
+            }
             return;
         }
     }

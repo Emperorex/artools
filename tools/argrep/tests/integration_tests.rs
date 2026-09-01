@@ -1,4 +1,6 @@
-use argrep::{DEFAULT_IGNORES, SearchConfig, SearchStats, normalize_query, parallel_grep};
+use argrep::{
+    DEFAULT_IGNORES, SearchConfig, SearchStats, grep_file, normalize_query, parallel_grep,
+};
 use glob::Pattern;
 use std::sync::Arc as StdArc;
 use std::{
@@ -265,6 +267,55 @@ fn unreadable_file_is_skipped_but_other_matches_are_still_found() {
         stats.io_errors.load(Ordering::Relaxed) > 0,
         "an unreadable file must be counted as an io error, not silently \
          treated as a file with no matches"
+    );
+}
+
+// A FIFO is readable but not seekable: after the binary-sniff read
+// succeeds, rewinding with seek(SeekFrom::Start(0)) fails with ESPIPE.
+// That failure must be counted the same as any other unreadable file per
+// the #106 exit-code contract, not returned from silently. A plain
+// BufReader<File> over a regular file essentially never fails seek(), so
+// a FIFO is the reliable way to actually exercise this path.
+#[cfg(unix)]
+#[test]
+fn seek_failure_after_binary_sniff_is_counted_as_io_error() {
+    let dir = TempDir::new().unwrap();
+    let root = fs::canonicalize(dir.path()).unwrap();
+    let fifo_path = root.join("pipe");
+
+    let status = std::process::Command::new("mkfifo")
+        .arg(&fifo_path)
+        .status()
+        .expect("mkfifo must be available on this system");
+    assert!(status.success(), "mkfifo failed to create the test fifo");
+
+    // Opening a FIFO for reading blocks until a writer connects, so write
+    // from a background thread while grep_file reads on the main thread.
+    let writer_path = fifo_path.clone();
+    let writer = std::thread::spawn(move || {
+        use std::io::Write;
+        let mut f = fs::OpenOptions::new()
+            .write(true)
+            .open(&writer_path)
+            .unwrap();
+        f.write_all(b"some content, no null bytes here\n").unwrap();
+        // Drop here closes the write end once the bytes are flushed to the
+        // pipe buffer, which is fine: the reader only needs those bytes
+        // for the sniff read, not a still-open writer.
+    });
+
+    let config = default_config("anything", false);
+    let stats = SearchStats::new();
+    let (output_tx, _output_rx) = crossbeam_channel::unbounded();
+
+    grep_file(&fifo_path, &config, &output_tx, &stats);
+
+    writer.join().unwrap();
+
+    assert!(
+        stats.io_errors.load(Ordering::Relaxed) > 0,
+        "a failed seek() after the binary sniff must be counted as an io \
+         error, not silently skipped"
     );
 }
 

@@ -26,19 +26,21 @@ argrep [OPTIONS] QUERY [PATH]
 
 ## Options
 
-| Flag                   | Short | Default | Description                                                     |
-|------------------------|-------|---------|-----------------------------------------------------------------|
-| `--ignore-case`        | `-i`  | —       | Case-insensitive matching                                       |
-| `--line-number`        | `-n`  | —       | Show line numbers in output                                     |
-| `--before-context NUM` | `-B`  | —       | Show NUM lines of leading context before matches                |
-| `--after-context NUM`  | `-A`  | —       | Show NUM lines of trailing context after matches                |
-| `--context NUM`        | `-C`  | —       | Show NUM lines of leading and trailing context around matches   |
-| `--invert`             | `-v`  | —       | Print lines that do NOT match the query                         |
-| `--files-with-matches` | `-l`  | —       | Print only filenames of files containing a match                |
-| `--count`              | `-c`  | —       | Print count of matching lines per file                          |
-| `--include PATTERN`    | —     | —       | Only search files matching this glob (e.g. `"*.rs"`, `"*.log"`) |
-| `--jobs N`             | `-j`  | `4`     | Number of parallel worker threads (must be ≥ 1)                 |
-| `--debug`              | `-d`  | —       | Print scan statistics and errors to stderr                      |
+| Flag                   | Short | Default | Description                                                            |
+|------------------------|-------|---------|------------------------------------------------------------------------|
+| `--ignore-case`        | `-i`  | —       | Case-insensitive matching                                              |
+| `--line-number`        | `-n`  | —       | Show line numbers in output                                            |
+| `--before-context NUM` | `-B`  | —       | Show NUM lines of leading context before matches                       |
+| `--after-context NUM`  | `-A`  | —       | Show NUM lines of trailing context after matches                       |
+| `--context NUM`        | `-C`  | —       | Show NUM lines of leading and trailing context around matches          |
+| `--invert`             | `-v`  | —       | Print lines that do NOT match the query                                |
+| `--files-with-matches` | `-l`  | —       | Print only filenames of files containing a match (conflicts with `-c`) |
+| `--count`              | `-c`  | —       | Print count of matching lines per file (conflicts with `-l`)           |
+| `--include PATTERN`    | —     | —       | Only search files matching this glob (e.g. `"*.rs"`, `"*.log"`)        |
+| `--jobs N`             | `-j`  | `4`     | Number of parallel worker threads (must be ≥ 1)                        |
+| `--debug`              | `-d`  | —       | Print scan statistics and errors to stderr                             |
+
+`-l` and `-c` cannot be combined — they imply different output shapes (`filename` vs `filename: count`), so combining them (`argrep foo . -c -l`) is a CLI error rather than one silently overriding the other.
 
 ## Default ignores
 

@@ -54,7 +54,11 @@ struct Args {
     invert: bool,
 
     /// Print only filenames of files that contain a match
-    #[arg(short = 'l', long = "files-with-matches")]
+    #[arg(
+        short = 'l',
+        long = "files-with-matches",
+        conflicts_with = "count_per_file"
+    )]
     files_with_matches: bool,
 
     /// Print count of matching lines per file instead of the lines themselves
@@ -418,6 +422,40 @@ mod tests {
     fn jobs_default_is_four() {
         let args = Args::try_parse_from(["argrep", "foo", "."]).unwrap();
         assert_eq!(args.jobs, 4);
+    }
+
+    // ── -c / -l mutual exclusivity ───────────────────────────────────────────
+    // -c (count per file) and -l (filenames only) imply different, mutually
+    // incompatible output contracts ("filename:count" vs just "filename").
+    // Silently letting one take precedence over the other (previously -l,
+    // since it's checked first and `break`s before the -c branch is ever
+    // reached) is a hidden, undocumented contract. Reject the combination
+    // at parse time instead so the CLI is explicit about it.
+
+    #[test]
+    fn count_and_files_with_matches_together_is_rejected_at_parse_time() {
+        let result = Args::try_parse_from(["argrep", "foo", ".", "-c", "-l"]);
+        assert!(result.is_err(), "-c -l together must be a CLI parse error");
+    }
+
+    #[test]
+    fn count_and_files_with_matches_together_is_rejected_regardless_of_order() {
+        let result = Args::try_parse_from(["argrep", "foo", ".", "-l", "-c"]);
+        assert!(result.is_err(), "-l -c together must be a CLI parse error");
+    }
+
+    #[test]
+    fn count_alone_is_accepted() {
+        let args = Args::try_parse_from(["argrep", "foo", ".", "-c"]).unwrap();
+        assert!(args.count_per_file);
+        assert!(!args.files_with_matches);
+    }
+
+    #[test]
+    fn files_with_matches_alone_is_accepted() {
+        let args = Args::try_parse_from(["argrep", "foo", ".", "-l"]).unwrap();
+        assert!(args.files_with_matches);
+        assert!(!args.count_per_file);
     }
 
     #[test]

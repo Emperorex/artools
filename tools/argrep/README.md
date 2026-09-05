@@ -37,7 +37,7 @@ argrep [OPTIONS] QUERY [PATH]
 | `--files-with-matches` | `-l`  | —       | Print only filenames of files containing a match (conflicts with `-c`) |
 | `--count`              | `-c`  | —       | Print count of matching lines per file (conflicts with `-l`)           |
 | `--include PATTERN`    | —     | —       | Only search files matching this glob (e.g. `"*.rs"`, `"*.log"`)        |
-| `--jobs N`             | `-j`  | `4`     | Number of parallel worker threads (must be ≥ 1)                        |
+| `--jobs N`             | `-j`  | CPU-aware | Number of parallel worker threads (must be ≥ 1; default is half the available cores, clamped to 1–16) |
 | `--debug`              | `-d`  | —       | Print scan statistics and errors to stderr                             |
 
 `-l` and `-c` cannot be combined — they imply different output shapes (`filename` vs `filename: count`), so combining them (`argrep foo . -c -l`) is a CLI error rather than one silently overriding the other.

@@ -36,7 +36,7 @@ arfind [OPTIONS] [PATH]
 | `--ignore DIR`       | —     | —         | Additional directory names to skip (repeatable)                                 |
 | `--no-ignore`        | —     | —         | Search everything — disables `.gitignore`/`.ignore` respect and default ignores |
 | `--hidden`           | `-H`  | —         | Include hidden files and directories (dotfiles)                                 |
-| `--jobs N`           | `-j`  | `4`       | Number of parallel worker threads (must be ≥ 1)                                 |
+| `--jobs N`           | `-j`  | CPU-aware | Number of parallel worker threads (must be ≥ 1; default is half the available cores, clamped to 1–16) |
 | `--debug`            | `-d`  | —         | Print scan statistics and errors to stderr                                      |
 
 ## Default ignores

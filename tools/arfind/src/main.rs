@@ -168,6 +168,7 @@ fn main() {
 
     if args.debug {
         eprintln!("{}", "\n=== Search Statistics ===".yellow().bold());
+        eprintln!("Worker threads:        {}", args.jobs.to_string().cyan());
         eprintln!(
             "Files checked:         {}",
             stats.total_files.load(Ordering::Relaxed).to_string().cyan()

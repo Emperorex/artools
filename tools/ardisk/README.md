@@ -32,7 +32,7 @@ ardisk [OPTIONS] [PATH]
 | `--summarize`       | `-s`  | —         | Print only the grand total for the root directory                      |
 | `--include PATTERN` | —     | —         | Only count files matching this glob pattern (e.g. `"*.rs"`, `"*.mp4"`) |
 | `--apparent-size`   | —     | —         | Use logical file sizes instead of block allocation — matches `du -sh`  |
-| `--jobs N`          | `-j`  | `4`       | Number of parallel worker threads (must be ≥ 1)                        |
+| `--jobs N`          | `-j`  | CPU-aware | Number of parallel worker threads (must be ≥ 1; default is half the available cores, clamped to 1–16) |
 | `--debug`           | `-d`  | —         | Print scan statistics and errors to stderr                             |
 
 ## Size units

@@ -45,6 +45,22 @@ fn parse_threshold(s: &str) -> Result<u64, String> {
     Ok((value * multiplier) as u64)
 }
 
+/// CPU-aware default worker count, used as the -j/--jobs default.
+///
+/// Half of available_parallelism(), clamped to [1, 16]: using every core by
+/// default competes with the rest of the system (and with the other
+/// worker-based tools in this repo if run concurrently), while an unclamped
+/// value could default to an unreasonably high thread count on large
+/// build/CI machines. available_parallelism() failing (sandboxed or
+/// restricted environments) falls back to 1, which the clamp still turns
+/// into a valid default.
+fn default_jobs() -> usize {
+    let cpus = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(1);
+    (cpus / 2).clamp(1, 16)
+}
+
 /// CLI arguments for ardisk
 #[derive(Parser, Debug)]
 #[command(
@@ -61,7 +77,7 @@ struct Args {
     #[arg(
         short = 'j',
         long,
-        default_value_t = 4,
+        default_value_t = default_jobs(),
         value_parser = clap::value_parser!(u16).range(1..).map(|v| v as usize)
     )]
     jobs: usize,
@@ -217,6 +233,7 @@ fn main() {
 
     if args.debug {
         eprintln!("\n{}", "=== Operational Metrics ===".green().bold());
+        eprintln!("Worker threads:        {}", args.jobs);
         eprintln!("Total scanned folders: {}", raw_sizes.len());
         eprintln!("Execution time:        {:.2?}", duration);
     }
@@ -224,7 +241,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{Args, build_ignore_dirs, parse_threshold};
+    use super::{Args, build_ignore_dirs, default_jobs, parse_threshold};
     use clap::Parser;
 
     // ── -j / --jobs boundary ─────────────────────────────────────────────────
@@ -252,9 +269,28 @@ mod tests {
     }
 
     #[test]
-    fn jobs_default_is_four() {
+    fn default_jobs_matches_half_available_parallelism_clamped() {
+        let cpus = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(1);
+        let expected = (cpus / 2).clamp(1, 16);
+        assert_eq!(default_jobs(), expected);
+    }
+
+    #[test]
+    fn jobs_default_is_cpu_aware() {
         let args = Args::try_parse_from(["ardisk", "."]).unwrap();
-        assert_eq!(args.jobs, 4);
+        assert_eq!(
+            args.jobs,
+            default_jobs(),
+            "default -j must match the CPU-aware formula, not a hardcoded value"
+        );
+        assert!(
+            (1..=16).contains(&args.jobs),
+            "default -j must stay within the clamped [1, 16] range regardless \
+             of how many cores the machine reports: got {}",
+            args.jobs
+        );
     }
 
     // ── Valid inputs ──────────────────────────────────────────────────────────

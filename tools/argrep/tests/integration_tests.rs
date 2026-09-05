@@ -837,6 +837,163 @@ fn count_per_file_emits_result_for_every_file() {
     );
 }
 
+// ── -v combined with -c / -l / context ──────────────────────────────────────
+//
+// should_emit already applies invert before any of the -c/-l/context
+// branches run (see grep_file), so these should already work correctly —
+// these tests exist to pin that down, not to change behavior.
+
+#[test]
+fn invert_with_count_counts_non_matching_lines() {
+    let (_dir, root) = make_tree(&[
+        ("a.txt", "needle\nother\nneedle\n"),  // 1 line without "needle"
+        ("b.txt", "needle\nneedle\n"),         // 0 lines without "needle"
+        ("c.txt", "nothing\nstill nothing\n"), // 2 lines without "needle"
+    ]);
+
+    let ignore_dirs: HashSet<String> = DEFAULT_IGNORES.iter().map(|s| s.to_string()).collect();
+    let config = StdArc::new(SearchConfig {
+        normalized_query: normalize_query("needle", false),
+        query: "needle".to_string(),
+        ignore_case: false,
+        line_number: false,
+        ignore_dirs,
+        debug: false,
+        invert: true,
+        files_with_matches: false,
+        count_per_file: true,
+        include_pattern: None,
+        before_context: 0,
+        after_context: 0,
+        respect_gitignore: true,
+    });
+    let results: Arc<Mutex<Vec<(String, usize)>>> = Arc::new(Mutex::new(Vec::new()));
+    let r = Arc::clone(&results);
+    parallel_grep(root, 4, config, SearchStats::new(), move |item| {
+        r.lock().unwrap().push((
+            item.file_path
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .to_string(),
+            item.count.unwrap_or(0),
+        ));
+    });
+    let mut counts = results.lock().unwrap().clone();
+    counts.sort_by_key(|(name, _)| name.clone());
+
+    assert_eq!(
+        counts,
+        vec![
+            ("a.txt".to_string(), 1),
+            ("b.txt".to_string(), 0),
+            ("c.txt".to_string(), 2),
+        ],
+        "-v -c must count lines that DON'T match the query, per file"
+    );
+}
+
+#[test]
+fn invert_with_files_with_matches_returns_files_with_a_non_matching_line() {
+    let (_dir, root) = make_tree(&[
+        ("all_needle.txt", "needle\nneedle\n"), // every line matches -> no inverted match
+        ("mixed.txt", "needle\nother\n"),       // one line doesn't match -> inverted match
+        ("no_needle.txt", "nothing\nnothing else\n"), // no line matches -> inverted match
+    ]);
+
+    let ignore_dirs: HashSet<String> = DEFAULT_IGNORES.iter().map(|s| s.to_string()).collect();
+    let config = StdArc::new(SearchConfig {
+        normalized_query: normalize_query("needle", false),
+        query: "needle".to_string(),
+        ignore_case: false,
+        line_number: false,
+        ignore_dirs,
+        debug: false,
+        invert: true,
+        files_with_matches: true,
+        count_per_file: false,
+        include_pattern: None,
+        before_context: 0,
+        after_context: 0,
+        respect_gitignore: true,
+    });
+    let results: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let r = Arc::clone(&results);
+    parallel_grep(root, 4, config, SearchStats::new(), move |item| {
+        r.lock().unwrap().push(
+            item.file_path
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .to_string(),
+        );
+    });
+    let mut names = results.lock().unwrap().clone();
+    names.sort();
+    assert_eq!(
+        names,
+        vec!["mixed.txt", "no_needle.txt"],
+        "-v -l must list files with at least one line that DOESN'T match, \
+         and must exclude a file where every line matches"
+    );
+}
+
+#[test]
+fn invert_with_context_builds_context_around_inverted_matches() {
+    // Lines 1 and 4 literally contain the query and are NOT inverted
+    // matches; they must show up only as context around the surrounding
+    // inverted matches (lines 2,3,5,6,7), never re-filtered back out for
+    // containing the query themselves.
+    let (_dir, root) = make_tree(&[(
+        "file.txt",
+        "MATCH one\nplain a\nplain b\nMATCH two\nplain c\nplain d\nplain e\n",
+    )]);
+
+    let ignore_dirs: HashSet<String> = DEFAULT_IGNORES.iter().map(|s| s.to_string()).collect();
+    let config = StdArc::new(SearchConfig {
+        normalized_query: normalize_query("MATCH", false),
+        query: "MATCH".to_string(),
+        ignore_case: false,
+        line_number: false,
+        ignore_dirs,
+        debug: false,
+        invert: true,
+        files_with_matches: false,
+        count_per_file: false,
+        include_pattern: None,
+        before_context: 1,
+        after_context: 1,
+        respect_gitignore: true,
+    });
+    let results: Arc<Mutex<Vec<(String, bool)>>> = Arc::new(Mutex::new(Vec::new()));
+    let r = Arc::clone(&results);
+    parallel_grep(root, 4, config, SearchStats::new(), move |item| {
+        r.lock()
+            .unwrap()
+            .push((item.line_content.trim_end().to_string(), item.is_context));
+    });
+
+    // Single file, single worker sending in order, so the receive order
+    // matches emission order — no sorting needed, which lets us assert on
+    // the actual context/match shape rather than just set membership.
+    let lines = results.lock().unwrap().clone();
+    assert_eq!(
+        lines,
+        vec![
+            ("MATCH one".to_string(), true), // leading context for "plain a"
+            ("plain a".to_string(), false),  // inverted match
+            ("plain b".to_string(), false),  // inverted match
+            ("MATCH two".to_string(), true), // trailing context for "plain b"
+            ("plain c".to_string(), false),  // inverted match
+            ("plain d".to_string(), false),  // inverted match
+            ("plain e".to_string(), false),  // inverted match
+        ],
+        "context must be built around the inverted matches (physical \
+         neighbors), including a literal query-matching line shown purely \
+         as context — not re-filtered against the original query"
+    );
+}
+
 // ── --include pattern ─────────────────────────────────────────────────────────
 
 #[test]

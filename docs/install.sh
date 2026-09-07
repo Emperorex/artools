@@ -42,6 +42,19 @@ check_deps() {
     for cmd in curl jq chmod; do
         command -v "$cmd" >/dev/null 2>&1 || error "Required dependency not found: $cmd"
     done
+    if ! command -v sha256sum >/dev/null 2>&1 && ! command -v shasum >/dev/null 2>&1; then
+        error "Required dependency not found: sha256sum or shasum (needed to verify downloaded binaries)"
+    fi
+}
+
+# ── SHA-256 of a file, using whichever tool is available ─────────────────────
+sha256_of() {
+    local file="$1"
+    if command -v sha256sum >/dev/null 2>&1; then
+        sha256sum "$file" | awk '{print $1}'
+    else
+        shasum -a 256 "$file" | awk '{print $1}'
+    fi
 }
 
 # ── Resolve the latest release tag for a given tool ──────────────────────────
@@ -51,6 +64,51 @@ latest_tag() {
         | jq -r '.[].tag_name' \
         | grep "^${tool}-v" \
         | head -n1
+}
+
+# ── Verify a downloaded binary against the release's SHA256SUMS ─────────────
+# Every release publishes a SHA256SUMS asset alongside the binaries (see
+# release_tool.yaml). Refusing to install when it's missing or doesn't match
+# is the whole point: a mirror, proxy, or compromised release asset could
+# otherwise swap the binary for something else between build and execution,
+# and this installer runs with the privileges of whoever piped it into bash.
+verify_checksum() {
+    local tool="$1"
+    local tag="$2"
+    local binary_name="$3"
+    local tmp_file="$4"
+
+    local sums_url
+    sums_url=$(curl -fsSL "https://api.github.com/repos/${REPO}/releases/tags/${tag}" \
+        | jq -r '.assets[] | select(.name == "SHA256SUMS") | .browser_download_url')
+
+    if [ -z "$sums_url" ]; then
+        rm -f "$tmp_file"
+        error "SHA256SUMS not found in release '$tag'. Refusing to install an unverified binary for '$tool'."
+    fi
+
+    local sums_file="/tmp/artools_sha256sums_$$"
+    curl -fsSL "$sums_url" -o "$sums_file"
+
+    local expected
+    expected=$(awk -v name="$binary_name" '$2 == name { print $1 }' "$sums_file")
+    rm -f "$sums_file"
+
+    if [ -z "$expected" ]; then
+        rm -f "$tmp_file"
+        error "No checksum entry for '$binary_name' in SHA256SUMS. Refusing to install an unverified binary for '$tool'."
+    fi
+
+    local actual
+    actual=$(sha256_of "$tmp_file")
+
+    if [ "$expected" != "$actual" ]; then
+        rm -f "$tmp_file"
+        error "Checksum mismatch for '$binary_name'!
+    expected: ${expected}
+    got:      ${actual}
+The download may be corrupted or tampered with. Aborting — nothing was installed."
+    fi
 }
 
 # ── Download and install a single binary ─────────────────────────────────────
@@ -86,6 +144,9 @@ install_tool() {
     info "Installing $tool v${version} (${platform})..."
 
     curl -fsSL --progress-bar "$download_url" -o "$tmp_file"
+
+    verify_checksum "$tool" "$tag" "$binary_name" "$tmp_file"
+    success "Checksum verified for $binary_name"
 
     chmod +x "$tmp_file"
 

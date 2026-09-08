@@ -72,30 +72,33 @@ latest_tag() {
 # is the whole point: a mirror, proxy, or compromised release asset could
 # otherwise swap the binary for something else between build and execution,
 # and this installer runs with the privileges of whoever piped it into bash.
+#
+# sums_file lives in the same mktemp'd tmp_dir as the binary itself (see
+# main()) — a predictable path here would be just as bad as a predictable
+# path for the binary, since it's the trust anchor the binary gets checked
+# against.
 verify_checksum() {
     local tool="$1"
     local tag="$2"
     local binary_name="$3"
     local tmp_file="$4"
+    local tmp_dir="$5"
 
     local sums_url
     sums_url=$(curl -fsSL "https://api.github.com/repos/${REPO}/releases/tags/${tag}" \
         | jq -r '.assets[] | select(.name == "SHA256SUMS") | .browser_download_url')
 
     if [ -z "$sums_url" ]; then
-        rm -f "$tmp_file"
         error "SHA256SUMS not found in release '$tag'. Refusing to install an unverified binary for '$tool'."
     fi
 
-    local sums_file="/tmp/artools_sha256sums_$$"
+    local sums_file="${tmp_dir}/${tool}.SHA256SUMS"
     curl -fsSL "$sums_url" -o "$sums_file"
 
     local expected
     expected=$(awk -v name="$binary_name" '$2 == name { print $1 }' "$sums_file")
-    rm -f "$sums_file"
 
     if [ -z "$expected" ]; then
-        rm -f "$tmp_file"
         error "No checksum entry for '$binary_name' in SHA256SUMS. Refusing to install an unverified binary for '$tool'."
     fi
 
@@ -103,7 +106,6 @@ verify_checksum() {
     actual=$(sha256_of "$tmp_file")
 
     if [ "$expected" != "$actual" ]; then
-        rm -f "$tmp_file"
         error "Checksum mismatch for '$binary_name'!
     expected: ${expected}
     got:      ${actual}
@@ -115,6 +117,7 @@ The download may be corrupted or tampered with. Aborting — nothing was install
 install_tool() {
     local tool="$1"
     local platform="$2"
+    local tmp_dir="$3"
     local tag
     tag=$(latest_tag "$tool")
 
@@ -136,29 +139,25 @@ install_tool() {
         error "Asset '$binary_name' not found in release '$tag'."
     fi
 
-    # Use /tmp explicitly so the path is accessible to both the current user
-    # and sudo — mktemp's default dir on macOS is user-scoped and sudo cannot
-    # access it, causing "No such file or directory" on sudo mv.
-    local tmp_file="/tmp/artools_${tool}_$$"
+    local tmp_file="${tmp_dir}/${tool}"
 
     info "Installing $tool v${version} (${platform})..."
 
     curl -fsSL --progress-bar "$download_url" -o "$tmp_file"
 
-    verify_checksum "$tool" "$tag" "$binary_name" "$tmp_file"
+    verify_checksum "$tool" "$tag" "$binary_name" "$tmp_file" "$tmp_dir"
     success "Checksum verified for $binary_name"
 
     chmod +x "$tmp_file"
 
     if [ -w "$INSTALL_DIR" ]; then
         mkdir -p "$INSTALL_DIR"
-        mv "$tmp_file" "${INSTALL_DIR}/${tool}"
+        cp "$tmp_file" "${INSTALL_DIR}/${tool}"
     else
         info "Requesting sudo to write to ${INSTALL_DIR}..."
         sudo mkdir -p "$INSTALL_DIR"
         sudo cp "$tmp_file" "${INSTALL_DIR}/${tool}"
         sudo chmod +x "${INSTALL_DIR}/${tool}"
-        rm -f "$tmp_file"
     fi
 
     success "$tool installed → ${INSTALL_DIR}/${tool}"
@@ -206,11 +205,23 @@ main() {
     info "Install directory: ${INSTALL_DIR}"
     echo ""
 
+    # One temp directory for the whole run, holding both the downloaded
+    # binaries and their SHA256SUMS files. Rooted explicitly at /tmp (rather
+    # than mktemp's own default) so sudo can still read into it below — on
+    # macOS, mktemp's default dir is under the invoking user's own
+    # $TMPDIR, which sudo has historically failed to access here ("No such
+    # file or directory" on sudo cp). Unlike a PID-derived name, mktemp's
+    # random suffix isn't predictable, which matters because this directory
+    # holds SHA256SUMS — the data everything else is verified against.
+    local tmp_dir
+    tmp_dir=$(mktemp -d /tmp/artools.XXXXXXXXXX)
+    trap 'rm -rf "$tmp_dir"' EXIT INT TERM
+
     local selected_tools
     read -ra selected_tools <<< "$(parse_args "$@")"
 
     for tool in "${selected_tools[@]}"; do
-        install_tool "$tool" "$platform"
+        install_tool "$tool" "$platform" "$tmp_dir"
         remove_quarantine "$tool"
     done
 

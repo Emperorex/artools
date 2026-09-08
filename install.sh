@@ -213,9 +213,15 @@ main() {
     # file or directory" on sudo cp). Unlike a PID-derived name, mktemp's
     # random suffix isn't predictable, which matters because this directory
     # holds SHA256SUMS — the data everything else is verified against.
-    local tmp_dir
+    tmp_dir=""
+    cleanup() {
+        if [ -n "$tmp_dir" ]; then
+            rm -rf -- "$tmp_dir"
+        fi
+    }
+    trap cleanup EXIT INT TERM
+
     tmp_dir=$(mktemp -d /tmp/artools.XXXXXXXXXX)
-    trap 'rm -rf "$tmp_dir"' EXIT INT TERM
 
     local selected_tools
     read -ra selected_tools <<< "$(parse_args "$@")"

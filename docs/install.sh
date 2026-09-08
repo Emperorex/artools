@@ -42,6 +42,19 @@ check_deps() {
     for cmd in curl jq chmod; do
         command -v "$cmd" >/dev/null 2>&1 || error "Required dependency not found: $cmd"
     done
+    if ! command -v sha256sum >/dev/null 2>&1 && ! command -v shasum >/dev/null 2>&1; then
+        error "Required dependency not found: sha256sum or shasum (needed to verify downloaded binaries)"
+    fi
+}
+
+# ── SHA-256 of a file, using whichever tool is available ─────────────────────
+sha256_of() {
+    local file="$1"
+    if command -v sha256sum >/dev/null 2>&1; then
+        sha256sum "$file" | awk '{print $1}'
+    else
+        shasum -a 256 "$file" | awk '{print $1}'
+    fi
 }
 
 # ── Resolve the latest release tag for a given tool ──────────────────────────
@@ -53,10 +66,58 @@ latest_tag() {
         | head -n1
 }
 
+# ── Verify a downloaded binary against the release's SHA256SUMS ─────────────
+# Every release publishes a SHA256SUMS asset alongside the binaries (see
+# release_tool.yaml). Refusing to install when it's missing or doesn't match
+# is the whole point: a mirror, proxy, or compromised release asset could
+# otherwise swap the binary for something else between build and execution,
+# and this installer runs with the privileges of whoever piped it into bash.
+#
+# sums_file lives in the same mktemp'd tmp_dir as the binary itself (see
+# main()) — a predictable path here would be just as bad as a predictable
+# path for the binary, since it's the trust anchor the binary gets checked
+# against.
+verify_checksum() {
+    local tool="$1"
+    local tag="$2"
+    local binary_name="$3"
+    local tmp_file="$4"
+    local tmp_dir="$5"
+
+    local sums_url
+    sums_url=$(curl -fsSL "https://api.github.com/repos/${REPO}/releases/tags/${tag}" \
+        | jq -r '.assets[] | select(.name == "SHA256SUMS") | .browser_download_url')
+
+    if [ -z "$sums_url" ]; then
+        error "SHA256SUMS not found in release '$tag'. Refusing to install an unverified binary for '$tool'."
+    fi
+
+    local sums_file="${tmp_dir}/${tool}.SHA256SUMS"
+    curl -fsSL "$sums_url" -o "$sums_file"
+
+    local expected
+    expected=$(awk -v name="$binary_name" '$2 == name { print $1 }' "$sums_file")
+
+    if [ -z "$expected" ]; then
+        error "No checksum entry for '$binary_name' in SHA256SUMS. Refusing to install an unverified binary for '$tool'."
+    fi
+
+    local actual
+    actual=$(sha256_of "$tmp_file")
+
+    if [ "$expected" != "$actual" ]; then
+        error "Checksum mismatch for '$binary_name'!
+    expected: ${expected}
+    got:      ${actual}
+The download may be corrupted or tampered with. Aborting — nothing was installed."
+    fi
+}
+
 # ── Download and install a single binary ─────────────────────────────────────
 install_tool() {
     local tool="$1"
     local platform="$2"
+    local tmp_dir="$3"
     local tag
     tag=$(latest_tag "$tool")
 
@@ -78,26 +139,25 @@ install_tool() {
         error "Asset '$binary_name' not found in release '$tag'."
     fi
 
-    # Use /tmp explicitly so the path is accessible to both the current user
-    # and sudo — mktemp's default dir on macOS is user-scoped and sudo cannot
-    # access it, causing "No such file or directory" on sudo mv.
-    local tmp_file="/tmp/artools_${tool}_$$"
+    local tmp_file="${tmp_dir}/${tool}"
 
     info "Installing $tool v${version} (${platform})..."
 
     curl -fsSL --progress-bar "$download_url" -o "$tmp_file"
 
+    verify_checksum "$tool" "$tag" "$binary_name" "$tmp_file" "$tmp_dir"
+    success "Checksum verified for $binary_name"
+
     chmod +x "$tmp_file"
 
     if [ -w "$INSTALL_DIR" ]; then
         mkdir -p "$INSTALL_DIR"
-        mv "$tmp_file" "${INSTALL_DIR}/${tool}"
+        cp "$tmp_file" "${INSTALL_DIR}/${tool}"
     else
         info "Requesting sudo to write to ${INSTALL_DIR}..."
         sudo mkdir -p "$INSTALL_DIR"
         sudo cp "$tmp_file" "${INSTALL_DIR}/${tool}"
         sudo chmod +x "${INSTALL_DIR}/${tool}"
-        rm -f "$tmp_file"
     fi
 
     success "$tool installed → ${INSTALL_DIR}/${tool}"
@@ -145,11 +205,23 @@ main() {
     info "Install directory: ${INSTALL_DIR}"
     echo ""
 
+    # One temp directory for the whole run, holding both the downloaded
+    # binaries and their SHA256SUMS files. Rooted explicitly at /tmp (rather
+    # than mktemp's own default) so sudo can still read into it below — on
+    # macOS, mktemp's default dir is under the invoking user's own
+    # $TMPDIR, which sudo has historically failed to access here ("No such
+    # file or directory" on sudo cp). Unlike a PID-derived name, mktemp's
+    # random suffix isn't predictable, which matters because this directory
+    # holds SHA256SUMS — the data everything else is verified against.
+    local tmp_dir
+    tmp_dir=$(mktemp -d /tmp/artools.XXXXXXXXXX)
+    trap 'rm -rf "$tmp_dir"' EXIT INT TERM
+
     local selected_tools
     read -ra selected_tools <<< "$(parse_args "$@")"
 
     for tool in "${selected_tools[@]}"; do
-        install_tool "$tool" "$platform"
+        install_tool "$tool" "$platform" "$tmp_dir"
         remove_quarantine "$tool"
     done
 

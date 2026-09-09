@@ -61,6 +61,15 @@ fn default_jobs() -> usize {
     (cpus / 2).clamp(1, 16)
 }
 
+/// Hard upper bound for -j/--jobs.
+///
+/// `jobs` maps 1:1 to raw `thread::spawn` calls (see the worker loop below),
+/// so an unbounded value lets a caller trivially exhaust threads/PIDs/memory
+/// on the host (e.g. `-j 65535`). 128 comfortably covers even large CI/build
+/// machines while keeping a hostile or accidental value from taking down the
+/// process or the machine it runs on.
+const MAX_JOBS: u16 = 128;
+
 /// CLI arguments for ardisk
 #[derive(Parser, Debug)]
 #[command(
@@ -78,7 +87,7 @@ struct Args {
         short = 'j',
         long,
         default_value_t = default_jobs(),
-        value_parser = clap::value_parser!(u16).range(1..).map(|v| v as usize)
+        value_parser = clap::value_parser!(u16).range(1..=i64::from(MAX_JOBS)).map(|v| v as usize)
     )]
     jobs: usize,
 

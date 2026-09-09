@@ -28,6 +28,36 @@ fn default_jobs() -> usize {
     (cpus / 2).clamp(1, 16)
 }
 
+/// Hard upper bound for -B/--before-context, -A/--after-context, and
+/// -C/--context.
+///
+/// Each unit maps directly to a slot in a `VecDeque<(usize, String)>` that
+/// is pre-allocated with `VecDeque::with_capacity(before_ctx)`, so an
+/// unbounded `usize` value (e.g. `-C 18446744073709551615`, which is a
+/// valid usize on 64-bit) lets a caller trigger an oversized allocation
+/// attempt and abort/OOM the process. 100_000 lines of context is already
+/// far beyond any realistic use case.
+const MAX_CONTEXT_LINES: usize = 100_000;
+
+/// Custom value parser for -B/-A/-C.
+///
+/// `usize` isn't one of clap's built-in ranged numeric types (only
+/// u8/i8/u16/i16/u32/i32/u64/i64 support `.range()` via
+/// `value_parser!(..).range(..)`), so the bound is enforced by hand here.
+fn context_lines_parser(value: &str) -> Result<usize, String> {
+    let value: usize = value
+        .parse()
+        .map_err(|_| "context must be a non-negative integer".to_string())?;
+
+    if value > MAX_CONTEXT_LINES {
+        return Err(format!(
+            "context is too large; maximum is {MAX_CONTEXT_LINES}"
+        ));
+    }
+
+    Ok(value)
+}
+
 /// Hard upper bound for -j/--jobs.
 ///
 /// `jobs` maps 1:1 to raw `thread::spawn` calls (see the worker loop below),
@@ -95,15 +125,15 @@ struct Args {
     include: Option<String>,
 
     /// Show NUM lines of leading context before matching lines
-    #[arg(short = 'B', long = "before-context")]
+    #[arg(short = 'B', long = "before-context", value_parser = context_lines_parser)]
     before_context: Option<usize>,
 
     /// Show NUM lines of trailing context after matching lines
-    #[arg(short = 'A', long = "after-context")]
+    #[arg(short = 'A', long = "after-context", value_parser = context_lines_parser)]
     after_context: Option<usize>,
 
     /// Show NUM lines of leading and trailing context around matching lines
-    #[arg(short = 'C', long = "context")]
+    #[arg(short = 'C', long = "context", value_parser = context_lines_parser)]
     context: Option<usize>,
 
     /// Additional ignored directories

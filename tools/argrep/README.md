@@ -30,9 +30,9 @@ argrep [OPTIONS] QUERY [PATH]
 |------------------------|-------|---------|------------------------------------------------------------------------|
 | `--ignore-case`        | `-i`  | —       | Case-insensitive matching                                              |
 | `--line-number`        | `-n`  | —       | Show line numbers in output                                            |
-| `--before-context NUM` | `-B`  | —       | Show NUM lines of leading context before matches                       |
-| `--after-context NUM`  | `-A`  | —       | Show NUM lines of trailing context after matches                       |
-| `--context NUM`        | `-C`  | —       | Show NUM lines of leading and trailing context around matches          |
+| `--before-context NUM` | `-B`  | —       | Show NUM lines of leading context before matches (max 100,000)         |
+| `--after-context NUM`  | `-A`  | —       | Show NUM lines of trailing context after matches (max 100,000)         |
+| `--context NUM`        | `-C`  | —       | Show NUM lines of leading and trailing context around matches (max 100,000) |
 | `--invert`             | `-v`  | —       | Print lines that do NOT match the query                                |
 | `--files-with-matches` | `-l`  | —       | Print only filenames of files containing a match (conflicts with `-c`) |
 | `--count`              | `-c`  | —       | Print count of matching lines per file (conflicts with `-l`)           |

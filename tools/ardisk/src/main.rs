@@ -19,6 +19,13 @@ fn parse_threshold(s: &str) -> Result<u64, String> {
         .parse()
         .map_err(|_| format!("Invalid number '{}' in threshold '{}'.", num_part, s))?;
 
+    if !value.is_finite() {
+        return Err(format!(
+            "Threshold must be a finite number, got '{}' in '{}'.",
+            num_part, s
+        ));
+    }
+
     if value < 0.0 {
         return Err(format!("Threshold must be a positive value, got '{}'.", s));
     }
@@ -42,7 +49,13 @@ fn parse_threshold(s: &str) -> Result<u64, String> {
         }
     };
 
-    Ok((value * multiplier) as u64)
+    let bytes = value * multiplier;
+
+    if !bytes.is_finite() || bytes > u64::MAX as f64 {
+        return Err(format!("Threshold is too large in '{}'.", s));
+    }
+
+    Ok(bytes as u64)
 }
 
 /// CPU-aware default worker count, used as the -j/--jobs default.

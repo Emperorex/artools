@@ -52,6 +52,13 @@ fn parse_size_bytes(s: &str) -> Result<u64, String> {
         .parse()
         .map_err(|_| format!("Invalid number '{}' in size '{}'.", num_part, s))?;
 
+    if !value.is_finite() {
+        return Err(format!(
+            "Size must be a finite number, got '{}' in '{}'.",
+            num_part, s
+        ));
+    }
+
     if value < 0.0 {
         return Err(format!("Size must be positive, got '{}'.", s));
     }
@@ -75,7 +82,13 @@ fn parse_size_bytes(s: &str) -> Result<u64, String> {
         }
     };
 
-    Ok((value * multiplier) as u64)
+    let bytes = value * multiplier;
+
+    if !bytes.is_finite() || bytes > u64::MAX as f64 {
+        return Err(format!("Size is too large in '{}'.", s));
+    }
+
+    Ok(bytes as u64)
 }
 
 /// Builds the set of directory names to skip, given `--no-ignore` and any

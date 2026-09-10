@@ -5,6 +5,7 @@ use ignore::{
     Match,
     gitignore::{Gitignore, GitignoreBuilder},
 };
+use regex::{Regex, RegexBuilder};
 use std::{
     collections::{HashSet, VecDeque},
     fs::{self, File},
@@ -31,8 +32,14 @@ pub struct Task {
 
 /// Shared runtime configuration
 pub struct SearchConfig {
+    /// The raw pattern as given on the command line (regex, unless -F
+    /// was used, in which case it was escaped before being compiled into
+    /// `regex` — kept here only for display purposes, not for matching).
     pub query: String,
-    pub normalized_query: String,
+    /// Compiled matcher used for every line. Case-insensitivity (-i) and
+    /// fixed-string mode (-F) are both baked in at construction time via
+    /// `build_matcher`, rather than handled ad hoc at match time.
+    pub regex: Regex,
     pub ignore_case: bool,
     pub line_number: bool,
     pub ignore_dirs: HashSet<String>,
@@ -98,14 +105,31 @@ pub struct MatchResult {
     pub is_separator: bool,
 }
 
-/// Normalizes a query string for case-insensitive matching.
-/// Call this when constructing `SearchConfig` with `ignore_case: true`.
-pub fn normalize_query(query: &str, ignore_case: bool) -> String {
-    if ignore_case {
-        query.to_lowercase()
+/// Builds the compiled matcher used for every line, from the raw CLI
+/// pattern and flags.
+///
+/// - `fixed_strings` (-F): the pattern is escaped via `regex::escape`
+///   before compilation, so any regex metacharacters in it (`.`, `*`,
+///   `(`, etc.) are matched literally instead of being interpreted —
+///   grep's `-F` semantics. Without it, `query` is compiled as a regex
+///   directly.
+/// - `ignore_case` (-i): passed to the regex engine's own case-insensitive
+///   mode rather than lowercasing each line at match time, which is both
+///   simpler and avoids a per-line allocation.
+///
+/// Returns a human-readable error (not a panic) on invalid regex syntax,
+/// so callers can report it as a normal CLI usage error.
+pub fn build_matcher(query: &str, fixed_strings: bool, ignore_case: bool) -> Result<Regex, String> {
+    let pattern = if fixed_strings {
+        regex::escape(query)
     } else {
         query.to_string()
-    }
+    };
+
+    RegexBuilder::new(&pattern)
+        .case_insensitive(ignore_case)
+        .build()
+        .map_err(|err| format!("Invalid pattern '{}': {}", query, err))
 }
 
 /// Runs a parallel grep across all text files under `root`,
@@ -417,11 +441,7 @@ pub fn grep_file(
 
         let line = String::from_utf8_lossy(&line_bytes);
 
-        let line_matches = if config.ignore_case {
-            line.to_lowercase().contains(&config.normalized_query)
-        } else {
-            line.contains(&config.query)
-        };
+        let line_matches = config.regex.is_match(&line);
 
         // Apply -v inversion
         let should_emit = if config.invert {

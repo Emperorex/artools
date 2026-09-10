@@ -558,9 +558,10 @@
         <span class="tool-name"><span class="ar">ar</span>grep</span>
         <span class="tool-alt">replaces grep</span>
       </div>
-      <p class="tool-desc">Parallel text search across file trees. Skips binaries automatically, supports piped stdin, and works as a drop-in for common grep workflows.</p>
+      <p class="tool-desc">Parallel text search across file trees. Full regex by default, with <code style="font-family:var(--mono);font-size:0.78rem">-F</code> for literal strings. Skips binaries automatically, supports piped stdin, and works as a drop-in for common grep workflows.</p>
       <div class="tool-flags">
         <span class="flag">-i case</span>
+        <span class="flag">-F literal</span>
         <span class="flag">-n lines</span>
         <span class="flag">-v invert</span>
         <span class="flag">-l files</span>
@@ -625,6 +626,9 @@
         <br>
         <br><span class="uc-comment"># Use as a grep replacement in pipes</span>
         <br><span class="uc-cmd">ps aux</span> <span class="uc-pipe">|</span> <span class="uc-cmd">argrep</span> <span class="uc-arg">"rust"</span>
+        <br>
+        <br><span class="uc-comment"># Literal search (skip regex interpretation)</span>
+        <br><span class="uc-cmd">argrep</span> <span class="uc-flag">-F</span> <span class="uc-arg">"connection refused"</span> <span class="uc-arg">/var/log</span>
       </div>
     </div>
 

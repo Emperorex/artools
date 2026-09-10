@@ -20,7 +20,14 @@ cargo build --release --bin argrep
 argrep [OPTIONS] QUERY [PATH]
 ```
 
-`QUERY` is required. `PATH` defaults to `.` (current directory) if not specified.
+`QUERY` is required and is matched as a **regular expression** by default (Rust's [`regex`](https://docs.rs/regex) crate — a similar dialect to `grep -E`/PCRE, without backreferences or lookaround). Use `-F`/`--fixed-strings` to search for `QUERY` literally instead, e.g. when it contains characters like `.`, `*`, `(` that you don't want interpreted as regex syntax:
+
+```bash
+argrep -F 'foo.bar' .          # matches the literal text "foo.bar"
+argrep -F 'connection refused' /var/log
+```
+
+`PATH` defaults to `.` (current directory) if not specified.
 
 `argrep` also reads from **stdin** when used in a pipeline — no path argument needed.
 
@@ -29,6 +36,7 @@ argrep [OPTIONS] QUERY [PATH]
 | Flag                   | Short | Default | Description                                                            |
 |------------------------|-------|---------|------------------------------------------------------------------------|
 | `--ignore-case`        | `-i`  | —       | Case-insensitive matching                                              |
+| `--fixed-strings`      | `-F`  | —       | Treat QUERY as a literal string instead of a regex                     |
 | `--line-number`        | `-n`  | —       | Show line numbers in output                                            |
 | `--before-context NUM` | `-B`  | —       | Show NUM lines of leading context before matches (max 100,000)         |
 | `--after-context NUM`  | `-A`  | —       | Show NUM lines of trailing context after matches (max 100,000)         |
@@ -137,6 +145,7 @@ argrep "deprecated" /large/project -j 8 --include "*.py" -n
 |-------------------|--------------------------------------|-------------------------------------|
 | Recursive search  | `grep -r "query" .`                  | `argrep "query" .`                  |
 | Case-insensitive  | `grep -ri "query" .`                 | `argrep "query" . -i`               |
+| Fixed string      | `grep -rF "query" .`                 | `argrep "query" . -F`               |
 | Show line numbers | `grep -rn "query" .`                 | `argrep "query" . -n`               |
 | Context lines     | `grep -C 2 "query" .`                | `argrep "query" . -C 2`             |
 | Files only        | `grep -rl "query" .`                 | `argrep "query" . -l`               |
@@ -160,7 +169,7 @@ argrep "deprecated" /large/project -j 8 --include "*.py" -n
 | Code | Meaning                                                                                                                       |
 |------|-------------------------------------------------------------------------------------------------------------------------------|
 | `0`  | Success — every file was read, matches or not                                                                                 |
-| `1`  | A file or directory could not be read (permission denied, I/O error), or another config error (e.g. invalid `--include` glob) |
+| `1`  | A file or directory could not be read (permission denied, I/O error), an invalid regex `QUERY`, or another config error (e.g. invalid `--include` glob) |
 | `2`  | Invalid CLI usage — bad or missing flag (e.g. `-j 0`, missing `QUERY`)                                                        |
 
 A nonzero exit from an unreadable file doesn't mean the search stopped: every file that *could* be read is still searched and its matches printed. Run with `--debug` to see which paths failed and why; without it you still get a one-line summary and the nonzero exit code, so it can't be mistaken for "no matches found".

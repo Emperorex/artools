@@ -1,6 +1,6 @@
 [package]
 name = "argrep"
-version = "0.1.6"
+version = "0.1.7"
 edition = "2024"
 authors = ["Artem Shemet"]
 description = "Fast parallel text search utility"
@@ -11,6 +11,7 @@ crossbeam-channel = "0.5"
 colored = "3.1"
 glob = "0.3"
 ignore = "0.4"
+regex = "1"
 
 [dev-dependencies]
 tempfile = "3"

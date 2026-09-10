@@ -1,8 +1,9 @@
-use argrep::{DEFAULT_IGNORES, SearchConfig, SearchStats, normalize_query, parallel_grep};
+use argrep::{DEFAULT_IGNORES, SearchConfig, SearchStats, build_matcher, parallel_grep};
 use clap::Parser;
 use clap::builder::TypedValueParser as _;
 use colored::Colorize;
 use glob::Pattern;
+use regex::Regex;
 use std::{
     collections::HashSet,
     fs,
@@ -87,6 +88,10 @@ struct Args {
     #[arg(short = 'i', long)]
     ignore_case: bool,
 
+    /// Treat QUERY as a literal string instead of a regex
+    #[arg(short = 'F', long = "fixed-strings")]
+    fixed_strings: bool,
+
     /// Display line numbers in the output results
     #[arg(short = 'n', long)]
     line_number: bool,
@@ -163,6 +168,14 @@ fn build_ignore_dirs(no_ignore: bool, extra: Vec<String>) -> HashSet<String> {
 fn main() {
     let args = Args::parse();
 
+    let regex = match build_matcher(&args.query, args.fixed_strings, args.ignore_case) {
+        Ok(re) => re,
+        Err(e) => {
+            eprintln!("{}", format!("error: {}", e).red());
+            std::process::exit(1);
+        }
+    };
+
     let ignore_dirs = build_ignore_dirs(args.no_ignore, args.ignore);
 
     let include_pattern: Option<Pattern> = match &args.include {
@@ -184,7 +197,7 @@ fn main() {
     let respect_gitignore = !args.no_ignore;
 
     let config = Arc::new(SearchConfig {
-        normalized_query: normalize_query(&args.query, args.ignore_case),
+        regex,
         query: args.query,
         ignore_case: args.ignore_case,
         line_number: args.line_number,
@@ -215,7 +228,7 @@ fn main() {
         let root_path = fs::canonicalize(raw_path).unwrap_or_else(|_| PathBuf::from(raw_path));
 
         let line_number = config.line_number;
-        let query = config.query.clone();
+        let regex = config.regex.clone();
         let files_with_matches = config.files_with_matches;
         let count_per_file = config.count_per_file;
 
@@ -225,7 +238,7 @@ fn main() {
                 files_with_matches,
                 count_per_file,
                 line_number,
-                &query,
+                &regex,
             );
         });
     }
@@ -305,11 +318,7 @@ fn grep_stdin(config: &argrep::SearchConfig) {
     for line in stdin.lock().lines().map_while(Result::ok) {
         line_num += 1;
 
-        let line_matches = if config.ignore_case {
-            line.to_lowercase().contains(&config.normalized_query)
-        } else {
-            line.contains(&config.query)
-        };
+        let line_matches = config.regex.is_match(&line);
 
         let should_emit = if config.invert {
             !line_matches
@@ -380,6 +389,27 @@ fn grep_stdin(config: &argrep::SearchConfig) {
     }
 }
 
+/// Highlights every regex match in `line` in bold red.
+///
+/// Uses `find_iter` rather than `str::replace`, because with a real regex
+/// pattern (e.g. `foo.*bar`) the matched text isn't necessarily equal to
+/// the pattern string itself, so a literal string replace would either
+/// miss it or (worse) replace unrelated literal occurrences of the
+/// pattern text.
+fn highlight_matches(line: &str, regex: &Regex) -> String {
+    let mut highlighted = String::with_capacity(line.len());
+    let mut last_end = 0;
+
+    for m in regex.find_iter(line) {
+        highlighted.push_str(&line[last_end..m.start()]);
+        highlighted.push_str(&m.as_str().red().bold().to_string());
+        last_end = m.end();
+    }
+    highlighted.push_str(&line[last_end..]);
+
+    highlighted
+}
+
 fn print_stdin_line(line: &str, line_num: usize, is_context: bool, config: &argrep::SearchConfig) {
     if is_context {
         if config.line_number {
@@ -388,7 +418,7 @@ fn print_stdin_line(line: &str, line_num: usize, is_context: bool, config: &argr
             println!("{}", line.trim_end());
         }
     } else {
-        let highlighted = line.replace(&config.query, &config.query.red().bold().to_string());
+        let highlighted = highlight_matches(line, &config.regex);
         if config.line_number {
             println!(
                 "{}:{}",
@@ -407,7 +437,7 @@ fn print_result(
     files_with_matches: bool,
     count_per_file: bool,
     line_number: bool,
-    query: &str,
+    regex: &Regex,
 ) {
     if result.is_separator {
         println!("{}", "--".cyan());
@@ -438,9 +468,7 @@ fn print_result(
         let content = if result.is_context {
             result.line_content.trim_end().to_string()
         } else {
-            result
-                .line_content
-                .replace(query, &query.red().bold().to_string())
+            highlight_matches(&result.line_content, regex)
                 .trim_end()
                 .to_string()
         };
@@ -564,5 +592,25 @@ mod tests {
         let dirs = build_ignore_dirs(true, vec!["vendor".to_string()]);
         assert_eq!(dirs.len(), 1);
         assert!(dirs.contains("vendor"));
+    }
+
+    // ── -F / --fixed-strings ─────────────────────────────────────────────────
+
+    #[test]
+    fn fixed_strings_flag_defaults_to_false() {
+        let args = Args::try_parse_from(["argrep", "foo", "."]).unwrap();
+        assert!(!args.fixed_strings);
+    }
+
+    #[test]
+    fn fixed_strings_short_flag_is_parsed() {
+        let args = Args::try_parse_from(["argrep", "foo.bar", ".", "-F"]).unwrap();
+        assert!(args.fixed_strings);
+    }
+
+    #[test]
+    fn fixed_strings_long_flag_is_parsed() {
+        let args = Args::try_parse_from(["argrep", "foo.bar", ".", "--fixed-strings"]).unwrap();
+        assert!(args.fixed_strings);
     }
 }

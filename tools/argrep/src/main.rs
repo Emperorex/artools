@@ -102,6 +102,13 @@ struct Args {
     #[arg(short = 'x', long = "line-regexp")]
     whole_line: bool,
 
+    /// Suppress all output; exit code alone reports whether a match was
+    /// found (0 = match, 1 = no match, 2 = error). Search stops after the
+    /// first match. Takes priority over -l/-c/-n if those are also set —
+    /// nothing is printed either way.
+    #[arg(short = 'q', long)]
+    quiet: bool,
+
     /// Display line numbers in the output results
     #[arg(short = 'n', long)]
     line_number: bool,
@@ -190,7 +197,13 @@ fn main() {
         Ok(re) => re,
         Err(e) => {
             eprintln!("{}", format!("error: {}", e).red());
-            std::process::exit(1);
+            // Under -q, exit codes are the whole interface (0=match,
+            // 1=no match, 2=error), matching grep's own convention — so a
+            // config error has to land on 2, not 1, which -q reserves for
+            // "ran fine, found nothing". Outside -q, this tool's own
+            // convention (documented in the README) uses 1 for config/IO
+            // errors, so that's untouched.
+            std::process::exit(if args.quiet { 2 } else { 1 });
         }
     };
 
@@ -204,7 +217,7 @@ fn main() {
                     "{}",
                     format!("error: Invalid glob pattern '{}': {}", p, e).red()
                 );
-                std::process::exit(1);
+                std::process::exit(if args.quiet { 2 } else { 1 });
             }
         },
         None => None,
@@ -228,6 +241,7 @@ fn main() {
         before_context,
         after_context,
         respect_gitignore,
+        quiet: args.quiet,
     });
 
     let stats = SearchStats::new();
@@ -240,7 +254,7 @@ fn main() {
     };
 
     if use_stdin {
-        grep_stdin(&config);
+        grep_stdin(&config, &stats);
     } else {
         let raw_path = args.path.as_deref().unwrap_or(".");
         let root_path = fs::canonicalize(raw_path).unwrap_or_else(|_| PathBuf::from(raw_path));
@@ -312,13 +326,32 @@ fn main() {
             )
             .red()
         );
+    }
+
+    if args.quiet {
+        // -q: the exit code alone reports the outcome, following grep's
+        // own convention — 0 = at least one match, 1 = no matches, 2 = an
+        // error occurred (I/O or otherwise). This intentionally differs
+        // from the tool's default (non -q) contract just below, where 0
+        // always means "the scan ran" and 1 means "an I/O error occurred",
+        // regardless of whether anything matched.
+        std::process::exit(if io_error_count > 0 {
+            2
+        } else if stats.matched_lines.load(Ordering::Relaxed) > 0 {
+            0
+        } else {
+            1
+        });
+    }
+
+    if io_error_count > 0 {
         std::process::exit(1);
     }
 }
 
 /// Reads lines from stdin and prints those matching the config query.
 /// Used when argrep is invoked as part of a pipeline: cmd | argrep "pattern"
-fn grep_stdin(config: &argrep::SearchConfig) {
+fn grep_stdin(config: &argrep::SearchConfig, stats: &argrep::SearchStats) {
     let stdin = io::stdin();
     let mut line_num = 0usize;
     let mut match_count = 0usize;
@@ -346,6 +379,13 @@ fn grep_stdin(config: &argrep::SearchConfig) {
 
         if should_emit {
             match_count += 1;
+            stats.matched_lines.fetch_add(1, Ordering::Relaxed);
+
+            if config.quiet {
+                // -q: exit status only, no output — takes priority over
+                // -l/-c/etc. if also set, same as the file-search path.
+                break;
+            }
 
             if config.count_per_file {
                 // accumulate — print after EOF
@@ -398,7 +438,7 @@ fn grep_stdin(config: &argrep::SearchConfig) {
         }
     }
 
-    if config.count_per_file {
+    if config.count_per_file && !config.quiet {
         println!(
             "{}: {}",
             "<stdin>".magenta(),
@@ -661,5 +701,35 @@ mod tests {
         let args = Args::try_parse_from(["argrep", "foo", ".", "-w", "-x"]).unwrap();
         assert!(args.whole_word);
         assert!(args.whole_line);
+    }
+
+    // ── -q / --quiet ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn quiet_flag_defaults_to_false() {
+        let args = Args::try_parse_from(["argrep", "foo", "."]).unwrap();
+        assert!(!args.quiet);
+    }
+
+    #[test]
+    fn quiet_short_flag_is_parsed() {
+        let args = Args::try_parse_from(["argrep", "foo", ".", "-q"]).unwrap();
+        assert!(args.quiet);
+    }
+
+    #[test]
+    fn quiet_long_flag_is_parsed() {
+        let args = Args::try_parse_from(["argrep", "foo", ".", "--quiet"]).unwrap();
+        assert!(args.quiet);
+    }
+
+    #[test]
+    fn quiet_can_be_combined_with_other_output_flags_at_parse_time() {
+        // -q takes priority over -l/-c/-n at runtime (nothing is printed
+        // either way), but there's no reason to reject the combination at
+        // the CLI level — same as real grep.
+        let args = Args::try_parse_from(["argrep", "foo", ".", "-q", "-l"]).unwrap();
+        assert!(args.quiet);
+        assert!(args.files_with_matches);
     }
 }

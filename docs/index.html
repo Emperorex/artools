@@ -568,6 +568,7 @@
         <span class="flag">-v invert</span>
         <span class="flag">-l files</span>
         <span class="flag">-c count</span>
+        <span class="flag">-q quiet</span>
         <span class="flag">--include</span>
       </div>
     </div>
@@ -634,6 +635,9 @@
         <br>
         <br><span class="uc-comment"># Whole-word match ("cat", not "category")</span>
         <br><span class="uc-cmd">argrep</span> <span class="uc-flag">-w</span> <span class="uc-arg">"cat"</span> <span class="uc-arg">.</span>
+        <br>
+        <br><span class="uc-comment"># Quiet mode — just check the exit code</span>
+        <br><span class="uc-cmd">argrep</span> <span class="uc-flag">-q</span> <span class="uc-arg">"TODO"</span> <span class="uc-arg">src/</span> <span class="uc-pipe">&&</span> <span class="uc-cmd">echo</span> <span class="uc-arg">"found"</span>
       </div>
     </div>
 

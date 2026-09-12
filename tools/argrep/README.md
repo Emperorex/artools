@@ -34,6 +34,14 @@ argrep -w cat .                # matches "cat" and "the cat sat", not "category"
 argrep -x ERROR .              # matches a line that is exactly "ERROR", not "ERROR: disk full"
 ```
 
+Use `-q`/`--quiet` to suppress all output and rely on the exit code alone — the search stops as soon as one match is found instead of scanning the rest of the tree, and (unlike the tool's default exit-code contract below) follows grep's own convention: `0` = at least one match, `1` = no match, `2` = a CLI/config error occurred:
+
+```bash
+if argrep -q 'TODO' src/; then
+  echo "TODO found"
+fi
+```
+
 `PATH` defaults to `.` (current directory) if not specified.
 
 `argrep` also reads from **stdin** when used in a pipeline — no path argument needed.
@@ -56,6 +64,7 @@ argrep -x ERROR .              # matches a line that is exactly "ERROR", not "ER
 | `--include PATTERN`    | —     | —       | Only search files matching this glob (e.g. `"*.rs"`, `"*.log"`)        |
 | `--jobs N`             | `-j`  | CPU-aware | Number of parallel worker threads (1–128; default is half the available cores, clamped to 1–16) |
 | `--debug`              | `-d`  | —       | Print scan statistics and errors to stderr                             |
+| `--quiet`              | `-q`  | —       | No output; exit code alone reports match/no-match/error (see Exit codes below). Overrides -l/-c/-n if also set — nothing is printed either way. |
 
 `-l` and `-c` cannot be combined — they imply different output shapes (`filename` vs `filename: count`), so combining them (`argrep foo . -c -l`) is a CLI error rather than one silently overriding the other.
 
@@ -157,6 +166,7 @@ argrep "deprecated" /large/project -j 8 --include "*.py" -n
 | Fixed string      | `grep -rF "query" .`                 | `argrep "query" . -F`               |
 | Whole word        | `grep -rw "query" .`                 | `argrep "query" . -w`               |
 | Whole line        | `grep -rx "query" .`                 | `argrep "query" . -x`               |
+| Quiet (exit code only) | `grep -rq "query" .`            | `argrep "query" . -q`               |
 | Show line numbers | `grep -rn "query" .`                 | `argrep "query" . -n`               |
 | Context lines     | `grep -C 2 "query" .`                | `argrep "query" . -C 2`             |
 | Files only        | `grep -rl "query" .`                 | `argrep "query" . -l`               |
@@ -184,3 +194,11 @@ argrep "deprecated" /large/project -j 8 --include "*.py" -n
 | `2`  | Invalid CLI usage — bad or missing flag (e.g. `-j 0`, missing `QUERY`)                                                        |
 
 A nonzero exit from an unreadable file doesn't mean the search stopped: every file that *could* be read is still searched and its matches printed. Run with `--debug` to see which paths failed and why; without it you still get a one-line summary and the nonzero exit code, so it can't be mistaken for "no matches found".
+
+**With `-q`/`--quiet`, the exit-code meaning changes** to match grep's own convention instead of the table above:
+
+| Code | Meaning (only when `-q` is set)        |
+|------|-----------------------------------------|
+| `0`  | At least one match was found            |
+| `1`  | No matches were found (no error)        |
+| `2`  | An error occurred — invalid regex, invalid `--include` glob, or a file/directory could not be read |

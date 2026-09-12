@@ -566,6 +566,7 @@
         <span class="flag">-x line</span>
         <span class="flag">-n lines</span>
         <span class="flag">-v invert</span>
+        <span class="flag">-o matched</span>
         <span class="flag">-l files</span>
         <span class="flag">-c count</span>
         <span class="flag">-q quiet</span>
@@ -638,6 +639,9 @@
         <br>
         <br><span class="uc-comment"># Quiet mode — just check the exit code</span>
         <br><span class="uc-cmd">argrep</span> <span class="uc-flag">-q</span> <span class="uc-arg">"TODO"</span> <span class="uc-arg">src/</span> <span class="uc-pipe">&&</span> <span class="uc-cmd">echo</span> <span class="uc-arg">"found"</span>
+        <br>
+        <br><span class="uc-comment"># Print only the matched text, not the whole line</span>
+        <br><span class="uc-cmd">echo</span> <span class="uc-arg">'foo bar foo'</span> <span class="uc-pipe">|</span> <span class="uc-cmd">argrep</span> <span class="uc-flag">-o</span> <span class="uc-arg">"foo"</span>
       </div>
     </div>
 

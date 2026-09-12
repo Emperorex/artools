@@ -130,6 +130,11 @@ struct Args {
     #[arg(short = 'v', long)]
     invert: bool,
 
+    /// Print only the matched text (one occurrence per output line)
+    /// instead of the whole matching line
+    #[arg(short = 'o', long = "only-matching", conflicts_with = "invert")]
+    only_matching: bool,
+
     /// Print only filenames of files that contain a match
     #[arg(
         short = 'l',
@@ -223,8 +228,21 @@ fn main() {
         None => None,
     };
 
-    let before_context = args.before_context.or(args.context).unwrap_or(0);
-    let after_context = args.after_context.or(args.context).unwrap_or(0);
+    let mut before_context = args.before_context.or(args.context).unwrap_or(0);
+    let mut after_context = args.after_context.or(args.context).unwrap_or(0);
+    if args.only_matching && (before_context > 0 || after_context > 0) {
+        // Same behavior GNU grep documents for this combination: "With
+        // the -o or --only-matching option, these options have no effect
+        // and a warning is given upon their use." Warn rather than error,
+        // since a script combining -o with a context flag it inherited
+        // from elsewhere shouldn't be treated as a hard failure.
+        eprintln!(
+            "{}",
+            "warning: -A/-B/-C have no effect with -o/--only-matching".yellow()
+        );
+        before_context = 0;
+        after_context = 0;
+    }
     let respect_gitignore = !args.no_ignore;
 
     let config = Arc::new(SearchConfig {
@@ -242,6 +260,7 @@ fn main() {
         after_context,
         respect_gitignore,
         quiet: args.quiet,
+        only_matching: args.only_matching,
     });
 
     let stats = SearchStats::new();
@@ -393,6 +412,17 @@ fn grep_stdin(config: &argrep::SearchConfig, stats: &argrep::SearchStats) {
                 // stdin has no filename — print "<stdin>" once then stop
                 println!("{}", "<stdin>".magenta());
                 break;
+            } else if config.only_matching {
+                // -o: one printed line per match occurrence, containing
+                // only the matched text. Context is a no-op here too —
+                // main.rs already zeroed before_context/after_context (and
+                // warned) if -o was combined with -A/-B/-C, so has_context
+                // is always false whenever this branch runs.
+                for m in config.regex.find_iter(&line) {
+                    print_stdin_line(m.as_str(), line_num, false, config);
+                }
+                last_printed_line = line_num;
+                has_printed_anything = true;
             } else {
                 if has_context {
                     let first_line_to_print = if let Some((b_num, _)) = before_buffer.front() {
@@ -731,5 +761,57 @@ mod tests {
         let args = Args::try_parse_from(["argrep", "foo", ".", "-q", "-l"]).unwrap();
         assert!(args.quiet);
         assert!(args.files_with_matches);
+    }
+
+    // ── -o / --only-matching ─────────────────────────────────────────────────
+
+    #[test]
+    fn only_matching_flag_defaults_to_false() {
+        let args = Args::try_parse_from(["argrep", "foo", "."]).unwrap();
+        assert!(!args.only_matching);
+    }
+
+    #[test]
+    fn only_matching_short_flag_is_parsed() {
+        let args = Args::try_parse_from(["argrep", "foo", ".", "-o"]).unwrap();
+        assert!(args.only_matching);
+    }
+
+    #[test]
+    fn only_matching_long_flag_is_parsed() {
+        let args = Args::try_parse_from(["argrep", "foo", ".", "--only-matching"]).unwrap();
+        assert!(args.only_matching);
+    }
+
+    #[test]
+    fn only_matching_and_invert_together_is_rejected_at_parse_time() {
+        // Unlike -w/-x, -o and -v don't have a coherent combined meaning:
+        // -v selects whole lines that *don't* contain any match, so there's
+        // nothing for -o to extract from them. Rejected outright rather
+        // than silently doing something surprising.
+        let result = Args::try_parse_from(["argrep", "foo", ".", "-o", "-v"]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn only_matching_can_be_combined_with_context_flags_at_parse_time() {
+        // Unlike -o/-v, -o with -A/-B/-C isn't a CLI parse error — main()
+        // warns and zeroes the context out at runtime instead, matching
+        // GNU grep's own documented behavior ("these options have no
+        // effect and a warning is given"). The zeroing itself happens in
+        // main()'s body, not at the Args level, so this test only confirms
+        // parsing succeeds; it isn't a substitute for a run-time check.
+        let args = Args::try_parse_from(["argrep", "foo", ".", "-o", "-C", "2"]).unwrap();
+        assert!(args.only_matching);
+        assert_eq!(args.context, Some(2));
+    }
+
+    #[test]
+    fn only_matching_can_be_combined_with_count_and_files_flags() {
+        // -c/-l both take priority over -o at runtime (same as real grep),
+        // but the combination is legal, not rejected.
+        let args = Args::try_parse_from(["argrep", "foo", ".", "-o", "-c"]).unwrap();
+        assert!(args.only_matching);
+        assert!(args.count_per_file);
     }
 }

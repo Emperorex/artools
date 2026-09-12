@@ -53,6 +53,7 @@ fn default_config(query: &str, ignore_case: bool) -> std::sync::Arc<argrep::Sear
         after_context: 0,
         respect_gitignore: true,
         quiet: false,
+        only_matching: false,
     })
 }
 
@@ -489,6 +490,7 @@ fn custom_ignore_dir_is_excluded() {
         after_context: 0,
         respect_gitignore: true,
         quiet: false,
+        only_matching: false,
     });
     let stats = SearchStats::new();
     let results: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
@@ -543,6 +545,7 @@ fn stats_counts_are_accurate() {
         after_context: 0,
         respect_gitignore: true,
         quiet: false,
+        only_matching: false,
     });
     let stats = SearchStats::new();
     let stats_clone = stats.clone();
@@ -591,6 +594,7 @@ fn multiple_workers_find_same_matches_as_single_worker() {
             after_context: 0,
             respect_gitignore: true,
             quiet: false,
+            only_matching: false,
         });
         let results: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
         let r = Arc::clone(&results);
@@ -667,6 +671,7 @@ fn invert_returns_non_matching_lines() {
         after_context: 0,
         respect_gitignore: true,
         quiet: false,
+        only_matching: false,
     });
     let results: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
     let r = Arc::clone(&results);
@@ -708,6 +713,7 @@ fn invert_with_no_matches_returns_all_lines() {
         after_context: 0,
         respect_gitignore: true,
         quiet: false,
+        only_matching: false,
     });
     let results: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
     let r = Arc::clone(&results);
@@ -755,6 +761,7 @@ fn files_with_matches_returns_only_filenames() {
         after_context: 0,
         respect_gitignore: true,
         quiet: false,
+        only_matching: false,
     });
     let results: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
     let r = Arc::clone(&results);
@@ -801,6 +808,7 @@ fn files_with_matches_emits_each_file_once() {
         after_context: 0,
         respect_gitignore: true,
         quiet: false,
+        only_matching: false,
     });
     let results: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
     let r = Arc::clone(&results);
@@ -854,6 +862,7 @@ fn count_per_file_returns_correct_counts() {
         after_context: 0,
         respect_gitignore: true,
         quiet: false,
+        only_matching: false,
     });
     let results: Arc<Mutex<Vec<(String, usize)>>> = Arc::new(Mutex::new(Vec::new()));
     let r = Arc::clone(&results);
@@ -909,6 +918,7 @@ fn count_per_file_emits_result_for_every_file() {
         after_context: 0,
         respect_gitignore: true,
         quiet: false,
+        only_matching: false,
     });
     let results: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
     let r = Arc::clone(&results);
@@ -966,6 +976,7 @@ fn invert_with_count_counts_non_matching_lines() {
         after_context: 0,
         respect_gitignore: true,
         quiet: false,
+        only_matching: false,
     });
     let results: Arc<Mutex<Vec<(String, usize)>>> = Arc::new(Mutex::new(Vec::new()));
     let r = Arc::clone(&results);
@@ -1025,6 +1036,7 @@ fn invert_with_files_with_matches_returns_files_with_a_non_matching_line() {
         after_context: 0,
         respect_gitignore: true,
         quiet: false,
+        only_matching: false,
     });
     let results: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
     let r = Arc::clone(&results);
@@ -1082,6 +1094,7 @@ fn invert_with_context_builds_context_around_inverted_matches() {
         after_context: 1,
         respect_gitignore: true,
         quiet: false,
+        only_matching: false,
     });
     let results: Arc<Mutex<Vec<(String, bool)>>> = Arc::new(Mutex::new(Vec::new()));
     let r = Arc::clone(&results);
@@ -1146,6 +1159,7 @@ fn include_pattern_searches_only_matching_files() {
         after_context: 0,
         respect_gitignore: true,
         quiet: false,
+        only_matching: false,
     });
     let results: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
     let r = Arc::clone(&results);
@@ -1189,6 +1203,7 @@ fn include_pattern_no_files_match_returns_empty() {
         after_context: 0,
         respect_gitignore: true,
         quiet: false,
+        only_matching: false,
     });
     let results: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
     let r = Arc::clone(&results);
@@ -1228,6 +1243,7 @@ fn include_wildcard_matches_all_files() {
         after_context: 0,
         respect_gitignore: true,
         quiet: false,
+        only_matching: false,
     });
     let config_wild = StdArc::new(SearchConfig {
         regex: build_matcher(
@@ -1252,6 +1268,7 @@ fn include_wildcard_matches_all_files() {
         after_context: 0,
         respect_gitignore: true,
         quiet: false,
+        only_matching: false,
     });
 
     let run = |config: std::sync::Arc<argrep::SearchConfig>| {
@@ -1308,6 +1325,7 @@ fn before_context_includes_leading_lines() {
         after_context: 0,
         respect_gitignore: true,
         quiet: false,
+        only_matching: false,
     });
 
     let results: Arc<Mutex<Vec<(usize, String, bool)>>> = Arc::new(Mutex::new(Vec::new()));
@@ -1361,6 +1379,7 @@ fn after_context_includes_trailing_lines() {
         after_context: 2,
         respect_gitignore: true,
         quiet: false,
+        only_matching: false,
     });
 
     let results: Arc<Mutex<Vec<(usize, String, bool)>>> = Arc::new(Mutex::new(Vec::new()));
@@ -1417,6 +1436,7 @@ fn context_both_and_group_separator() {
         after_context: 1,
         respect_gitignore: true,
         quiet: false,
+        only_matching: false,
     });
 
     let results: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
@@ -1479,6 +1499,7 @@ fn query_is_a_regex_by_default() {
         after_context: 0,
         respect_gitignore: true,
         quiet: false,
+        only_matching: false,
     });
 
     let matches: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
@@ -1525,6 +1546,7 @@ fn fixed_strings_mode_matches_literally() {
         after_context: 0,
         respect_gitignore: true,
         quiet: false,
+        only_matching: false,
     });
 
     let matches: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
@@ -1583,6 +1605,7 @@ fn whole_word_matches_only_word_boundaries() {
         after_context: 0,
         respect_gitignore: true,
         quiet: false,
+        only_matching: false,
     });
 
     let matches: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
@@ -1631,6 +1654,7 @@ fn whole_line_matches_only_exact_line() {
         after_context: 0,
         respect_gitignore: true,
         quiet: false,
+        only_matching: false,
     });
 
     let matches: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
@@ -1674,6 +1698,7 @@ fn quiet_mode_produces_no_output() {
         after_context: 0,
         respect_gitignore: true,
         quiet: true,
+        only_matching: false,
     });
 
     let call_count = Arc::new(AtomicUsize::new(0));
@@ -1716,6 +1741,7 @@ fn quiet_mode_with_no_matches_reports_zero() {
         after_context: 0,
         respect_gitignore: true,
         quiet: true,
+        only_matching: false,
     });
 
     let call_count = Arc::new(AtomicUsize::new(0));
@@ -1727,4 +1753,84 @@ fn quiet_mode_with_no_matches_reports_zero() {
 
     assert_eq!(call_count.load(Ordering::Relaxed), 0);
     assert_eq!(stats.matched_lines.load(Ordering::Relaxed), 0);
+}
+
+/// -o should print one output row per match occurrence, containing only
+/// the matched text — mirrors the exact example from the feature request:
+/// `echo 'foo bar foo' | argrep -o 'foo'` → "foo\nfoo".
+#[test]
+fn only_matching_emits_one_row_per_occurrence() {
+    let (_dir, root) = make_tree(&[("a.txt", "foo bar foo\nno match here\n")]);
+
+    let config = StdArc::new(SearchConfig {
+        regex: build_matcher("foo", MatchOptions::default()).unwrap(),
+        query: "foo".to_string(),
+        ignore_case: false,
+        line_number: false,
+        ignore_dirs: DEFAULT_IGNORES.iter().map(|s| s.to_string()).collect(),
+        debug: false,
+        invert: false,
+        files_with_matches: false,
+        count_per_file: false,
+        include_pattern: None,
+        before_context: 0,
+        after_context: 0,
+        respect_gitignore: true,
+        quiet: false,
+        only_matching: true,
+    });
+
+    let matches: Arc<Mutex<Vec<(usize, String)>>> = Arc::new(Mutex::new(Vec::new()));
+    let m = Arc::clone(&matches);
+    parallel_grep(root, 2, config, SearchStats::new(), move |item| {
+        m.lock()
+            .unwrap()
+            .push((item.line_num, item.line_content.clone()));
+    });
+
+    let res = matches.lock().unwrap().clone();
+    // Two separate rows for the two "foo" occurrences on line 1, both
+    // tagged with line_num 1 (matches real grep -o -n behavior: the same
+    // line number repeats once per occurrence on that line), and nothing
+    // at all for the line that didn't match.
+    assert_eq!(res, vec![(1, "foo".to_string()), (1, "foo".to_string())]);
+}
+
+/// -c takes priority over -o (same as real grep: -c counts matching
+/// *lines*, not occurrences, even with -o) — this is already implied by
+/// the code structure (the count_per_file branch is checked before -o
+/// gets a chance to run), but worth asserting explicitly since it's easy
+/// to regress if the branch order ever gets shuffled.
+#[test]
+fn count_per_file_takes_priority_over_only_matching() {
+    let (_dir, root) = make_tree(&[("a.txt", "foo bar foo\n")]);
+
+    let config = StdArc::new(SearchConfig {
+        regex: build_matcher("foo", MatchOptions::default()).unwrap(),
+        query: "foo".to_string(),
+        ignore_case: false,
+        line_number: false,
+        ignore_dirs: DEFAULT_IGNORES.iter().map(|s| s.to_string()).collect(),
+        debug: false,
+        invert: false,
+        files_with_matches: false,
+        count_per_file: true,
+        include_pattern: None,
+        before_context: 0,
+        after_context: 0,
+        respect_gitignore: true,
+        quiet: false,
+        only_matching: true,
+    });
+
+    let matches: Arc<Mutex<Vec<Option<usize>>>> = Arc::new(Mutex::new(Vec::new()));
+    let m = Arc::clone(&matches);
+    parallel_grep(root, 2, config, SearchStats::new(), move |item| {
+        m.lock().unwrap().push(item.count);
+    });
+
+    let res = matches.lock().unwrap().clone();
+    // One summary row with count == 1 (one matching *line*), not two rows
+    // for the two "foo" occurrences that -o alone would have produced.
+    assert_eq!(res, vec![Some(1)]);
 }

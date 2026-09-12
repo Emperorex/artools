@@ -62,6 +62,12 @@ pub struct SearchConfig {
     /// as soon as one match is found (see grep_file/scan_and_grep/the
     /// worker loop in parallel_grep for the early-exit checkpoints).
     pub quiet: bool,
+    /// -o: print only the matched text, one occurrence per output line,
+    /// instead of the whole matching line. Mutually exclusive with -v at
+    /// the CLI level, and forces before_context/after_context to 0 (with
+    /// a warning) if either was requested — same as GNU grep's own
+    /// documented behavior for -o combined with -v or context.
+    pub only_matching: bool,
 }
 
 /// Shared statistics counters
@@ -555,54 +561,77 @@ pub fn grep_file(
                 });
                 break;
             } else if !config.count_per_file {
-                if has_context {
-                    let first_line_to_print = if let Some((b_num, _)) = before_buffer.front() {
-                        std::cmp::min(*b_num, line_num)
-                    } else {
-                        line_num
-                    };
-
-                    if has_printed_anything && first_line_to_print > last_printed_line + 1 {
+                if config.only_matching {
+                    // -o: one output row per match occurrence on this
+                    // line, containing only the matched text rather than
+                    // the whole line. No context bookkeeping here — by
+                    // the time SearchConfig is built, main.rs has already
+                    // zeroed before_context/after_context and warned if
+                    // -o was combined with -A/-B/-C, matching GNU grep's
+                    // own documented behavior for that combination
+                    // ("these options have no effect").
+                    for m in config.regex.find_iter(line) {
                         let _ = output_tx.send(MatchResult {
                             file_path: file_path.to_path_buf(),
-                            line_num: 0,
-                            line_content: String::new(),
+                            line_num,
+                            line_content: m.as_str().to_string(),
                             count: None,
                             is_context: false,
-                            is_separator: true,
+                            is_separator: false,
                         });
                     }
+                    last_printed_line = line_num;
+                    has_printed_anything = true;
+                } else {
+                    if has_context {
+                        let first_line_to_print = if let Some((b_num, _)) = before_buffer.front() {
+                            std::cmp::min(*b_num, line_num)
+                        } else {
+                            line_num
+                        };
 
-                    while let Some((b_num, b_content)) = before_buffer.pop_front() {
-                        if b_num > last_printed_line {
+                        if has_printed_anything && first_line_to_print > last_printed_line + 1 {
                             let _ = output_tx.send(MatchResult {
                                 file_path: file_path.to_path_buf(),
-                                line_num: b_num,
-                                line_content: b_content,
+                                line_num: 0,
+                                line_content: String::new(),
                                 count: None,
-                                is_context: true,
-                                is_separator: false,
+                                is_context: false,
+                                is_separator: true,
                             });
-                            last_printed_line = b_num;
+                        }
+
+                        while let Some((b_num, b_content)) = before_buffer.pop_front() {
+                            if b_num > last_printed_line {
+                                let _ = output_tx.send(MatchResult {
+                                    file_path: file_path.to_path_buf(),
+                                    line_num: b_num,
+                                    line_content: b_content,
+                                    count: None,
+                                    is_context: true,
+                                    is_separator: false,
+                                });
+                                last_printed_line = b_num;
+                            }
                         }
                     }
-                }
 
-                // Normal mode: emit matching line
-                let _ = output_tx.send(MatchResult {
-                    file_path: file_path.to_path_buf(),
-                    line_num,
-                    line_content: line.to_string(),
-                    count: None,
-                    is_context: false,
-                    is_separator: false,
-                });
-                last_printed_line = line_num;
-                has_printed_anything = true;
-                after_remaining = after_ctx;
+                    // Normal mode: emit matching line
+                    let _ = output_tx.send(MatchResult {
+                        file_path: file_path.to_path_buf(),
+                        line_num,
+                        line_content: line.to_string(),
+                        count: None,
+                        is_context: false,
+                        is_separator: false,
+                    });
+                    last_printed_line = line_num;
+                    has_printed_anything = true;
+                    after_remaining = after_ctx;
 
-                if before_ctx > 0 {
-                    before_buffer.push_back((line_num, line.to_string()));
+                    if before_ctx > 0 {
+                        before_buffer.push_back((line_num, line.to_string()));
+                    }
                 }
             }
             // -c mode: accumulate count, emit at end

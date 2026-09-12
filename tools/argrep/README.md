@@ -42,6 +42,22 @@ if argrep -q 'TODO' src/; then
 fi
 ```
 
+Use `-o`/`--only-matching` to print only the matched text instead of the whole line — same as `grep -o`. Each occurrence gets its own output line, so a line with multiple matches prints multiple lines:
+
+```bash
+echo 'foo bar foo' | argrep -o 'foo'
+# foo
+# foo
+```
+
+How `-o` interacts with other flags:
+
+- **`-n`**: still works — the same line number is repeated once per occurrence on that line.
+- **`-c`**: unaffected — `-c` counts matching *lines*, not individual occurrences, same as real grep.
+- **`-l`**: unaffected — `-l` stops at the filename, before `-o` would ever apply.
+- **`-v`**: rejected as a CLI error (`-o` and `-v` can't be combined) — `-v` selects whole lines that *don't* contain a match, so there'd be nothing for `-o` to extract.
+- **`-A`/`-B`/`-C`**: have no effect and print a warning, same as GNU grep — context doesn't make sense when only the matched fragment (not the surrounding line) is being printed.
+
 `PATH` defaults to `.` (current directory) if not specified.
 
 `argrep` also reads from **stdin** when used in a pipeline — no path argument needed.
@@ -58,7 +74,8 @@ fi
 | `--before-context NUM` | `-B`  | —       | Show NUM lines of leading context before matches (max 100,000)         |
 | `--after-context NUM`  | `-A`  | —       | Show NUM lines of trailing context after matches (max 100,000)         |
 | `--context NUM`        | `-C`  | —       | Show NUM lines of leading and trailing context around matches (max 100,000) |
-| `--invert`             | `-v`  | —       | Print lines that do NOT match the query                                |
+| `--invert`             | `-v`  | —       | Print lines that do NOT match the query (conflicts with `-o`)          |
+| `--only-matching`      | `-o`  | —       | Print only the matched text, one occurrence per line (conflicts with `-v`; no effect with `-A`/`-B`/`-C`, warns) |
 | `--files-with-matches` | `-l`  | —       | Print only filenames of files containing a match (conflicts with `-c`) |
 | `--count`              | `-c`  | —       | Print count of matching lines per file (conflicts with `-l`)           |
 | `--include PATTERN`    | —     | —       | Only search files matching this glob (e.g. `"*.rs"`, `"*.log"`)        |
@@ -167,6 +184,7 @@ argrep "deprecated" /large/project -j 8 --include "*.py" -n
 | Whole word        | `grep -rw "query" .`                 | `argrep "query" . -w`               |
 | Whole line        | `grep -rx "query" .`                 | `argrep "query" . -x`               |
 | Quiet (exit code only) | `grep -rq "query" .`            | `argrep "query" . -q`               |
+| Only matched text | `grep -rho "query" .`                | `argrep "query" . -o`               |
 | Show line numbers | `grep -rn "query" .`                 | `argrep "query" . -n`               |
 | Context lines     | `grep -C 2 "query" .`                | `argrep "query" . -C 2`             |
 | Files only        | `grep -rl "query" .`                 | `argrep "query" . -l`               |

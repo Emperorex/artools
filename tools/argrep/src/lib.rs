@@ -58,6 +58,10 @@ pub struct SearchConfig {
     pub after_context: usize,
     /// Do not respect .gitignore / .ignore files (search everything)
     pub respect_gitignore: bool,
+    /// -q: suppress all output; only the exit code matters. Search stops
+    /// as soon as one match is found (see grep_file/scan_and_grep/the
+    /// worker loop in parallel_grep for the early-exit checkpoints).
+    pub quiet: bool,
 }
 
 /// Shared statistics counters
@@ -224,7 +228,9 @@ pub fn parallel_grep(
                     }
                 };
 
-                scan_and_grep(task, &config, &task_tx, &output_tx, &active_tasks, &stats);
+                if !(config.quiet && stats.matched_lines.load(Ordering::Relaxed) > 0) {
+                    scan_and_grep(task, &config, &task_tx, &output_tx, &active_tasks, &stats);
+                }
                 active_tasks.fetch_sub(1, Ordering::SeqCst);
             }
         });
@@ -360,6 +366,13 @@ pub fn scan_and_grep(
     };
 
     for entry in entries {
+        if config.quiet && stats.matched_lines.load(Ordering::Relaxed) > 0 {
+            // Don't enqueue more subdirectories or scan more files in this
+            // directory once -q already has its answer — the rest of this
+            // listing would just be wasted I/O.
+            return;
+        }
+
         let file_type = match entry.file_type() {
             Ok(ft) => ft,
             Err(_) => continue,
@@ -471,6 +484,14 @@ pub fn grep_file(
     let mut has_printed_anything = false;
 
     loop {
+        if config.quiet && stats.matched_lines.load(Ordering::Relaxed) > 0 {
+            // Another file (possibly scanned by a different worker thread)
+            // already produced a match, so there's no point reading any
+            // further into this one — -q only cares that at least one
+            // match exists anywhere.
+            break;
+        }
+
         line_bytes.clear();
         match reader.read_until(b'\n', &mut line_bytes) {
             Ok(0) => break, // EOF
@@ -512,6 +533,15 @@ pub fn grep_file(
         if should_emit {
             match_count += 1;
             stats.matched_lines.fetch_add(1, Ordering::Relaxed);
+
+            if config.quiet {
+                // -q: exit status only. No output, ever — this takes
+                // priority over -l/-c/etc. if they're also set, same as
+                // real grep. Stop reading this file immediately; the
+                // surrounding scan_and_grep/worker loop are responsible
+                // for winding down the rest of the search.
+                break;
+            }
 
             if config.files_with_matches {
                 // -l: emit the file once and stop reading further

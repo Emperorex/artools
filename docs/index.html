@@ -562,6 +562,8 @@
       <div class="tool-flags">
         <span class="flag">-i case</span>
         <span class="flag">-F literal</span>
+        <span class="flag">-w word</span>
+        <span class="flag">-x line</span>
         <span class="flag">-n lines</span>
         <span class="flag">-v invert</span>
         <span class="flag">-l files</span>
@@ -629,6 +631,9 @@
         <br>
         <br><span class="uc-comment"># Literal search (skip regex interpretation)</span>
         <br><span class="uc-cmd">argrep</span> <span class="uc-flag">-F</span> <span class="uc-arg">"connection refused"</span> <span class="uc-arg">/var/log</span>
+        <br>
+        <br><span class="uc-comment"># Whole-word match ("cat", not "category")</span>
+        <br><span class="uc-cmd">argrep</span> <span class="uc-flag">-w</span> <span class="uc-arg">"cat"</span> <span class="uc-arg">.</span>
       </div>
     </div>
 

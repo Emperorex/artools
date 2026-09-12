@@ -27,6 +27,13 @@ argrep -F 'foo.bar' .          # matches the literal text "foo.bar"
 argrep -F 'connection refused' /var/log
 ```
 
+Use `-w`/`--word-regexp` to only match whole words (the pattern is wrapped in `\b(?:...)\b`), and `-x`/`--line-regexp` to only match whole lines (wrapped in `^(?:...)$`) — same semantics as `grep -w`/`grep -x`:
+
+```bash
+argrep -w cat .                # matches "cat" and "the cat sat", not "category"
+argrep -x ERROR .              # matches a line that is exactly "ERROR", not "ERROR: disk full"
+```
+
 `PATH` defaults to `.` (current directory) if not specified.
 
 `argrep` also reads from **stdin** when used in a pipeline — no path argument needed.
@@ -37,6 +44,8 @@ argrep -F 'connection refused' /var/log
 |------------------------|-------|---------|------------------------------------------------------------------------|
 | `--ignore-case`        | `-i`  | —       | Case-insensitive matching                                              |
 | `--fixed-strings`      | `-F`  | —       | Treat QUERY as a literal string instead of a regex                     |
+| `--word-regexp`        | `-w`  | —       | Match only whole words (wraps QUERY in `\b(?:...)\b`)                  |
+| `--line-regexp`        | `-x`  | —       | Match only whole lines (wraps QUERY in `^(?:...)$`)                    |
 | `--line-number`        | `-n`  | —       | Show line numbers in output                                            |
 | `--before-context NUM` | `-B`  | —       | Show NUM lines of leading context before matches (max 100,000)         |
 | `--after-context NUM`  | `-A`  | —       | Show NUM lines of trailing context after matches (max 100,000)         |
@@ -146,6 +155,8 @@ argrep "deprecated" /large/project -j 8 --include "*.py" -n
 | Recursive search  | `grep -r "query" .`                  | `argrep "query" .`                  |
 | Case-insensitive  | `grep -ri "query" .`                 | `argrep "query" . -i`               |
 | Fixed string      | `grep -rF "query" .`                 | `argrep "query" . -F`               |
+| Whole word        | `grep -rw "query" .`                 | `argrep "query" . -w`               |
+| Whole line        | `grep -rx "query" .`                 | `argrep "query" . -x`               |
 | Show line numbers | `grep -rn "query" .`                 | `argrep "query" . -n`               |
 | Context lines     | `grep -C 2 "query" .`                | `argrep "query" . -C 2`             |
 | Files only        | `grep -rl "query" .`                 | `argrep "query" . -l`               |

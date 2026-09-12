@@ -1,4 +1,6 @@
-use argrep::{DEFAULT_IGNORES, SearchConfig, SearchStats, build_matcher, parallel_grep};
+use argrep::{
+    DEFAULT_IGNORES, MatchOptions, SearchConfig, SearchStats, build_matcher, parallel_grep,
+};
 use clap::Parser;
 use clap::builder::TypedValueParser as _;
 use colored::Colorize;
@@ -92,6 +94,14 @@ struct Args {
     #[arg(short = 'F', long = "fixed-strings")]
     fixed_strings: bool,
 
+    /// Match only whole words, like grep -w (wraps the pattern in \b...\b)
+    #[arg(short = 'w', long = "word-regexp")]
+    whole_word: bool,
+
+    /// Match only whole lines, like grep -x (wraps the pattern in ^...$)
+    #[arg(short = 'x', long = "line-regexp")]
+    whole_line: bool,
+
     /// Display line numbers in the output results
     #[arg(short = 'n', long)]
     line_number: bool,
@@ -168,7 +178,15 @@ fn build_ignore_dirs(no_ignore: bool, extra: Vec<String>) -> HashSet<String> {
 fn main() {
     let args = Args::parse();
 
-    let regex = match build_matcher(&args.query, args.fixed_strings, args.ignore_case) {
+    let regex = match build_matcher(
+        &args.query,
+        MatchOptions {
+            fixed_strings: args.fixed_strings,
+            ignore_case: args.ignore_case,
+            whole_word: args.whole_word,
+            whole_line: args.whole_line,
+        },
+    ) {
         Ok(re) => re,
         Err(e) => {
             eprintln!("{}", format!("error: {}", e).red());
@@ -612,5 +630,36 @@ mod tests {
     fn fixed_strings_long_flag_is_parsed() {
         let args = Args::try_parse_from(["argrep", "foo.bar", ".", "--fixed-strings"]).unwrap();
         assert!(args.fixed_strings);
+    }
+
+    // ── -w / --word-regexp and -x / --line-regexp ───────────────────────────
+
+    #[test]
+    fn whole_word_and_whole_line_default_to_false() {
+        let args = Args::try_parse_from(["argrep", "foo", "."]).unwrap();
+        assert!(!args.whole_word);
+        assert!(!args.whole_line);
+    }
+
+    #[test]
+    fn whole_word_flag_is_parsed() {
+        let args = Args::try_parse_from(["argrep", "foo", ".", "-w"]).unwrap();
+        assert!(args.whole_word);
+    }
+
+    #[test]
+    fn whole_line_flag_is_parsed() {
+        let args = Args::try_parse_from(["argrep", "foo", ".", "-x"]).unwrap();
+        assert!(args.whole_line);
+    }
+
+    #[test]
+    fn whole_word_and_whole_line_can_be_combined() {
+        // Unlike -c/-l, -w and -x aren't mutually exclusive: "-wx" means
+        // "the whole line must consist of exactly this word", which is a
+        // meaningful (if narrow) constraint, not a contradiction.
+        let args = Args::try_parse_from(["argrep", "foo", ".", "-w", "-x"]).unwrap();
+        assert!(args.whole_word);
+        assert!(args.whole_line);
     }
 }

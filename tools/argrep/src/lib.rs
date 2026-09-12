@@ -105,6 +105,32 @@ pub struct MatchResult {
     pub is_separator: bool,
 }
 
+/// Options controlling how `build_matcher` compiles the CLI query into a
+/// matcher.
+///
+/// Grouped into a named-field struct rather than a growing list of bool
+/// parameters, since positional bools stop being readable past two or
+/// three (`build_matcher(q, true, false, true, false)` — which is which?),
+/// and this is very likely to grow further (case folding modes, PCRE-style
+/// extensions, etc.). This is *not* the full `SearchMatcher` /
+/// `RegexMatcher` trait hierarchy discussed in review — that's more
+/// machinery than four flags on one regex-backed matcher currently
+/// justifies. Revisit if a genuinely different matcher backend (e.g. a
+/// non-regex fast path) shows up.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct MatchOptions {
+    /// -F: escape regex metacharacters before compiling, so `query` is
+    /// matched literally.
+    pub fixed_strings: bool,
+    /// -i: case-insensitive matching.
+    pub ignore_case: bool,
+    /// -w: require the match to be a whole word (not a substring of a
+    /// larger word).
+    pub whole_word: bool,
+    /// -x: require the match to span the entire line.
+    pub whole_line: bool,
+}
+
 /// Builds the compiled matcher used for every line, from the raw CLI
 /// pattern and flags.
 ///
@@ -116,18 +142,38 @@ pub struct MatchResult {
 /// - `ignore_case` (-i): passed to the regex engine's own case-insensitive
 ///   mode rather than lowercasing each line at match time, which is both
 ///   simpler and avoids a per-line allocation.
+/// - `whole_word` (-w): wraps the pattern in `\b(?:...)\b`, the same
+///   approach ripgrep uses. Applied *after* -F escaping, so a literal
+///   query is word-wrapped as a whole rather than its escaped form being
+///   reinterpreted.
+/// - `whole_line` (-x): wraps the (possibly already word-wrapped) pattern
+///   in `^(?:...)$`. Note this only does what you'd expect because
+///   `grep_file`'s read loop strips the trailing line terminator before
+///   matching — the regex crate's `$` (without multi-line mode) means
+///   true end-of-haystack, not "before a trailing \n" like Perl/Python,
+///   so matching against an un-stripped line would silently make -x
+///   never match in the file-search path while still working over stdin
+///   (where `BufRead::lines()` already strips it). If that stripping is
+///   ever removed, -x needs to be revisited alongside it.
 ///
 /// Returns a human-readable error (not a panic) on invalid regex syntax,
 /// so callers can report it as a normal CLI usage error.
-pub fn build_matcher(query: &str, fixed_strings: bool, ignore_case: bool) -> Result<Regex, String> {
-    let pattern = if fixed_strings {
+pub fn build_matcher(query: &str, opts: MatchOptions) -> Result<Regex, String> {
+    let mut pattern = if opts.fixed_strings {
         regex::escape(query)
     } else {
         query.to_string()
     };
 
+    if opts.whole_word {
+        pattern = format!(r"\b(?:{})\b", pattern);
+    }
+    if opts.whole_line {
+        pattern = format!(r"^(?:{})$", pattern);
+    }
+
     RegexBuilder::new(&pattern)
-        .case_insensitive(ignore_case)
+        .case_insensitive(opts.ignore_case)
         .build()
         .map_err(|err| format!("Invalid pattern '{}': {}", query, err))
 }
@@ -439,9 +485,22 @@ pub fn grep_file(
         }
         line_num += 1;
 
-        let line = String::from_utf8_lossy(&line_bytes);
+        let raw_line = String::from_utf8_lossy(&line_bytes);
+        // Strip the trailing line terminator (read_until keeps it, unlike
+        // stdin's `BufRead::lines()`, which already strips it). This matters
+        // beyond cosmetics: the regex crate's `$` anchor (without multi-line
+        // mode) means true end-of-haystack, not "before a trailing \n" like
+        // Perl/Python — so leaving the terminator in would silently break
+        // -x (^...$ whole-line matching) here while working fine on the
+        // stdin path, a classic case of "looks the same, matches
+        // differently" that's easy to miss without directly comparing the
+        // two code paths.
+        let line = raw_line
+            .strip_suffix('\n')
+            .map(|s| s.strip_suffix('\r').unwrap_or(s))
+            .unwrap_or(&raw_line);
 
-        let line_matches = config.regex.is_match(&line);
+        let line_matches = config.regex.is_match(line);
 
         // Apply -v inversion
         let should_emit = if config.invert {

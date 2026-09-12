@@ -1,4 +1,7 @@
-use argrep::{DEFAULT_IGNORES, SearchConfig, SearchStats, build_matcher, grep_file, parallel_grep};
+use argrep::{
+    DEFAULT_IGNORES, MatchOptions, SearchConfig, SearchStats, build_matcher, grep_file,
+    parallel_grep,
+};
 use glob::Pattern;
 use std::sync::Arc as StdArc;
 use std::{
@@ -28,7 +31,15 @@ fn make_tree(files: &[(&str, &str)]) -> (TempDir, PathBuf) {
 fn default_config(query: &str, ignore_case: bool) -> std::sync::Arc<argrep::SearchConfig> {
     let ignore_dirs: HashSet<String> = DEFAULT_IGNORES.iter().map(|s| s.to_string()).collect();
     StdArc::new(SearchConfig {
-        regex: build_matcher(query, false, ignore_case).unwrap(),
+        regex: build_matcher(
+            query,
+            MatchOptions {
+                fixed_strings: false,
+                ignore_case,
+                ..Default::default()
+            },
+        )
+        .unwrap(),
         query: query.to_string(),
         ignore_case,
         line_number: false,
@@ -455,7 +466,15 @@ fn custom_ignore_dir_is_excluded() {
     let mut ignore_dirs: HashSet<String> = DEFAULT_IGNORES.iter().map(|s| s.to_string()).collect();
     ignore_dirs.insert("vendor".to_string());
     let config = StdArc::new(SearchConfig {
-        regex: build_matcher("needle", false, false).unwrap(),
+        regex: build_matcher(
+            "needle",
+            MatchOptions {
+                fixed_strings: false,
+                ignore_case: false,
+                ..Default::default()
+            },
+        )
+        .unwrap(),
         query: "needle".to_string(),
         ignore_case: false,
         line_number: false,
@@ -500,7 +519,15 @@ fn stats_counts_are_accurate() {
 
     let ignore_dirs: HashSet<String> = DEFAULT_IGNORES.iter().map(|s| s.to_string()).collect();
     let config = StdArc::new(SearchConfig {
-        regex: build_matcher("TARGET", false, false).unwrap(),
+        regex: build_matcher(
+            "TARGET",
+            MatchOptions {
+                fixed_strings: false,
+                ignore_case: false,
+                ..Default::default()
+            },
+        )
+        .unwrap(),
         query: "TARGET".to_string(),
         ignore_case: false,
         line_number: false,
@@ -539,7 +566,15 @@ fn multiple_workers_find_same_matches_as_single_worker() {
     let run = |workers: usize| {
         let ignore_dirs: HashSet<String> = DEFAULT_IGNORES.iter().map(|s| s.to_string()).collect();
         let config = StdArc::new(SearchConfig {
-            regex: build_matcher("needle", false, false).unwrap(),
+            regex: build_matcher(
+                "needle",
+                MatchOptions {
+                    fixed_strings: false,
+                    ignore_case: false,
+                    ..Default::default()
+                },
+            )
+            .unwrap(),
             query: "needle".to_string(),
             ignore_case: false,
             line_number: false,
@@ -606,7 +641,15 @@ fn invert_returns_non_matching_lines() {
 
     let ignore_dirs: HashSet<String> = DEFAULT_IGNORES.iter().map(|s| s.to_string()).collect();
     let config = StdArc::new(SearchConfig {
-        regex: build_matcher("match", false, false).unwrap(),
+        regex: build_matcher(
+            "match",
+            MatchOptions {
+                fixed_strings: false,
+                ignore_case: false,
+                ..Default::default()
+            },
+        )
+        .unwrap(),
         query: "match".to_string(),
         ignore_case: false,
         line_number: false,
@@ -638,7 +681,15 @@ fn invert_with_no_matches_returns_all_lines() {
 
     let ignore_dirs: HashSet<String> = DEFAULT_IGNORES.iter().map(|s| s.to_string()).collect();
     let config = StdArc::new(SearchConfig {
-        regex: build_matcher("zzznomatch", false, false).unwrap(),
+        regex: build_matcher(
+            "zzznomatch",
+            MatchOptions {
+                fixed_strings: false,
+                ignore_case: false,
+                ..Default::default()
+            },
+        )
+        .unwrap(),
         query: "zzznomatch".to_string(),
         ignore_case: false,
         line_number: false,
@@ -676,7 +727,15 @@ fn files_with_matches_returns_only_filenames() {
 
     let ignore_dirs: HashSet<String> = DEFAULT_IGNORES.iter().map(|s| s.to_string()).collect();
     let config = StdArc::new(SearchConfig {
-        regex: build_matcher("needle", false, false).unwrap(),
+        regex: build_matcher(
+            "needle",
+            MatchOptions {
+                fixed_strings: false,
+                ignore_case: false,
+                ..Default::default()
+            },
+        )
+        .unwrap(),
         query: "needle".to_string(),
         ignore_case: false,
         line_number: false,
@@ -713,7 +772,15 @@ fn files_with_matches_emits_each_file_once() {
 
     let ignore_dirs: HashSet<String> = DEFAULT_IGNORES.iter().map(|s| s.to_string()).collect();
     let config = StdArc::new(SearchConfig {
-        regex: build_matcher("needle", false, false).unwrap(),
+        regex: build_matcher(
+            "needle",
+            MatchOptions {
+                fixed_strings: false,
+                ignore_case: false,
+                ..Default::default()
+            },
+        )
+        .unwrap(),
         query: "needle".to_string(),
         ignore_case: false,
         line_number: false,
@@ -757,7 +824,15 @@ fn count_per_file_returns_correct_counts() {
 
     let ignore_dirs: HashSet<String> = DEFAULT_IGNORES.iter().map(|s| s.to_string()).collect();
     let config = StdArc::new(SearchConfig {
-        regex: build_matcher("needle", false, false).unwrap(),
+        regex: build_matcher(
+            "needle",
+            MatchOptions {
+                fixed_strings: false,
+                ignore_case: false,
+                ..Default::default()
+            },
+        )
+        .unwrap(),
         query: "needle".to_string(),
         ignore_case: false,
         line_number: false,
@@ -803,7 +878,15 @@ fn count_per_file_emits_result_for_every_file() {
 
     let ignore_dirs: HashSet<String> = DEFAULT_IGNORES.iter().map(|s| s.to_string()).collect();
     let config = StdArc::new(SearchConfig {
-        regex: build_matcher("needle", false, false).unwrap(),
+        regex: build_matcher(
+            "needle",
+            MatchOptions {
+                fixed_strings: false,
+                ignore_case: false,
+                ..Default::default()
+            },
+        )
+        .unwrap(),
         query: "needle".to_string(),
         ignore_case: false,
         line_number: false,
@@ -851,7 +934,15 @@ fn invert_with_count_counts_non_matching_lines() {
 
     let ignore_dirs: HashSet<String> = DEFAULT_IGNORES.iter().map(|s| s.to_string()).collect();
     let config = StdArc::new(SearchConfig {
-        regex: build_matcher("needle", false, false).unwrap(),
+        regex: build_matcher(
+            "needle",
+            MatchOptions {
+                fixed_strings: false,
+                ignore_case: false,
+                ..Default::default()
+            },
+        )
+        .unwrap(),
         query: "needle".to_string(),
         ignore_case: false,
         line_number: false,
@@ -901,7 +992,15 @@ fn invert_with_files_with_matches_returns_files_with_a_non_matching_line() {
 
     let ignore_dirs: HashSet<String> = DEFAULT_IGNORES.iter().map(|s| s.to_string()).collect();
     let config = StdArc::new(SearchConfig {
-        regex: build_matcher("needle", false, false).unwrap(),
+        regex: build_matcher(
+            "needle",
+            MatchOptions {
+                fixed_strings: false,
+                ignore_case: false,
+                ..Default::default()
+            },
+        )
+        .unwrap(),
         query: "needle".to_string(),
         ignore_case: false,
         line_number: false,
@@ -949,7 +1048,15 @@ fn invert_with_context_builds_context_around_inverted_matches() {
 
     let ignore_dirs: HashSet<String> = DEFAULT_IGNORES.iter().map(|s| s.to_string()).collect();
     let config = StdArc::new(SearchConfig {
-        regex: build_matcher("MATCH", false, false).unwrap(),
+        regex: build_matcher(
+            "MATCH",
+            MatchOptions {
+                fixed_strings: false,
+                ignore_case: false,
+                ..Default::default()
+            },
+        )
+        .unwrap(),
         query: "MATCH".to_string(),
         ignore_case: false,
         line_number: false,
@@ -1004,7 +1111,15 @@ fn include_pattern_searches_only_matching_files() {
 
     let ignore_dirs: HashSet<String> = DEFAULT_IGNORES.iter().map(|s| s.to_string()).collect();
     let config = StdArc::new(SearchConfig {
-        regex: build_matcher("needle", false, false).unwrap(),
+        regex: build_matcher(
+            "needle",
+            MatchOptions {
+                fixed_strings: false,
+                ignore_case: false,
+                ..Default::default()
+            },
+        )
+        .unwrap(),
         query: "needle".to_string(),
         ignore_case: false,
         line_number: false,
@@ -1038,7 +1153,15 @@ fn include_pattern_no_files_match_returns_empty() {
 
     let ignore_dirs: HashSet<String> = DEFAULT_IGNORES.iter().map(|s| s.to_string()).collect();
     let config = StdArc::new(SearchConfig {
-        regex: build_matcher("needle", false, false).unwrap(),
+        regex: build_matcher(
+            "needle",
+            MatchOptions {
+                fixed_strings: false,
+                ignore_case: false,
+                ..Default::default()
+            },
+        )
+        .unwrap(),
         query: "needle".to_string(),
         ignore_case: false,
         line_number: false,
@@ -1068,7 +1191,15 @@ fn include_wildcard_matches_all_files() {
     let ignore_dirs_wild: HashSet<String> = DEFAULT_IGNORES.iter().map(|s| s.to_string()).collect();
 
     let config_all = StdArc::new(SearchConfig {
-        regex: build_matcher("needle", false, false).unwrap(),
+        regex: build_matcher(
+            "needle",
+            MatchOptions {
+                fixed_strings: false,
+                ignore_case: false,
+                ..Default::default()
+            },
+        )
+        .unwrap(),
         query: "needle".to_string(),
         ignore_case: false,
         line_number: false,
@@ -1083,7 +1214,15 @@ fn include_wildcard_matches_all_files() {
         respect_gitignore: true,
     });
     let config_wild = StdArc::new(SearchConfig {
-        regex: build_matcher("needle", false, false).unwrap(),
+        regex: build_matcher(
+            "needle",
+            MatchOptions {
+                fixed_strings: false,
+                ignore_case: false,
+                ..Default::default()
+            },
+        )
+        .unwrap(),
         query: "needle".to_string(),
         ignore_case: false,
         line_number: false,
@@ -1130,7 +1269,15 @@ fn before_context_includes_leading_lines() {
 
     let ignore_dirs: HashSet<String> = DEFAULT_IGNORES.iter().map(|s| s.to_string()).collect();
     let config = StdArc::new(SearchConfig {
-        regex: build_matcher("MATCH", false, false).unwrap(),
+        regex: build_matcher(
+            "MATCH",
+            MatchOptions {
+                fixed_strings: false,
+                ignore_case: false,
+                ..Default::default()
+            },
+        )
+        .unwrap(),
         query: "MATCH".to_string(),
         ignore_case: false,
         line_number: true,
@@ -1174,7 +1321,15 @@ fn after_context_includes_trailing_lines() {
 
     let ignore_dirs: HashSet<String> = DEFAULT_IGNORES.iter().map(|s| s.to_string()).collect();
     let config = StdArc::new(SearchConfig {
-        regex: build_matcher("MATCH", false, false).unwrap(),
+        regex: build_matcher(
+            "MATCH",
+            MatchOptions {
+                fixed_strings: false,
+                ignore_case: false,
+                ..Default::default()
+            },
+        )
+        .unwrap(),
         query: "MATCH".to_string(),
         ignore_case: false,
         line_number: true,
@@ -1221,7 +1376,15 @@ fn context_both_and_group_separator() {
 
     let ignore_dirs: HashSet<String> = DEFAULT_IGNORES.iter().map(|s| s.to_string()).collect();
     let config = StdArc::new(SearchConfig {
-        regex: build_matcher("MATCH", false, false).unwrap(),
+        regex: build_matcher(
+            "MATCH",
+            MatchOptions {
+                fixed_strings: false,
+                ignore_case: false,
+                ..Default::default()
+            },
+        )
+        .unwrap(),
         query: "MATCH".to_string(),
         ignore_case: false,
         line_number: true,
@@ -1274,7 +1437,15 @@ fn query_is_a_regex_by_default() {
     let (_dir, root) = make_tree(&[("a.txt", "foo.bar\nfooXbar\nfooZZbar\n")]);
 
     let config = StdArc::new(SearchConfig {
-        regex: build_matcher("foo.bar", false, false).unwrap(),
+        regex: build_matcher(
+            "foo.bar",
+            MatchOptions {
+                fixed_strings: false,
+                ignore_case: false,
+                ..Default::default()
+            },
+        )
+        .unwrap(),
         query: "foo.bar".to_string(),
         ignore_case: false,
         line_number: false,
@@ -1311,7 +1482,15 @@ fn fixed_strings_mode_matches_literally() {
     let (_dir, root) = make_tree(&[("a.txt", "foo.bar\nfooXbar\nfooZZbar\n")]);
 
     let config = StdArc::new(SearchConfig {
-        regex: build_matcher("foo.bar", true, false).unwrap(),
+        regex: build_matcher(
+            "foo.bar",
+            MatchOptions {
+                fixed_strings: true,
+                ignore_case: false,
+                ..Default::default()
+            },
+        )
+        .unwrap(),
         query: "foo.bar".to_string(),
         ignore_case: false,
         line_number: false,
@@ -1343,6 +1522,103 @@ fn fixed_strings_mode_matches_literally() {
 /// An invalid regex pattern should be reported as an error, not panic.
 #[test]
 fn invalid_regex_returns_error() {
-    let result = build_matcher("foo(bar", false, false);
+    let result = build_matcher(
+        "foo(bar",
+        MatchOptions {
+            fixed_strings: false,
+            ignore_case: false,
+            ..Default::default()
+        },
+    );
     assert!(result.is_err());
+}
+
+/// -w should require the match to be a whole word, not a substring of a
+/// larger word.
+#[test]
+fn whole_word_matches_only_word_boundaries() {
+    let (_dir, root) = make_tree(&[("a.txt", "cat\nthe cat sat\ncategory\nconcatenate\n")]);
+
+    let config = StdArc::new(SearchConfig {
+        regex: build_matcher(
+            "cat",
+            MatchOptions {
+                whole_word: true,
+                ..Default::default()
+            },
+        )
+        .unwrap(),
+        query: "cat".to_string(),
+        ignore_case: false,
+        line_number: false,
+        ignore_dirs: DEFAULT_IGNORES.iter().map(|s| s.to_string()).collect(),
+        debug: false,
+        invert: false,
+        files_with_matches: false,
+        count_per_file: false,
+        include_pattern: None,
+        before_context: 0,
+        after_context: 0,
+        respect_gitignore: true,
+    });
+
+    let matches: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let m = Arc::clone(&matches);
+    parallel_grep(root, 2, config, SearchStats::new(), move |item| {
+        m.lock()
+            .unwrap()
+            .push(item.line_content.trim_end().to_string());
+    });
+
+    let mut res = matches.lock().unwrap().clone();
+    res.sort();
+    // "cat" and "the cat sat" contain "cat" as a whole word; "category" and
+    // "concatenate" only contain it as a substring of a larger word.
+    assert_eq!(res, vec!["cat", "the cat sat"]);
+}
+
+/// -x should require the match to span the entire line — this exercises
+/// the file-search path specifically (via parallel_grep/grep_file), since
+/// that's the code path where the trailing line terminator read by
+/// read_until has to be stripped before matching for `$` to behave as
+/// expected (the stdin path gets this for free from BufRead::lines()).
+#[test]
+fn whole_line_matches_only_exact_line() {
+    let (_dir, root) = make_tree(&[("a.txt", "ERROR\nERROR: disk full\nan ERROR occurred\n")]);
+
+    let config = StdArc::new(SearchConfig {
+        regex: build_matcher(
+            "ERROR",
+            MatchOptions {
+                whole_line: true,
+                ..Default::default()
+            },
+        )
+        .unwrap(),
+        query: "ERROR".to_string(),
+        ignore_case: false,
+        line_number: false,
+        ignore_dirs: DEFAULT_IGNORES.iter().map(|s| s.to_string()).collect(),
+        debug: false,
+        invert: false,
+        files_with_matches: false,
+        count_per_file: false,
+        include_pattern: None,
+        before_context: 0,
+        after_context: 0,
+        respect_gitignore: true,
+    });
+
+    let matches: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let m = Arc::clone(&matches);
+    parallel_grep(root, 2, config, SearchStats::new(), move |item| {
+        m.lock()
+            .unwrap()
+            .push(item.line_content.trim_end().to_string());
+    });
+
+    let res = matches.lock().unwrap().clone();
+    // Only the line that is *exactly* "ERROR" matches; the other two
+    // contain it as a prefix/substring rather than filling the whole line.
+    assert_eq!(res, vec!["ERROR"]);
 }

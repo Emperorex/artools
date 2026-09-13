@@ -43,6 +43,13 @@ pub struct SearchConfig {
     pub ignore_case: bool,
     pub line_number: bool,
     pub ignore_dirs: HashSet<String>,
+    /// --exclude-dir (alias --ignore) entries that contain glob
+    /// metacharacters (*, ?, [), compiled via glob::Pattern. Plain literal
+    /// names (the common case — "node_modules", "target", etc.) stay in
+    /// the faster `ignore_dirs` HashSet above instead; only entries that
+    /// actually need glob matching (e.g. "build*") end up here. Both are
+    /// checked — a directory is skipped if it matches *either*.
+    pub ignore_dir_patterns: Vec<Pattern>,
     pub debug: bool,
     /// -v: print lines that do NOT match
     pub invert: bool,
@@ -52,6 +59,11 @@ pub struct SearchConfig {
     pub count_per_file: bool,
     /// --include: only search files matching this glob pattern
     pub include_pattern: Option<Pattern>,
+    /// --exclude: skip files matching any of these glob patterns. Checked
+    /// *before* --include, and wins if both match the same file — a
+    /// deliberate simplification of GNU grep's own order-dependent
+    /// "last matching flag wins" precedence (see the README for why).
+    pub exclude_patterns: Vec<Pattern>,
     /// -B: number of leading context lines before a match
     pub before_context: usize,
     /// -A: number of trailing context lines after a match
@@ -413,7 +425,12 @@ pub fn scan_and_grep(
         }
 
         if is_dir {
-            if config.ignore_dirs.contains(file_name.as_ref()) {
+            if config.ignore_dirs.contains(file_name.as_ref())
+                || config
+                    .ignore_dir_patterns
+                    .iter()
+                    .any(|p| p.matches(&file_name))
+            {
                 continue;
             }
             active_tasks.fetch_add(1, Ordering::SeqCst);
@@ -422,6 +439,17 @@ pub fn scan_and_grep(
                 ignore_stack: Arc::clone(&ignore_stack),
             });
         } else {
+            // --exclude: skip files matching any exclude glob. Checked
+            // before --include and wins on overlap — see the field doc on
+            // SearchConfig.exclude_patterns for why.
+            if config
+                .exclude_patterns
+                .iter()
+                .any(|p| p.matches(&file_name))
+            {
+                continue;
+            }
+
             // --include: skip files whose names don't match the pattern
             if let Some(pattern) = &config.include_pattern
                 && !pattern.matches(&file_name)
@@ -657,10 +685,10 @@ pub fn grep_file(
             }
             // -c mode: accumulate count, emit at end
 
-            if let Some(max) = config.max_count
-                && match_count >= max
-            {
-                reached_max_count = true;
+            if let Some(max) = config.max_count {
+                if match_count >= max {
+                    reached_max_count = true;
+                }
             }
         } else if has_context && !config.count_per_file && !config.files_with_matches {
             if after_remaining > 0 {

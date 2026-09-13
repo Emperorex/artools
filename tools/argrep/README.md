@@ -72,6 +72,27 @@ How `-m` interacts with other flags (matching GNU grep's own documented behavior
 - **`-A`/`-B`/`-C`**: any pending trailing context is still printed after the limit is reached, before the file search actually stops.
 - `NUM` must be `>= 1`; `-m 0` is rejected as invalid rather than replicating GNU grep's own corner-case behavior for it.
 
+Use `--exclude PATTERN` to skip files by name — the opposite of `--include`, same glob syntax, repeatable:
+
+```bash
+argrep 'TODO' . --exclude '*.min.js'
+argrep 'password' . --exclude '*.lock'
+```
+
+**`--include`/`--exclude` glob syntax is not the same thing as the `QUERY` regex.** `*`, `?`, and `[...]` in `--include`/`--exclude`/`--exclude-dir` are shell-style glob wildcards matched against a filename or directory name — nothing to do with the regex engine used for `QUERY` (see the `-F` section above). `argrep '*.rs' .` searches file contents for the literal regex `*.rs` (almost certainly not what you want — `*` is invalid at the start of a regex); `argrep 'fn main' . --include '*.rs'` searches `.rs` files for `fn main`.
+
+If a file matches both `--include` and `--exclude`, **`--exclude` wins** — this is a deliberate simplification of GNU grep's actual precedence rule, which is order-dependent ("the last matching one wins", tracking the position of each `--include`/`--exclude` flag on the command line). Replicating that exactly would need argrep to track flag order across two different options, which isn't worth the complexity for what's usually a non-overlapping pair of filters in practice; "exclude always wins" is simpler to reason about and matches what most other tools with include/exclude filters do.
+
+Use `--exclude-dir PATTERN` to skip whole directories during traversal — matched against the directory's **basename only** (not the full path), same as GNU grep's `--exclude-dir`, and applied *before* a matching directory is ever handed to a worker thread, so excluded subtrees cost no traversal time:
+
+```bash
+argrep 'TODO' . --exclude-dir node_modules
+argrep 'TODO' . --exclude-dir target
+argrep 'TODO' . --exclude-dir 'build*'
+```
+
+Repeatable, and accepts both plain names (`node_modules`) and glob patterns (`build*`) — plain names are matched directly, patterns are compiled as globs, and a directory is skipped if it matches *any* given `--exclude-dir`. `--exclude-dir` is the same mechanism as the older `--ignore` flag (kept as an alias for compatibility) merged with the built-in defaults (`.git`, `node_modules`, `__pycache__`, `target`, disabled via `--no-ignore`).
+
 `PATH` defaults to `.` (current directory) if not specified.
 
 `argrep` also reads from **stdin** when used in a pipeline — no path argument needed.
@@ -94,6 +115,9 @@ How `-m` interacts with other flags (matching GNU grep's own documented behavior
 | `--files-with-matches` | `-l`  | —       | Print only filenames of files containing a match (conflicts with `-c`) |
 | `--count`              | `-c`  | —       | Print count of matching lines per file (conflicts with `-l`)           |
 | `--include PATTERN`    | —     | —       | Only search files matching this glob (e.g. `"*.rs"`, `"*.log"`)        |
+| `--exclude PATTERN`    | —     | —       | Skip files matching this glob (e.g. `"*.min.js"`, `"*.lock"`); repeatable; wins over `--include` on overlap |
+| `--exclude-dir PATTERN` | —    | built-in defaults | Skip directories matching this name or glob (e.g. `"node_modules"`, `"build*"`), matched by basename; repeatable; alias: `--ignore` |
+| `--no-ignore`          | —     | —       | Disable the built-in directory defaults (`.git`, `node_modules`, `__pycache__`, `target`) — explicit `--exclude-dir`/`--ignore` still applies |
 | `--jobs N`             | `-j`  | CPU-aware | Number of parallel worker threads (1–128; default is half the available cores, clamped to 1–16) |
 | `--debug`              | `-d`  | —       | Print scan statistics and errors to stderr                             |
 | `--quiet`              | `-q`  | —       | No output; exit code alone reports match/no-match/error (see Exit codes below). Overrides -l/-c/-n if also set — nothing is printed either way. |
@@ -201,6 +225,8 @@ argrep "deprecated" /large/project -j 8 --include "*.py" -n
 | Quiet (exit code only) | `grep -rq "query" .`            | `argrep "query" . -q`               |
 | Only matched text | `grep -rho "query" .`                | `argrep "query" . -o`               |
 | Limit matches     | `grep -rm 1 "query" .`               | `argrep "query" . -m 1`             |
+| Exclude files     | `grep -r --exclude='*.min.js' "query" .` | `argrep "query" . --exclude '*.min.js'` |
+| Exclude directories | `grep -r --exclude-dir=node_modules "query" .` | `argrep "query" . --exclude-dir node_modules` |
 | Show line numbers | `grep -rn "query" .`                 | `argrep "query" . -n`               |
 | Context lines     | `grep -C 2 "query" .`                | `argrep "query" . -C 2`             |
 | Files only        | `grep -rl "query" .`                 | `argrep "query" . -l`               |
@@ -231,7 +257,7 @@ A nonzero exit from an unreadable file doesn't mean the search stopped: every fi
 
 **With `-q`/`--quiet`, the exit-code meaning changes** to match grep's own convention instead of the table above:
 
-| Code | Meaning (only when `-q` is set)         |
+| Code | Meaning (only when `-q` is set)        |
 |------|-----------------------------------------|
 | `0`  | At least one match was found            |
 | `1`  | No matches were found (no error)        |

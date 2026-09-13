@@ -162,6 +162,13 @@ struct Args {
     #[arg(long)]
     include: Option<String>,
 
+    /// Skip files whose names match this glob (e.g. "*.min.js", "*.lock").
+    /// Can be given multiple times. If a file matches both --include and
+    /// --exclude, --exclude wins (see README for why this differs from
+    /// GNU grep's own order-dependent precedence rule).
+    #[arg(long)]
+    exclude: Vec<String>,
+
     /// Show NUM lines of leading context before matching lines
     #[arg(short = 'B', long = "before-context", value_parser = context_lines_parser)]
     before_context: Option<usize>,
@@ -174,28 +181,69 @@ struct Args {
     #[arg(short = 'C', long = "context", value_parser = context_lines_parser)]
     context: Option<usize>,
 
-    /// Additional ignored directories
-    #[arg(long)]
-    ignore: Vec<String>,
+    /// Skip directories matching this name or glob (e.g. "node_modules",
+    /// "build*"). Matched against the directory's basename only, not the
+    /// full path. Can be given multiple times. Applied while walking the
+    /// tree, before a matching directory is ever handed to a worker, so
+    /// excluded subtrees cost no traversal time at all.
+    #[arg(long = "exclude-dir", visible_alias = "ignore")]
+    exclude_dir: Vec<String>,
 
     /// Do not respect .gitignore / .ignore files (search everything)
     #[arg(long = "no-ignore")]
     no_ignore: bool,
 }
 
-/// Builds the set of directory names to skip, given `--no-ignore` and any
-/// explicit `--ignore` values. `--no-ignore` disables the built-in defaults
-/// (`.git`, `node_modules`, `__pycache__`, `target`), but an explicit
-/// `--ignore` is still honored either way, since that's the user asking for
-/// something specific rather than the tool's automatic noise filtering.
-fn build_ignore_dirs(no_ignore: bool, extra: Vec<String>) -> HashSet<String> {
-    let mut ignore_dirs: HashSet<String> = if no_ignore {
+/// Splits `--exclude-dir`/`--ignore` entries (plus the built-in defaults,
+/// unless `--no-ignore`) into exact names and glob patterns, based on
+/// whether an entry contains a glob metacharacter (`*`, `?`, `[`). Plain
+/// names — the common case, e.g. "node_modules" — stay on the fast
+/// HashSet-lookup path; only entries that actually need glob matching
+/// (e.g. "build*") get compiled into a Pattern. An explicit
+/// `--exclude-dir`/`--ignore` is honored even under `--no-ignore`, since
+/// that's the user asking for something specific rather than the tool's
+/// automatic noise filtering.
+fn build_ignore_dirs(
+    no_ignore: bool,
+    extra: Vec<String>,
+    quiet: bool,
+) -> (HashSet<String>, Vec<Pattern>) {
+    let mut names: HashSet<String> = if no_ignore {
         HashSet::new()
     } else {
         DEFAULT_IGNORES.iter().map(|s| s.to_string()).collect()
     };
-    ignore_dirs.extend(extra);
-    ignore_dirs
+
+    let mut patterns = Vec::new();
+    for entry in extra {
+        if entry.contains(['*', '?', '[']) {
+            patterns.push(compile_glob(&entry, "--exclude-dir", quiet));
+        } else {
+            names.insert(entry);
+        }
+    }
+
+    (names, patterns)
+}
+
+/// Compiles a single glob pattern, exiting with the same CLI-error
+/// style/exit-code convention used elsewhere in this file (e.g. for
+/// invalid regex) if it's malformed.
+fn compile_glob(pattern: &str, flag_name: &str, quiet: bool) -> Pattern {
+    match Pattern::new(pattern) {
+        Ok(pat) => pat,
+        Err(e) => {
+            eprintln!(
+                "{}",
+                format!(
+                    "error: Invalid glob pattern for {}: '{}': {}",
+                    flag_name, pattern, e
+                )
+                .red()
+            );
+            std::process::exit(if quiet { 2 } else { 1 });
+        }
+    }
 }
 
 fn main() {
@@ -223,21 +271,19 @@ fn main() {
         }
     };
 
-    let ignore_dirs = build_ignore_dirs(args.no_ignore, args.ignore);
+    let (ignore_dirs, ignore_dir_patterns) =
+        build_ignore_dirs(args.no_ignore, args.exclude_dir, args.quiet);
 
-    let include_pattern: Option<Pattern> = match &args.include {
-        Some(p) => match Pattern::new(p) {
-            Ok(pat) => Some(pat),
-            Err(e) => {
-                eprintln!(
-                    "{}",
-                    format!("error: Invalid glob pattern '{}': {}", p, e).red()
-                );
-                std::process::exit(if args.quiet { 2 } else { 1 });
-            }
-        },
-        None => None,
-    };
+    let include_pattern: Option<Pattern> = args
+        .include
+        .as_deref()
+        .map(|p| compile_glob(p, "--include", args.quiet));
+
+    let exclude_patterns: Vec<Pattern> = args
+        .exclude
+        .iter()
+        .map(|p| compile_glob(p, "--exclude", args.quiet))
+        .collect();
 
     let mut before_context = args.before_context.or(args.context).unwrap_or(0);
     let mut after_context = args.after_context.or(args.context).unwrap_or(0);
@@ -262,11 +308,13 @@ fn main() {
         ignore_case: args.ignore_case,
         line_number: args.line_number,
         ignore_dirs,
+        ignore_dir_patterns,
         debug: args.debug,
         invert: args.invert,
         files_with_matches: args.files_with_matches,
         count_per_file: args.count_per_file,
         include_pattern,
+        exclude_patterns,
         before_context,
         after_context,
         respect_gitignore,
@@ -472,10 +520,10 @@ fn grep_stdin(config: &argrep::SearchConfig, stats: &argrep::SearchStats) {
                 }
             }
 
-            if let Some(max) = config.max_count
-                && match_count >= max
-            {
-                reached_max_count = true;
+            if let Some(max) = config.max_count {
+                if match_count >= max {
+                    reached_max_count = true;
+                }
             }
         } else if has_context && !config.count_per_file && !config.files_with_matches {
             if after_remaining > 0 {
@@ -680,31 +728,56 @@ mod tests {
 
     #[test]
     fn default_ignores_included_when_not_no_ignore() {
-        let dirs = build_ignore_dirs(false, vec![]);
-        assert!(dirs.contains(".git"));
-        assert!(dirs.contains("node_modules"));
-        assert!(dirs.contains("__pycache__"));
-        assert!(dirs.contains("target"));
+        let (names, _patterns) = build_ignore_dirs(false, vec![], false);
+        assert!(names.contains(".git"));
+        assert!(names.contains("node_modules"));
+        assert!(names.contains("__pycache__"));
+        assert!(names.contains("target"));
     }
 
     #[test]
     fn no_ignore_excludes_default_ignores() {
-        let dirs = build_ignore_dirs(true, vec![]);
-        assert!(dirs.is_empty());
+        let (names, patterns) = build_ignore_dirs(true, vec![], false);
+        assert!(names.is_empty());
+        assert!(patterns.is_empty());
     }
 
     #[test]
     fn explicit_ignore_honored_alongside_defaults() {
-        let dirs = build_ignore_dirs(false, vec!["vendor".to_string()]);
-        assert!(dirs.contains("vendor"));
-        assert!(dirs.contains(".git"));
+        let (names, _patterns) = build_ignore_dirs(false, vec!["vendor".to_string()], false);
+        assert!(names.contains("vendor"));
+        assert!(names.contains(".git"));
     }
 
     #[test]
     fn explicit_ignore_honored_even_with_no_ignore() {
-        let dirs = build_ignore_dirs(true, vec!["vendor".to_string()]);
-        assert_eq!(dirs.len(), 1);
-        assert!(dirs.contains("vendor"));
+        let (names, patterns) = build_ignore_dirs(true, vec!["vendor".to_string()], false);
+        assert_eq!(names.len(), 1);
+        assert!(names.contains("vendor"));
+        assert!(patterns.is_empty());
+    }
+
+    #[test]
+    fn glob_exclude_dir_entry_becomes_a_pattern_not_a_literal_name() {
+        // "build*" contains a glob metacharacter, so it should be routed
+        // to the pattern list, not treated as a literal directory name.
+        let (names, patterns) = build_ignore_dirs(true, vec!["build*".to_string()], false);
+        assert!(names.is_empty());
+        assert_eq!(patterns.len(), 1);
+        assert!(patterns[0].matches("build"));
+        assert!(patterns[0].matches("build-tools"));
+        assert!(!patterns[0].matches("target"));
+    }
+
+    #[test]
+    fn plain_and_glob_exclude_dir_entries_can_be_combined() {
+        let (names, patterns) = build_ignore_dirs(
+            true,
+            vec!["node_modules".to_string(), "build*".to_string()],
+            false,
+        );
+        assert!(names.contains("node_modules"));
+        assert_eq!(patterns.len(), 1);
     }
 
     // ── -F / --fixed-strings ─────────────────────────────────────────────────
@@ -878,5 +951,53 @@ mod tests {
         assert_eq!(args.max_count, Some(2));
         assert_eq!(args.context, Some(1));
         assert!(args.invert);
+    }
+
+    // ── --exclude / --exclude-dir ────────────────────────────────────────────
+
+    #[test]
+    fn exclude_defaults_to_empty() {
+        let args = Args::try_parse_from(["argrep", "foo", "."]).unwrap();
+        assert!(args.exclude.is_empty());
+    }
+
+    #[test]
+    fn exclude_can_be_given_multiple_times() {
+        let args = Args::try_parse_from([
+            "argrep",
+            "foo",
+            ".",
+            "--exclude",
+            "*.min.js",
+            "--exclude",
+            "*.lock",
+        ])
+        .unwrap();
+        assert_eq!(args.exclude, vec!["*.min.js", "*.lock"]);
+    }
+
+    #[test]
+    fn exclude_dir_can_be_given_multiple_times() {
+        let args = Args::try_parse_from([
+            "argrep",
+            "foo",
+            ".",
+            "--exclude-dir",
+            "node_modules",
+            "--exclude-dir",
+            "build*",
+        ])
+        .unwrap();
+        assert_eq!(args.exclude_dir, vec!["node_modules", "build*"]);
+    }
+
+    #[test]
+    fn ignore_still_works_as_an_alias_for_exclude_dir() {
+        // --exclude-dir is the new primary name (matches grep's own
+        // naming), but --ignore predates it in this codebase and keeps
+        // working identically, so existing scripts/muscle memory aren't
+        // broken by the rename.
+        let args = Args::try_parse_from(["argrep", "foo", ".", "--ignore", "vendor"]).unwrap();
+        assert_eq!(args.exclude_dir, vec!["vendor"]);
     }
 }

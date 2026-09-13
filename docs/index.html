@@ -572,6 +572,8 @@
         <span class="flag">-m limit</span>
         <span class="flag">-q quiet</span>
         <span class="flag">--include</span>
+        <span class="flag">--exclude</span>
+        <span class="flag">--exclude-dir</span>
       </div>
     </div>
   </div>
@@ -646,6 +648,9 @@
         <br>
         <br><span class="uc-comment"># Stop after the first match — great for CI checks</span>
         <br><span class="uc-cmd">argrep</span> <span class="uc-flag">-m</span> <span class="uc-arg">1</span> <span class="uc-arg">"panic!"</span> <span class="uc-arg">src/</span>
+        <br>
+        <br><span class="uc-comment"># Skip generated/vendor directories</span>
+        <br><span class="uc-cmd">argrep</span> <span class="uc-arg">"TODO"</span> <span class="uc-arg">.</span> <span class="uc-flag">--exclude-dir</span> <span class="uc-arg">node_modules</span>
       </div>
     </div>
 

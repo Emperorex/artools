@@ -569,6 +569,7 @@
         <span class="flag">-o matched</span>
         <span class="flag">-l files</span>
         <span class="flag">-c count</span>
+        <span class="flag">-m limit</span>
         <span class="flag">-q quiet</span>
         <span class="flag">--include</span>
       </div>
@@ -642,6 +643,9 @@
         <br>
         <br><span class="uc-comment"># Print only the matched text, not the whole line</span>
         <br><span class="uc-cmd">echo</span> <span class="uc-arg">'foo bar foo'</span> <span class="uc-pipe">|</span> <span class="uc-cmd">argrep</span> <span class="uc-flag">-o</span> <span class="uc-arg">"foo"</span>
+        <br>
+        <br><span class="uc-comment"># Stop after the first match — great for CI checks</span>
+        <br><span class="uc-cmd">argrep</span> <span class="uc-flag">-m</span> <span class="uc-arg">1</span> <span class="uc-arg">"panic!"</span> <span class="uc-arg">src/</span>
       </div>
     </div>
 

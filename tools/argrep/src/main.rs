@@ -109,6 +109,17 @@ struct Args {
     #[arg(short = 'q', long)]
     quiet: bool,
 
+    /// Stop searching a file after NUM matching lines (must be >= 1).
+    /// With -v, counts non-matching (selected) lines instead, same as
+    /// grep. With -c, caps the printed count at NUM. With -A/-B/-C, any
+    /// pending trailing context is still printed before stopping.
+    #[arg(
+        short = 'm',
+        long = "max-count",
+        value_parser = clap::value_parser!(u64).range(1..)
+    )]
+    max_count: Option<u64>,
+
     /// Display line numbers in the output results
     #[arg(short = 'n', long)]
     line_number: bool,
@@ -261,6 +272,7 @@ fn main() {
         respect_gitignore,
         quiet: args.quiet,
         only_matching: args.only_matching,
+        max_count: args.max_count.map(|v| v as usize),
     });
 
     let stats = SearchStats::new();
@@ -384,8 +396,15 @@ fn grep_stdin(config: &argrep::SearchConfig, stats: &argrep::SearchStats) {
     let mut after_remaining = 0usize;
     let mut last_printed_line = 0usize;
     let mut has_printed_anything = false;
+    // -m: mirrors grep_file's handling — see the comment there for why
+    // this doesn't break immediately.
+    let mut reached_max_count = false;
 
     for line in stdin.lock().lines().map_while(Result::ok) {
+        if reached_max_count && after_remaining == 0 {
+            break;
+        }
+
         line_num += 1;
 
         let line_matches = config.regex.is_match(&line);
@@ -451,6 +470,12 @@ fn grep_stdin(config: &argrep::SearchConfig, stats: &argrep::SearchStats) {
                 if before_ctx > 0 {
                     before_buffer.push_back((line_num, line.clone()));
                 }
+            }
+
+            if let Some(max) = config.max_count
+                && match_count >= max
+            {
+                reached_max_count = true;
             }
         } else if has_context && !config.count_per_file && !config.files_with_matches {
             if after_remaining > 0 {
@@ -813,5 +838,45 @@ mod tests {
         let args = Args::try_parse_from(["argrep", "foo", ".", "-o", "-c"]).unwrap();
         assert!(args.only_matching);
         assert!(args.count_per_file);
+    }
+
+    // ── -m / --max-count ─────────────────────────────────────────────────────
+
+    #[test]
+    fn max_count_defaults_to_unlimited() {
+        let args = Args::try_parse_from(["argrep", "foo", "."]).unwrap();
+        assert_eq!(args.max_count, None);
+    }
+
+    #[test]
+    fn max_count_short_flag_is_parsed() {
+        let args = Args::try_parse_from(["argrep", "foo", ".", "-m", "3"]).unwrap();
+        assert_eq!(args.max_count, Some(3));
+    }
+
+    #[test]
+    fn max_count_long_flag_is_parsed() {
+        let args = Args::try_parse_from(["argrep", "foo", ".", "--max-count", "3"]).unwrap();
+        assert_eq!(args.max_count, Some(3));
+    }
+
+    #[test]
+    fn max_count_zero_is_rejected_at_parse_time() {
+        // Real grep's exact behavior for -m 0 (stop before any output at
+        // all) is a corner case not worth replicating precisely; rejecting
+        // it outright gives a clear, unambiguous contract instead: -m N
+        // always means "show N matching lines", N >= 1. Same reasoning as
+        // -j 0 being rejected elsewhere in this file.
+        let result = Args::try_parse_from(["argrep", "foo", ".", "-m", "0"]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn max_count_can_be_combined_with_context_and_invert() {
+        let args =
+            Args::try_parse_from(["argrep", "foo", ".", "-m", "2", "-C", "1", "-v"]).unwrap();
+        assert_eq!(args.max_count, Some(2));
+        assert_eq!(args.context, Some(1));
+        assert!(args.invert);
     }
 }

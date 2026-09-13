@@ -68,6 +68,16 @@ pub struct SearchConfig {
     /// a warning) if either was requested — same as GNU grep's own
     /// documented behavior for -o combined with -v or context.
     pub only_matching: bool,
+    /// -m: stop searching a file after this many matching lines (after
+    /// -v inversion, if -v is also set — same as grep, which counts
+    /// *selected* lines, not raw regex matches). With -o, a line with
+    /// multiple occurrences still only counts once toward this limit,
+    /// but every occurrence on that (already-counted) line is still
+    /// printed. With -A/-B/-C, any pending trailing context is still
+    /// flushed before the file search actually stops, also matching
+    /// grep's documented behavior. None means unlimited (the previous,
+    /// only behavior before this field existed).
+    pub max_count: Option<usize>,
 }
 
 /// Shared statistics counters
@@ -488,8 +498,19 @@ pub fn grep_file(
     let mut after_remaining = 0usize;
     let mut last_printed_line = 0usize;
     let mut has_printed_anything = false;
+    // -m: set once match_count reaches config.max_count. Doesn't break
+    // immediately — grep's own documented behavior is "when grep stops
+    // after NUM matching lines, it outputs any trailing context lines",
+    // so this only actually stops the loop once after_remaining (the
+    // pending -A/-C tail, 0 if no context was requested) has been fully
+    // flushed. See the check at the top of the loop below.
+    let mut reached_max_count = false;
 
     loop {
+        if reached_max_count && after_remaining == 0 {
+            break;
+        }
+
         if config.quiet && stats.matched_lines.load(Ordering::Relaxed) > 0 {
             // Another file (possibly scanned by a different worker thread)
             // already produced a match, so there's no point reading any
@@ -635,6 +656,12 @@ pub fn grep_file(
                 }
             }
             // -c mode: accumulate count, emit at end
+
+            if let Some(max) = config.max_count
+                && match_count >= max
+            {
+                reached_max_count = true;
+            }
         } else if has_context && !config.count_per_file && !config.files_with_matches {
             if after_remaining > 0 {
                 let _ = output_tx.send(MatchResult {

@@ -58,6 +58,20 @@ How `-o` interacts with other flags:
 - **`-v`**: rejected as a CLI error (`-o` and `-v` can't be combined) — `-v` selects whole lines that *don't* contain a match, so there'd be nothing for `-o` to extract.
 - **`-A`/`-B`/`-C`**: have no effect and print a warning, same as GNU grep — context doesn't make sense when only the matched fragment (not the surrounding line) is being printed.
 
+Use `-m`/`--max-count` to stop searching a file after `NUM` matching lines — useful for large logs and CI, where you often just need to know *whether* something matched, not every occurrence:
+
+```bash
+argrep -m 1 'panic!' src/
+```
+
+How `-m` interacts with other flags (matching GNU grep's own documented behavior):
+
+- **`-v`**: counts non-matching (selected) lines instead of matching ones — the limit always applies to whatever lines are actually being *selected* for output.
+- **`-c`**: the printed count is capped at `NUM`, even if the file actually has more matches.
+- **`-o`**: the limit is on matching *lines*, not individual occurrences — a line with several matches still only counts once, but every occurrence on that line is still printed.
+- **`-A`/`-B`/`-C`**: any pending trailing context is still printed after the limit is reached, before the file search actually stops.
+- `NUM` must be `>= 1`; `-m 0` is rejected as invalid rather than replicating GNU grep's own corner-case behavior for it.
+
 `PATH` defaults to `.` (current directory) if not specified.
 
 `argrep` also reads from **stdin** when used in a pipeline — no path argument needed.
@@ -76,6 +90,7 @@ How `-o` interacts with other flags:
 | `--context NUM`        | `-C`  | —       | Show NUM lines of leading and trailing context around matches (max 100,000) |
 | `--invert`             | `-v`  | —       | Print lines that do NOT match the query (conflicts with `-o`)          |
 | `--only-matching`      | `-o`  | —       | Print only the matched text, one occurrence per line (conflicts with `-v`; no effect with `-A`/`-B`/`-C`, warns) |
+| `--max-count NUM`      | `-m`  | unlimited | Stop searching a file after NUM matching lines (must be >= 1)          |
 | `--files-with-matches` | `-l`  | —       | Print only filenames of files containing a match (conflicts with `-c`) |
 | `--count`              | `-c`  | —       | Print count of matching lines per file (conflicts with `-l`)           |
 | `--include PATTERN`    | —     | —       | Only search files matching this glob (e.g. `"*.rs"`, `"*.log"`)        |
@@ -185,6 +200,7 @@ argrep "deprecated" /large/project -j 8 --include "*.py" -n
 | Whole line        | `grep -rx "query" .`                 | `argrep "query" . -x`               |
 | Quiet (exit code only) | `grep -rq "query" .`            | `argrep "query" . -q`               |
 | Only matched text | `grep -rho "query" .`                | `argrep "query" . -o`               |
+| Limit matches     | `grep -rm 1 "query" .`               | `argrep "query" . -m 1`             |
 | Show line numbers | `grep -rn "query" .`                 | `argrep "query" . -n`               |
 | Context lines     | `grep -C 2 "query" .`                | `argrep "query" . -C 2`             |
 | Files only        | `grep -rl "query" .`                 | `argrep "query" . -l`               |
@@ -215,7 +231,7 @@ A nonzero exit from an unreadable file doesn't mean the search stopped: every fi
 
 **With `-q`/`--quiet`, the exit-code meaning changes** to match grep's own convention instead of the table above:
 
-| Code | Meaning (only when `-q` is set)        |
+| Code | Meaning (only when `-q` is set)         |
 |------|-----------------------------------------|
 | `0`  | At least one match was found            |
 | `1`  | No matches were found (no error)        |

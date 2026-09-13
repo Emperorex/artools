@@ -685,10 +685,10 @@ pub fn grep_file(
             }
             // -c mode: accumulate count, emit at end
 
-            if let Some(max) = config.max_count {
-                if match_count >= max {
-                    reached_max_count = true;
-                }
+            if let Some(max) = config.max_count
+                && match_count >= max
+            {
+                reached_max_count = true;
             }
         } else if has_context && !config.count_per_file && !config.files_with_matches {
             if after_remaining > 0 {

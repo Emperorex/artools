@@ -150,9 +150,28 @@ struct Args {
     #[arg(
         short = 'l',
         long = "files-with-matches",
-        conflicts_with = "count_per_file"
+        conflicts_with_all = ["count_per_file", "files_without_match"]
     )]
     files_with_matches: bool,
+
+    /// Print only filenames of files that do NOT contain a match — the
+    /// opposite of -l/--files-with-matches. Conflicts with -l (opposite
+    /// output contracts, same reasoning as -l/-c below) and with -c (a
+    /// per-line count is meaningless for files that were, by definition,
+    /// never fully counted — see -L's interaction notes in the README).
+    /// A file that fails to open is excluded from this output entirely,
+    /// same as it's excluded from -l: an unreadable file is neither
+    /// confirmed to match nor confirmed not to, so it can't honestly be
+    /// reported either way (its unreadability is still surfaced via the
+    /// existing io-error count/exit code). Once any match is found in a
+    /// file, reading stops immediately — the file is disqualified and
+    /// there is nothing further -L needs from it.
+    #[arg(
+        short = 'L',
+        long = "files-without-match",
+        conflicts_with_all = ["files_with_matches", "count_per_file"]
+    )]
+    files_without_match: bool,
 
     /// Print count of matching lines per file instead of the lines themselves
     #[arg(short = 'c', long = "count")]
@@ -312,6 +331,7 @@ fn main() {
         debug: args.debug,
         invert: args.invert,
         files_with_matches: args.files_with_matches,
+        files_without_match: args.files_without_match,
         count_per_file: args.count_per_file,
         include_pattern,
         exclude_patterns,
@@ -341,12 +361,14 @@ fn main() {
         let line_number = config.line_number;
         let regex = config.regex.clone();
         let files_with_matches = config.files_with_matches;
+        let files_without_match = config.files_without_match;
         let count_per_file = config.count_per_file;
 
         parallel_grep(root_path, args.jobs, config, stats.clone(), move |result| {
             print_result(
                 &result,
                 files_with_matches,
+                files_without_match,
                 count_per_file,
                 line_number,
                 &regex,
@@ -479,6 +501,11 @@ fn grep_stdin(config: &argrep::SearchConfig, stats: &argrep::SearchStats) {
                 // stdin has no filename — print "<stdin>" once then stop
                 println!("{}", "<stdin>".magenta());
                 break;
+            } else if config.files_without_match {
+                // -L: stdin just produced a match, so it's disqualified —
+                // same early-exit as grep_file, just without emitting
+                // anything (the "no match" case is only known at EOF).
+                break;
             } else if config.only_matching {
                 // -o: one printed line per match occurrence, containing
                 // only the matched text. Context is a no-op here too —
@@ -525,7 +552,11 @@ fn grep_stdin(config: &argrep::SearchConfig, stats: &argrep::SearchStats) {
             {
                 reached_max_count = true;
             }
-        } else if has_context && !config.count_per_file && !config.files_with_matches {
+        } else if has_context
+            && !config.count_per_file
+            && !config.files_with_matches
+            && !config.files_without_match
+        {
             if after_remaining > 0 {
                 print_stdin_line(&line, line_num, true, config);
                 last_printed_line = line_num;
@@ -547,6 +578,15 @@ fn grep_stdin(config: &argrep::SearchConfig, stats: &argrep::SearchStats) {
             "<stdin>".magenta(),
             match_count.to_string().green()
         );
+    }
+
+    // -L: only reachable here if the loop ran to completion (EOF) without
+    // ever hitting the early-exit break above, which only happens when
+    // stdin produced zero matching lines end to end — exactly the case
+    // -L wants to report. Unlike grep_file, there's no "file couldn't be
+    // opened" case to guard against on the stdin path.
+    if config.files_without_match && !config.quiet && match_count == 0 {
+        println!("{}", "<stdin>".magenta());
     }
 }
 
@@ -596,6 +636,7 @@ fn print_stdin_line(line: &str, line_num: usize, is_context: bool, config: &argr
 fn print_result(
     result: &argrep::MatchResult,
     files_with_matches: bool,
+    files_without_match: bool,
     count_per_file: bool,
     line_number: bool,
     regex: &Regex,
@@ -605,7 +646,11 @@ fn print_result(
         return;
     }
 
-    if files_with_matches {
+    if files_with_matches || files_without_match {
+        // -l and -L both emit a bare filename result (line_num: 0, no
+        // content) — the distinction between "has a match" and "has no
+        // match" is entirely in *which files ever produced a result at
+        // all* (see grep_file/grep_stdin), not in how that result prints.
         println!("{}", result.file_path.display().to_string().magenta());
     } else if count_per_file {
         println!(
@@ -724,6 +769,59 @@ mod tests {
         let args = Args::try_parse_from(["argrep", "foo", ".", "-l"]).unwrap();
         assert!(args.files_with_matches);
         assert!(!args.count_per_file);
+    }
+
+    // ── -L / --files-without-match ───────────────────────────────────────────
+    // Opposite of -l: mutually exclusive with both -l (contradictory output
+    // contracts — a file can't be reported as both matching and not) and -c
+    // (a per-line count doesn't mean anything for files -L never finishes
+    // counting, since it stops reading as soon as one match rules a file
+    // out).
+
+    #[test]
+    fn files_without_match_defaults_to_false() {
+        let args = Args::try_parse_from(["argrep", "foo", "."]).unwrap();
+        assert!(!args.files_without_match);
+    }
+
+    #[test]
+    fn files_without_match_short_flag_is_parsed() {
+        let args = Args::try_parse_from(["argrep", "foo", ".", "-L"]).unwrap();
+        assert!(args.files_without_match);
+    }
+
+    #[test]
+    fn files_without_match_long_flag_is_parsed() {
+        let args = Args::try_parse_from(["argrep", "foo", ".", "--files-without-match"]).unwrap();
+        assert!(args.files_without_match);
+    }
+
+    #[test]
+    fn files_without_match_and_files_with_matches_together_is_rejected() {
+        let result = Args::try_parse_from(["argrep", "foo", ".", "-L", "-l"]);
+        assert!(result.is_err(), "-L -l together must be a CLI parse error");
+    }
+
+    #[test]
+    fn files_without_match_and_files_with_matches_together_is_rejected_regardless_of_order() {
+        let result = Args::try_parse_from(["argrep", "foo", ".", "-l", "-L"]);
+        assert!(result.is_err(), "-l -L together must be a CLI parse error");
+    }
+
+    #[test]
+    fn files_without_match_and_count_together_is_rejected() {
+        let result = Args::try_parse_from(["argrep", "foo", ".", "-L", "-c"]);
+        assert!(result.is_err(), "-L -c together must be a CLI parse error");
+    }
+
+    #[test]
+    fn files_without_match_can_be_combined_with_invert() {
+        // Unlike -c/-l, combining -L with -v has a coherent (if narrow)
+        // meaning: "files where every selected (inverted) line matched",
+        // i.e. files with zero non-matching lines. Not rejected.
+        let args = Args::try_parse_from(["argrep", "foo", ".", "-L", "-v"]).unwrap();
+        assert!(args.files_without_match);
+        assert!(args.invert);
     }
 
     #[test]

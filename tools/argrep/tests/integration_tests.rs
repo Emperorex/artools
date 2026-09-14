@@ -48,6 +48,7 @@ fn default_config(query: &str, ignore_case: bool) -> std::sync::Arc<argrep::Sear
         debug: false,
         invert: false,
         files_with_matches: false,
+        files_without_match: false,
         count_per_file: false,
         include_pattern: None,
         exclude_patterns: Vec::new(),
@@ -488,6 +489,7 @@ fn custom_ignore_dir_is_excluded() {
         debug: false,
         invert: false,
         files_with_matches: false,
+        files_without_match: false,
         count_per_file: false,
         include_pattern: None,
         exclude_patterns: Vec::new(),
@@ -546,6 +548,7 @@ fn stats_counts_are_accurate() {
         debug: false,
         invert: false,
         files_with_matches: false,
+        files_without_match: false,
         count_per_file: false,
         include_pattern: None,
         exclude_patterns: Vec::new(),
@@ -598,6 +601,7 @@ fn multiple_workers_find_same_matches_as_single_worker() {
             debug: false,
             invert: false,
             files_with_matches: false,
+            files_without_match: false,
             count_per_file: false,
             include_pattern: None,
             exclude_patterns: Vec::new(),
@@ -678,6 +682,7 @@ fn invert_returns_non_matching_lines() {
         debug: false,
         invert: true,
         files_with_matches: false,
+        files_without_match: false,
         count_per_file: false,
         include_pattern: None,
         exclude_patterns: Vec::new(),
@@ -723,6 +728,7 @@ fn invert_with_no_matches_returns_all_lines() {
         debug: false,
         invert: true,
         files_with_matches: false,
+        files_without_match: false,
         count_per_file: false,
         include_pattern: None,
         exclude_patterns: Vec::new(),
@@ -774,6 +780,7 @@ fn files_with_matches_returns_only_filenames() {
         debug: false,
         invert: false,
         files_with_matches: true,
+        files_without_match: false,
         count_per_file: false,
         include_pattern: None,
         exclude_patterns: Vec::new(),
@@ -824,6 +831,7 @@ fn files_with_matches_emits_each_file_once() {
         debug: false,
         invert: false,
         files_with_matches: true,
+        files_without_match: false,
         count_per_file: false,
         include_pattern: None,
         exclude_patterns: Vec::new(),
@@ -849,6 +857,369 @@ fn files_with_matches_emits_each_file_once() {
         results.lock().unwrap().len(),
         1,
         "file should appear exactly once"
+    );
+}
+
+// ── -L / --files-without-match ──────────────────────────────────────────────
+//
+// Opposite of -l: reports only files that contain zero matching lines.
+// Covers the four interaction questions raised in review: -l/-c conflict
+// (enforced at the CLI level, tested in main.rs's unit tests, not here),
+// -v combining meaningfully, unreadable files never being reported either
+// way, and the file being disqualified as soon as it produces one match
+// rather than reading it to the end unnecessarily.
+
+#[test]
+fn files_without_match_returns_only_unmatched_filenames() {
+    let (_dir, root) = make_tree(&[
+        ("a.txt", "needle here\n"),
+        ("b.txt", "nothing\n"),
+        ("c.txt", "needle again\n"),
+        ("d.txt", "still nothing\n"),
+    ]);
+
+    let ignore_dirs: HashSet<String> = DEFAULT_IGNORES.iter().map(|s| s.to_string()).collect();
+    let config = StdArc::new(SearchConfig {
+        regex: build_matcher(
+            "needle",
+            MatchOptions {
+                fixed_strings: false,
+                ignore_case: false,
+                ..Default::default()
+            },
+        )
+        .unwrap(),
+        query: "needle".to_string(),
+        ignore_case: false,
+        line_number: false,
+        ignore_dirs,
+        ignore_dir_patterns: Vec::new(),
+        debug: false,
+        invert: false,
+        files_with_matches: false,
+        files_without_match: true,
+        count_per_file: false,
+        include_pattern: None,
+        exclude_patterns: Vec::new(),
+        before_context: 0,
+        after_context: 0,
+        respect_gitignore: true,
+        quiet: false,
+        only_matching: false,
+        max_count: None,
+    });
+    let results: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let r = Arc::clone(&results);
+    parallel_grep(root, 4, config, SearchStats::new(), move |item| {
+        r.lock().unwrap().push(
+            item.file_path
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .to_string(),
+        );
+    });
+    let mut names = results.lock().unwrap().clone();
+    names.sort();
+    assert_eq!(
+        names,
+        vec!["b.txt", "d.txt"],
+        "-L must list exactly the files with zero matching lines, and \
+         exclude every file that has at least one"
+    );
+}
+
+#[test]
+fn files_without_match_emits_nothing_when_every_file_matches() {
+    let (_dir, root) = make_tree(&[("a.txt", "needle here\n"), ("b.txt", "needle there\n")]);
+
+    let ignore_dirs: HashSet<String> = DEFAULT_IGNORES.iter().map(|s| s.to_string()).collect();
+    let config = StdArc::new(SearchConfig {
+        regex: build_matcher(
+            "needle",
+            MatchOptions {
+                fixed_strings: false,
+                ignore_case: false,
+                ..Default::default()
+            },
+        )
+        .unwrap(),
+        query: "needle".to_string(),
+        ignore_case: false,
+        line_number: false,
+        ignore_dirs,
+        ignore_dir_patterns: Vec::new(),
+        debug: false,
+        invert: false,
+        files_with_matches: false,
+        files_without_match: true,
+        count_per_file: false,
+        include_pattern: None,
+        exclude_patterns: Vec::new(),
+        before_context: 0,
+        after_context: 0,
+        respect_gitignore: true,
+        quiet: false,
+        only_matching: false,
+        max_count: None,
+    });
+    let results: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let r = Arc::clone(&results);
+    parallel_grep(root, 4, config, SearchStats::new(), move |item| {
+        r.lock().unwrap().push(
+            item.file_path
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .to_string(),
+        );
+    });
+    assert!(
+        results.lock().unwrap().is_empty(),
+        "-L must report nothing when every file in the tree has a match"
+    );
+}
+
+/// The inverse of invert_with_files_with_matches_returns_files_with_a_non_matching_line:
+/// with -L -v, a file qualifies only if it has zero "selected" (inverted)
+/// lines — i.e. every line in it actually matched the query.
+#[test]
+fn files_without_match_with_invert_reports_files_where_every_line_matches() {
+    let (_dir, root) = make_tree(&[
+        ("all_needle.txt", "needle\nneedle\n"), // every line matches -> zero inverted matches -> -L -v includes it
+        ("mixed.txt", "needle\nother\n"), // one non-matching line -> has an inverted match -> excluded
+        ("no_needle.txt", "nothing\nnothing else\n"), // both lines are inverted matches -> excluded
+    ]);
+
+    let ignore_dirs: HashSet<String> = DEFAULT_IGNORES.iter().map(|s| s.to_string()).collect();
+    let config = StdArc::new(SearchConfig {
+        regex: build_matcher(
+            "needle",
+            MatchOptions {
+                fixed_strings: false,
+                ignore_case: false,
+                ..Default::default()
+            },
+        )
+        .unwrap(),
+        query: "needle".to_string(),
+        ignore_case: false,
+        line_number: false,
+        ignore_dirs,
+        ignore_dir_patterns: Vec::new(),
+        debug: false,
+        invert: true,
+        files_with_matches: false,
+        files_without_match: true,
+        count_per_file: false,
+        include_pattern: None,
+        exclude_patterns: Vec::new(),
+        before_context: 0,
+        after_context: 0,
+        respect_gitignore: true,
+        quiet: false,
+        only_matching: false,
+        max_count: None,
+    });
+    let results: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let r = Arc::clone(&results);
+    parallel_grep(root, 4, config, SearchStats::new(), move |item| {
+        r.lock().unwrap().push(
+            item.file_path
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .to_string(),
+        );
+    });
+    let mut names = results.lock().unwrap().clone();
+    names.sort();
+    assert_eq!(
+        names,
+        vec!["all_needle.txt"],
+        "-L -v must list only files where every line matched the query \
+         (so nothing was left over to select under -v)"
+    );
+}
+
+/// Calls grep_file directly (rather than parallel_grep over a tree) so the
+/// early-exit behavior can be checked precisely: a file with several
+/// matching lines must stop being read after the *first* one, not scan to
+/// EOF and then decide not to report it.
+#[test]
+fn files_without_match_stops_reading_after_first_match() {
+    let (_dir, root) = make_tree(&[("file.txt", "needle\nneedle\nneedle\n")]);
+    let file_path = root.join("file.txt");
+
+    let config = StdArc::new(SearchConfig {
+        regex: build_matcher("needle", MatchOptions::default()).unwrap(),
+        query: "needle".to_string(),
+        ignore_case: false,
+        line_number: false,
+        ignore_dirs: DEFAULT_IGNORES.iter().map(|s| s.to_string()).collect(),
+        ignore_dir_patterns: Vec::new(),
+        debug: false,
+        invert: false,
+        files_with_matches: false,
+        files_without_match: true,
+        count_per_file: false,
+        include_pattern: None,
+        exclude_patterns: Vec::new(),
+        before_context: 0,
+        after_context: 0,
+        respect_gitignore: true,
+        quiet: false,
+        only_matching: false,
+        max_count: None,
+    });
+    let stats = SearchStats::new();
+    let (output_tx, output_rx) = crossbeam_channel::unbounded();
+
+    grep_file(&file_path, &config, &output_tx, &stats);
+
+    assert!(
+        output_rx.try_recv().is_err(),
+        "a file that has a match must never be reported by -L"
+    );
+    assert_eq!(
+        stats.matched_lines.load(Ordering::Relaxed),
+        1,
+        "-L must stop reading (and stop counting matches) as soon as the \
+         first matching line disqualifies the file — it must not scan the \
+         other two matching lines in this file"
+    );
+}
+
+/// A file that fails to open must not be reported by -L in either
+/// direction: not as "matched" (it was never searched) and not as
+/// "no match" either (its content is simply unknown). Mirrors
+/// unreadable_file_is_skipped_but_other_matches_are_still_found above,
+/// but for -L specifically, since a naive implementation could easily
+/// treat "couldn't read it" and "read it and found nothing" as the same
+/// case.
+#[cfg(unix)]
+#[test]
+fn files_without_match_excludes_unreadable_files() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let (_dir, root) = make_tree(&[
+        ("blocked.txt", "irrelevant content\n"),
+        ("clean.txt", "nothing matches here\n"),
+    ]);
+
+    let blocked_path = root.join("blocked.txt");
+    fs::set_permissions(&blocked_path, fs::Permissions::from_mode(0o000)).unwrap();
+
+    if File::open(&blocked_path).is_ok() {
+        fs::set_permissions(&blocked_path, fs::Permissions::from_mode(0o644)).unwrap();
+        eprintln!(
+            "skipping files_without_match_excludes_unreadable_files: \
+             running as a user that ignores file permissions (e.g. root)"
+        );
+        return;
+    }
+
+    let ignore_dirs: HashSet<String> = DEFAULT_IGNORES.iter().map(|s| s.to_string()).collect();
+    let config = StdArc::new(SearchConfig {
+        regex: build_matcher("needle", MatchOptions::default()).unwrap(),
+        query: "needle".to_string(),
+        ignore_case: false,
+        line_number: false,
+        ignore_dirs,
+        ignore_dir_patterns: Vec::new(),
+        debug: false,
+        invert: false,
+        files_with_matches: false,
+        files_without_match: true,
+        count_per_file: false,
+        include_pattern: None,
+        exclude_patterns: Vec::new(),
+        before_context: 0,
+        after_context: 0,
+        respect_gitignore: true,
+        quiet: false,
+        only_matching: false,
+        max_count: None,
+    });
+    let stats = SearchStats::new();
+    let results: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let r = Arc::clone(&results);
+    parallel_grep(root, 4, config, stats.clone(), move |item| {
+        r.lock().unwrap().push(
+            item.file_path
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .to_string(),
+        );
+    });
+
+    let _ = fs::set_permissions(&blocked_path, fs::Permissions::from_mode(0o644));
+
+    let mut names = results.lock().unwrap().clone();
+    names.sort();
+    assert_eq!(
+        names,
+        vec!["clean.txt"],
+        "an unreadable file must never show up in -L output, even though \
+         it technically produced no matches — its content is unknown, not \
+         confirmed empty of matches"
+    );
+    assert!(
+        stats.io_errors.load(Ordering::Relaxed) > 0,
+        "the unreadable file must still be counted as an io error so the \
+         exit code reflects an incomplete search"
+    );
+}
+
+/// -q takes priority over -L, same as every other output mode: nothing is
+/// ever sent through the callback. No special-cased exit-code interaction
+/// is needed here — matched_lines (which main.rs's -q exit code is based
+/// on) reflects whether any line matched anywhere, independent of -l/-L.
+#[test]
+fn files_without_match_quiet_produces_no_output() {
+    let (_dir, root) = make_tree(&[("a.txt", "nothing relevant here\n")]);
+
+    let config = StdArc::new(SearchConfig {
+        regex: build_matcher("zzznomatch", MatchOptions::default()).unwrap(),
+        query: "zzznomatch".to_string(),
+        ignore_case: false,
+        line_number: false,
+        ignore_dirs: DEFAULT_IGNORES.iter().map(|s| s.to_string()).collect(),
+        ignore_dir_patterns: Vec::new(),
+        debug: false,
+        invert: false,
+        files_with_matches: false,
+        files_without_match: true,
+        count_per_file: false,
+        include_pattern: None,
+        exclude_patterns: Vec::new(),
+        before_context: 0,
+        after_context: 0,
+        respect_gitignore: true,
+        quiet: true,
+        only_matching: false,
+        max_count: None,
+    });
+
+    let call_count = Arc::new(AtomicUsize::new(0));
+    let c = Arc::clone(&call_count);
+    let stats = SearchStats::new();
+    parallel_grep(root, 2, config, stats.clone(), move |_item| {
+        c.fetch_add(1, Ordering::Relaxed);
+    });
+
+    assert_eq!(
+        call_count.load(Ordering::Relaxed),
+        0,
+        "-q -L must never send a MatchResult, even for a file -L would \
+         otherwise report"
+    );
+    assert_eq!(
+        stats.matched_lines.load(Ordering::Relaxed),
+        0,
+        "no line matched anywhere, so the -q exit code must be 1 (no \
+         match), unaffected by -L being set"
     );
 }
 
@@ -881,6 +1252,7 @@ fn count_per_file_returns_correct_counts() {
         debug: false,
         invert: false,
         files_with_matches: false,
+        files_without_match: false,
         count_per_file: true,
         include_pattern: None,
         exclude_patterns: Vec::new(),
@@ -940,6 +1312,7 @@ fn count_per_file_emits_result_for_every_file() {
         debug: false,
         invert: false,
         files_with_matches: false,
+        files_without_match: false,
         count_per_file: true,
         include_pattern: None,
         exclude_patterns: Vec::new(),
@@ -1001,6 +1374,7 @@ fn invert_with_count_counts_non_matching_lines() {
         debug: false,
         invert: true,
         files_with_matches: false,
+        files_without_match: false,
         count_per_file: true,
         include_pattern: None,
         exclude_patterns: Vec::new(),
@@ -1064,6 +1438,7 @@ fn invert_with_files_with_matches_returns_files_with_a_non_matching_line() {
         debug: false,
         invert: true,
         files_with_matches: true,
+        files_without_match: false,
         count_per_file: false,
         include_pattern: None,
         exclude_patterns: Vec::new(),
@@ -1125,6 +1500,7 @@ fn invert_with_context_builds_context_around_inverted_matches() {
         debug: false,
         invert: true,
         files_with_matches: false,
+        files_without_match: false,
         count_per_file: false,
         include_pattern: None,
         exclude_patterns: Vec::new(),
@@ -1193,6 +1569,7 @@ fn include_pattern_searches_only_matching_files() {
         debug: false,
         invert: false,
         files_with_matches: false,
+        files_without_match: false,
         count_per_file: false,
         include_pattern: Some(Pattern::new("*.rs").unwrap()),
         exclude_patterns: Vec::new(),
@@ -1240,6 +1617,7 @@ fn include_pattern_no_files_match_returns_empty() {
         debug: false,
         invert: false,
         files_with_matches: false,
+        files_without_match: false,
         count_per_file: false,
         include_pattern: Some(Pattern::new("*.txt").unwrap()),
         exclude_patterns: Vec::new(),
@@ -1283,6 +1661,7 @@ fn include_wildcard_matches_all_files() {
         debug: false,
         invert: false,
         files_with_matches: false,
+        files_without_match: false,
         count_per_file: false,
         include_pattern: None,
         exclude_patterns: Vec::new(),
@@ -1311,6 +1690,7 @@ fn include_wildcard_matches_all_files() {
         debug: false,
         invert: false,
         files_with_matches: false,
+        files_without_match: false,
         count_per_file: false,
         include_pattern: Some(Pattern::new("*").unwrap()),
         exclude_patterns: Vec::new(),
@@ -1371,6 +1751,7 @@ fn before_context_includes_leading_lines() {
         debug: false,
         invert: false,
         files_with_matches: false,
+        files_without_match: false,
         count_per_file: false,
         include_pattern: None,
         exclude_patterns: Vec::new(),
@@ -1428,6 +1809,7 @@ fn after_context_includes_trailing_lines() {
         debug: false,
         invert: false,
         files_with_matches: false,
+        files_without_match: false,
         count_per_file: false,
         include_pattern: None,
         exclude_patterns: Vec::new(),
@@ -1488,6 +1870,7 @@ fn context_both_and_group_separator() {
         debug: false,
         invert: false,
         files_with_matches: false,
+        files_without_match: false,
         count_per_file: false,
         include_pattern: None,
         exclude_patterns: Vec::new(),
@@ -1554,6 +1937,7 @@ fn query_is_a_regex_by_default() {
         debug: false,
         invert: false,
         files_with_matches: false,
+        files_without_match: false,
         count_per_file: false,
         include_pattern: None,
         exclude_patterns: Vec::new(),
@@ -1604,6 +1988,7 @@ fn fixed_strings_mode_matches_literally() {
         debug: false,
         invert: false,
         files_with_matches: false,
+        files_without_match: false,
         count_per_file: false,
         include_pattern: None,
         exclude_patterns: Vec::new(),
@@ -1666,6 +2051,7 @@ fn whole_word_matches_only_word_boundaries() {
         debug: false,
         invert: false,
         files_with_matches: false,
+        files_without_match: false,
         count_per_file: false,
         include_pattern: None,
         exclude_patterns: Vec::new(),
@@ -1718,6 +2104,7 @@ fn whole_line_matches_only_exact_line() {
         debug: false,
         invert: false,
         files_with_matches: false,
+        files_without_match: false,
         count_per_file: false,
         include_pattern: None,
         exclude_patterns: Vec::new(),
@@ -1765,6 +2152,7 @@ fn quiet_mode_produces_no_output() {
         debug: false,
         invert: false,
         files_with_matches: false,
+        files_without_match: false,
         count_per_file: false,
         include_pattern: None,
         exclude_patterns: Vec::new(),
@@ -1811,6 +2199,7 @@ fn quiet_mode_with_no_matches_reports_zero() {
         debug: false,
         invert: false,
         files_with_matches: false,
+        files_without_match: false,
         count_per_file: false,
         include_pattern: None,
         exclude_patterns: Vec::new(),
@@ -1850,6 +2239,7 @@ fn only_matching_emits_one_row_per_occurrence() {
         debug: false,
         invert: false,
         files_with_matches: false,
+        files_without_match: false,
         count_per_file: false,
         include_pattern: None,
         exclude_patterns: Vec::new(),
@@ -1896,6 +2286,7 @@ fn count_per_file_takes_priority_over_only_matching() {
         debug: false,
         invert: false,
         files_with_matches: false,
+        files_without_match: false,
         count_per_file: true,
         include_pattern: None,
         exclude_patterns: Vec::new(),
@@ -1936,6 +2327,7 @@ fn max_count_stops_after_n_matching_lines() {
         debug: false,
         invert: false,
         files_with_matches: false,
+        files_without_match: false,
         count_per_file: false,
         include_pattern: None,
         exclude_patterns: Vec::new(),
@@ -1975,6 +2367,7 @@ fn max_count_caps_the_count_per_file_total() {
         debug: false,
         invert: false,
         files_with_matches: false,
+        files_without_match: false,
         count_per_file: true,
         include_pattern: None,
         exclude_patterns: Vec::new(),
@@ -2017,6 +2410,7 @@ fn max_count_with_only_matching_counts_lines_not_occurrences() {
         debug: false,
         invert: false,
         files_with_matches: false,
+        files_without_match: false,
         count_per_file: false,
         include_pattern: None,
         exclude_patterns: Vec::new(),
@@ -2057,6 +2451,7 @@ fn max_count_still_flushes_trailing_context() {
         debug: false,
         invert: false,
         files_with_matches: false,
+        files_without_match: false,
         count_per_file: false,
         include_pattern: None,
         exclude_patterns: Vec::new(),
@@ -2102,6 +2497,7 @@ fn exclude_skips_matching_files() {
         debug: false,
         invert: false,
         files_with_matches: false,
+        files_without_match: false,
         count_per_file: false,
         include_pattern: None,
         exclude_patterns: vec![Pattern::new("*.min.js").unwrap()],
@@ -2146,6 +2542,7 @@ fn exclude_wins_over_include_on_overlap() {
         debug: false,
         invert: false,
         files_with_matches: false,
+        files_without_match: false,
         count_per_file: false,
         // Both --include and --exclude match "a.txt" here.
         include_pattern: Some(Pattern::new("*.txt").unwrap()),
@@ -2187,6 +2584,7 @@ fn exclude_dir_glob_skips_matching_directories() {
         debug: false,
         invert: false,
         files_with_matches: false,
+        files_without_match: false,
         count_per_file: false,
         include_pattern: None,
         exclude_patterns: Vec::new(),

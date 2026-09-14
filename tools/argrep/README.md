@@ -4,13 +4,13 @@ Fast parallel text search utility — a drop-in alternative to `grep`.
 
 ## Installation
 
-```bash
+```
 curl -fsSL https://artools.io/install.sh | bash -s -- argrep
 ```
 
 Or build from source:
 
-```bash
+```
 cargo build --release --bin argrep
 ```
 
@@ -22,21 +22,21 @@ argrep [OPTIONS] QUERY [PATH]
 
 `QUERY` is required and is matched as a **regular expression** by default (Rust's [`regex`](https://docs.rs/regex) crate — a similar dialect to `grep -E`/PCRE, without backreferences or lookaround). Use `-F`/`--fixed-strings` to search for `QUERY` literally instead, e.g. when it contains characters like `.`, `*`, `(` that you don't want interpreted as regex syntax:
 
-```bash
+```
 argrep -F 'foo.bar' .          # matches the literal text "foo.bar"
 argrep -F 'connection refused' /var/log
 ```
 
 Use `-w`/`--word-regexp` to only match whole words (the pattern is wrapped in `\b(?:...)\b`), and `-x`/`--line-regexp` to only match whole lines (wrapped in `^(?:...)$`) — same semantics as `grep -w`/`grep -x`:
 
-```bash
+```
 argrep -w cat .                # matches "cat" and "the cat sat", not "category"
 argrep -x ERROR .              # matches a line that is exactly "ERROR", not "ERROR: disk full"
 ```
 
 Use `-q`/`--quiet` to suppress all output and rely on the exit code alone — the search stops as soon as one match is found instead of scanning the rest of the tree, and (unlike the tool's default exit-code contract below) follows grep's own convention: `0` = at least one match, `1` = no match, `2` = a CLI/config error occurred:
 
-```bash
+```
 if argrep -q 'TODO' src/; then
   echo "TODO found"
 fi
@@ -44,7 +44,7 @@ fi
 
 Use `-o`/`--only-matching` to print only the matched text instead of the whole line — same as `grep -o`. Each occurrence gets its own output line, so a line with multiple matches prints multiple lines:
 
-```bash
+```
 echo 'foo bar foo' | argrep -o 'foo'
 # foo
 # foo
@@ -60,7 +60,7 @@ How `-o` interacts with other flags:
 
 Use `-m`/`--max-count` to stop searching a file after `NUM` matching lines — useful for large logs and CI, where you often just need to know *whether* something matched, not every occurrence:
 
-```bash
+```
 argrep -m 1 'panic!' src/
 ```
 
@@ -74,7 +74,7 @@ How `-m` interacts with other flags (matching GNU grep's own documented behavior
 
 Use `--exclude PATTERN` to skip files by name — the opposite of `--include`, same glob syntax, repeatable:
 
-```bash
+```
 argrep 'TODO' . --exclude '*.min.js'
 argrep 'password' . --exclude '*.lock'
 ```
@@ -85,7 +85,7 @@ If a file matches both `--include` and `--exclude`, **`--exclude` wins** — thi
 
 Use `--exclude-dir PATTERN` to skip whole directories during traversal — matched against the directory's **basename only** (not the full path), same as GNU grep's `--exclude-dir`, and applied *before* a matching directory is ever handed to a worker thread, so excluded subtrees cost no traversal time:
 
-```bash
+```
 argrep 'TODO' . --exclude-dir node_modules
 argrep 'TODO' . --exclude-dir target
 argrep 'TODO' . --exclude-dir 'build*'
@@ -99,28 +99,28 @@ Repeatable, and accepts both plain names (`node_modules`) and glob patterns (`bu
 
 ## Options
 
-| Flag                   | Short | Default | Description                                                            |
-|------------------------|-------|---------|------------------------------------------------------------------------|
-| `--ignore-case`        | `-i`  | —       | Case-insensitive matching                                              |
-| `--fixed-strings`      | `-F`  | —       | Treat QUERY as a literal string instead of a regex                     |
-| `--word-regexp`        | `-w`  | —       | Match only whole words (wraps QUERY in `\b(?:...)\b`)                  |
-| `--line-regexp`        | `-x`  | —       | Match only whole lines (wraps QUERY in `^(?:...)$`)                    |
-| `--line-number`        | `-n`  | —       | Show line numbers in output                                            |
-| `--before-context NUM` | `-B`  | —       | Show NUM lines of leading context before matches (max 100,000)         |
-| `--after-context NUM`  | `-A`  | —       | Show NUM lines of trailing context after matches (max 100,000)         |
-| `--context NUM`        | `-C`  | —       | Show NUM lines of leading and trailing context around matches (max 100,000) |
-| `--invert`             | `-v`  | —       | Print lines that do NOT match the query (conflicts with `-o`)          |
-| `--only-matching`      | `-o`  | —       | Print only the matched text, one occurrence per line (conflicts with `-v`; no effect with `-A`/`-B`/`-C`, warns) |
-| `--max-count NUM`      | `-m`  | unlimited | Stop searching a file after NUM matching lines (must be >= 1)          |
-| `--files-with-matches` | `-l`  | —       | Print only filenames of files containing a match (conflicts with `-c`) |
-| `--count`              | `-c`  | —       | Print count of matching lines per file (conflicts with `-l`)           |
-| `--include PATTERN`    | —     | —       | Only search files matching this glob (e.g. `"*.rs"`, `"*.log"`)        |
-| `--exclude PATTERN`    | —     | —       | Skip files matching this glob (e.g. `"*.min.js"`, `"*.lock"`); repeatable; wins over `--include` on overlap |
-| `--exclude-dir PATTERN` | —    | built-in defaults | Skip directories matching this name or glob (e.g. `"node_modules"`, `"build*"`), matched by basename; repeatable; alias: `--ignore` |
-| `--no-ignore`          | —     | —       | Disable the built-in directory defaults (`.git`, `node_modules`, `__pycache__`, `target`) — explicit `--exclude-dir`/`--ignore` still applies |
-| `--jobs N`             | `-j`  | CPU-aware | Number of parallel worker threads (1–128; default is half the available cores, clamped to 1–16) |
-| `--debug`              | `-d`  | —       | Print scan statistics and errors to stderr                             |
-| `--quiet`              | `-q`  | —       | No output; exit code alone reports match/no-match/error (see Exit codes below). Overrides -l/-c/-n if also set — nothing is printed either way. |
+| Flag                    | Short | Default           | Description                                                                                                                                     |
+|-------------------------|-------|-------------------|-------------------------------------------------------------------------------------------------------------------------------------------------|
+| `--ignore-case`         | `-i`  | —                 | Case-insensitive matching                                                                                                                       |
+| `--fixed-strings`       | `-F`  | —                 | Treat QUERY as a literal string instead of a regex                                                                                              |
+| `--word-regexp`         | `-w`  | —                 | Match only whole words (wraps QUERY in `\b(?:...)\b`)                                                                                           |
+| `--line-regexp`         | `-x`  | —                 | Match only whole lines (wraps QUERY in `^(?:...)$`)                                                                                             |
+| `--line-number`         | `-n`  | —                 | Show line numbers in output                                                                                                                     |
+| `--before-context NUM`  | `-B`  | —                 | Show NUM lines of leading context before matches (max 100,000)                                                                                  |
+| `--after-context NUM`   | `-A`  | —                 | Show NUM lines of trailing context after matches (max 100,000)                                                                                  |
+| `--context NUM`         | `-C`  | —                 | Show NUM lines of leading and trailing context around matches (max 100,000)                                                                     |
+| `--invert`              | `-v`  | —                 | Print lines that do NOT match the query (conflicts with `-o`)                                                                                   |
+| `--only-matching`       | `-o`  | —                 | Print only the matched text, one occurrence per line (conflicts with `-v`; no effect with `-A`/`-B`/`-C`, warns)                                |
+| `--max-count NUM`       | `-m`  | unlimited         | Stop searching a file after NUM matching lines (must be >= 1)                                                                                   |
+| `--files-with-matches`  | `-l`  | —                 | Print only filenames of files containing a match (conflicts with `-c`)                                                                          |
+| `--count`               | `-c`  | —                 | Print count of matching lines per file (conflicts with `-l`)                                                                                    |
+| `--include PATTERN`     | —     | —                 | Only search files matching this glob (e.g. `"*.rs"`, `"*.log"`)                                                                                 |
+| `--exclude PATTERN`     | —     | —                 | Skip files matching this glob (e.g. `"*.min.js"`, `"*.lock"`); repeatable; wins over `--include` on overlap                                     |
+| `--exclude-dir PATTERN` | —     | built-in defaults | Skip directories matching this name or glob (e.g. `"node_modules"`, `"build*"`), matched by basename; repeatable; alias: `--ignore`             |
+| `--no-ignore`           | —     | —                 | Disable the built-in directory defaults (`.git`, `node_modules`, `__pycache__`, `target`) — explicit `--exclude-dir`/`--ignore` still applies   |
+| `--jobs N`              | `-j`  | CPU-aware         | Number of parallel worker threads (1–128; default is half the available cores, clamped to 1–16)                                                 |
+| `--debug`               | `-d`  | —                 | Print scan statistics and errors to stderr                                                                                                      |
+| `--quiet`               | `-q`  | —                 | No output; exit code alone reports match/no-match/error (see Exit codes below). Overrides -l/-c/-n if also set — nothing is printed either way. |
 
 `-l` and `-c` cannot be combined — they imply different output shapes (`filename` vs `filename: count`), so combining them (`argrep foo . -c -l`) is a CLI error rather than one silently overriding the other.
 
@@ -145,7 +145,7 @@ Text files with invalid UTF-8 (a stray byte from a legacy encoding, a corrupted 
 
 ### Basic search
 
-```bash
+```
 # Search for a term in current directory
 argrep "TODO" .
 
@@ -158,7 +158,7 @@ argrep "todo" ./src -i -n
 
 ### Filtering
 
-```bash
+```
 # Only search Rust files
 argrep "unwrap" . --include "*.rs"
 
@@ -171,7 +171,7 @@ argrep "panic" . --include "*.rs" -n -i
 
 ### Output modes
 
-```bash
+```
 # List only filenames that contain a match
 argrep "TODO" . -l
 
@@ -186,7 +186,7 @@ argrep "ok" ./results.txt -v
 
 When piped from another command, `argrep` reads from stdin automatically:
 
-```bash
+```
 # Filter process list
 ps aux | argrep "rust"
 
@@ -202,7 +202,7 @@ cat app.log | argrep "panic" -c
 
 ### Combined flags
 
-```bash
+```
 # Find files containing TODOs, case-insensitive, Rust files only
 argrep "todo" . -i -l --include "*.rs"
 
@@ -215,27 +215,27 @@ argrep "deprecated" /large/project -j 8 --include "*.py" -n
 
 ## Comparison with `grep`
 
-| Task              | `grep`                               | `argrep`                            |
-|-------------------|--------------------------------------|-------------------------------------|
-| Recursive search  | `grep -r "query" .`                  | `argrep "query" .`                  |
-| Case-insensitive  | `grep -ri "query" .`                 | `argrep "query" . -i`               |
-| Fixed string      | `grep -rF "query" .`                 | `argrep "query" . -F`               |
-| Whole word        | `grep -rw "query" .`                 | `argrep "query" . -w`               |
-| Whole line        | `grep -rx "query" .`                 | `argrep "query" . -x`               |
-| Quiet (exit code only) | `grep -rq "query" .`            | `argrep "query" . -q`               |
-| Only matched text | `grep -rho "query" .`                | `argrep "query" . -o`               |
-| Limit matches     | `grep -rm 1 "query" .`               | `argrep "query" . -m 1`             |
-| Exclude files     | `grep -r --exclude='*.min.js' "query" .` | `argrep "query" . --exclude '*.min.js'` |
-| Exclude directories | `grep -r --exclude-dir=node_modules "query" .` | `argrep "query" . --exclude-dir node_modules` |
-| Show line numbers | `grep -rn "query" .`                 | `argrep "query" . -n`               |
-| Context lines     | `grep -C 2 "query" .`                | `argrep "query" . -C 2`             |
-| Files only        | `grep -rl "query" .`                 | `argrep "query" . -l`               |
-| Count per file    | `grep -rc "query" .`                 | `argrep "query" . -c`               |
-| Invert match      | `grep -rv "query" .`                 | `argrep "query" . -v`               |
-| File type filter  | `grep -r --include="*.rs"`           | `argrep "query" . --include "*.rs"` |
-| Skip binary files | `grep -rI "query" .`                 | automatic                           |
-| Skip node_modules | `grep -r --exclude-dir=node_modules` | automatic                           |
-| Pipe from stdin   | `cmd \| grep "query"`                | `cmd \| argrep "query"`             |
+| Task                   | `grep`                                         | `argrep`                                      |
+|------------------------|------------------------------------------------|-----------------------------------------------|
+| Recursive search       | `grep -r "query" .`                            | `argrep "query" .`                            |
+| Case-insensitive       | `grep -ri "query" .`                           | `argrep -i "query" .`                         |
+| Fixed string           | `grep -rF "query" .`                           | `argrep -F "query" .`                         |
+| Whole word             | `grep -rw "query" .`                           | `argrep -w "query" .`                         |
+| Whole line             | `grep -rx "query" .`                           | `argrep -x "query" .`                         |
+| Quiet (exit code only) | `grep -rq "query" .`                           | `argrep -q "query" .`                         |
+| Only matched text      | `grep -rho "query" .`                          | `argrep -o "query" .`                         |
+| Limit matches          | `grep -rm 1 "query" .`                         | `argrep -m 1 "query" .`                       |
+| Exclude files          | `grep -r --exclude='*.min.js' "query" .`       | `argrep --exclude '*.min.js' "query" .`       |
+| Exclude directories    | `grep -r --exclude-dir=node_modules "query" .` | `argrep --exclude-dir node_modules "query" .` |
+| Show line numbers      | `grep -rn "query" .`                           | `argrep -n "query" .`                         |
+| Context lines          | `grep -C 2 "query" .`                          | `argrep -C 2 "query" .`                       |
+| Files only             | `grep -rl "query" .`                           | `argrep -l "query" .`                         |
+| Count per file         | `grep -rc "query" .`                           | `argrep -c "query" .`                         |
+| Invert match           | `grep -rv "query" .`                           | `argrep -v "query" .`                         |
+| File type filter       | `grep -r --include="*.rs" "query" .`           | `argrep --include "*.rs" "query" .`           |
+| Skip binary files      | `grep -rI "query" .`                           | automatic                                     |
+| Skip node_modules      | `grep -r --exclude-dir=node_modules`           | automatic                                     |
+| Pipe from stdin        | `cmd \| grep "query"`                          | `cmd \| argrep "query"`                       |
 
 ## Key advantages over `grep`
 
@@ -247,18 +247,18 @@ argrep "deprecated" /large/project -j 8 --include "*.py" -n
 
 ## Exit codes
 
-| Code | Meaning                                                                                                                       |
-|------|-------------------------------------------------------------------------------------------------------------------------------|
-| `0`  | Success — every file was read, matches or not                                                                                 |
+| Code | Meaning                                                                                                                                                 |
+| ---- | ------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `0`  | Success — every file was read, matches or not                                                                                                           |
 | `1`  | A file or directory could not be read (permission denied, I/O error), an invalid regex `QUERY`, or another config error (e.g. invalid `--include` glob) |
-| `2`  | Invalid CLI usage — bad or missing flag (e.g. `-j 0`, missing `QUERY`)                                                        |
+| `2`  | Invalid CLI usage — bad or missing flag (e.g. `-j 0`, missing `QUERY`)                                                                                  |
 
 A nonzero exit from an unreadable file doesn't mean the search stopped: every file that *could* be read is still searched and its matches printed. Run with `--debug` to see which paths failed and why; without it you still get a one-line summary and the nonzero exit code, so it can't be mistaken for "no matches found".
 
 **With `-q`/`--quiet`, the exit-code meaning changes** to match grep's own convention instead of the table above:
 
-| Code | Meaning (only when `-q` is set)        |
-|------|-----------------------------------------|
-| `0`  | At least one match was found            |
-| `1`  | No matches were found (no error)        |
+| Code | Meaning (only when `-q` is set)                                                                    |
+|------|----------------------------------------------------------------------------------------------------|
+| `0`  | At least one match was found                                                                       |
+| `1`  | No matches were found (no error)                                                                   |
 | `2`  | An error occurred — invalid regex, invalid `--include` glob, or a file/directory could not be read |

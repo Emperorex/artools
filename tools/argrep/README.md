@@ -58,6 +58,20 @@ How `-o` interacts with other flags:
 - **`-v`**: rejected as a CLI error (`-o` and `-v` can't be combined) — `-v` selects whole lines that *don't* contain a match, so there'd be nothing for `-o` to extract.
 - **`-A`/`-B`/`-C`**: have no effect and print a warning, same as GNU grep — context doesn't make sense when only the matched fragment (not the surrounding line) is being printed.
 
+Use `-L`/`--files-without-match` to print only the files that contain **no** match at all — the opposite of `-l`. Useful for finding files missing a required header, checking a migration is complete, CI checks, or spotting files that don't yet conform to a rule:
+
+```
+argrep -L 'TODO' src/
+```
+
+How `-L` interacts with other flags:
+
+- **`-l`**: rejected as a CLI error — a file can't be reported as both "has a match" and "has no match", so the two are mutually exclusive.
+- **`-c`**: rejected as a CLI error, same reasoning as `-l`/`-c` above — `-L` stops reading a file the moment it finds *any* match, so it never finishes counting matches in files that do have one, and a per-line count is meaningless for files that have none.
+- **`-q`**: prints nothing either way, exit code only — same as every other output mode under `-q`. No exit-code special case is needed: `-q`'s exit status already reflects "was any line matched anywhere," which is independent of `-l`/`-L`.
+- **Unreadable files**: never reported by `-L`, in either direction. A file that fails to open isn't counted as "no match" (it was never actually searched), and neither is a file that fails partway through a read — only files that are opened successfully and read to EOF with zero matches are reported.
+- **`-v`**: not rejected — combining them means "files where every selected line matched", i.e. files with zero non-matching lines. A narrow but coherent combination, so it's allowed rather than forbidden.
+
 Use `-m`/`--max-count` to stop searching a file after `NUM` matching lines — useful for large logs and CI, where you often just need to know *whether* something matched, not every occurrence:
 
 ```
@@ -112,8 +126,9 @@ Repeatable, and accepts both plain names (`node_modules`) and glob patterns (`bu
 | `--invert`              | `-v`  | —                 | Print lines that do NOT match the query (conflicts with `-o`)                                                                                   |
 | `--only-matching`       | `-o`  | —                 | Print only the matched text, one occurrence per line (conflicts with `-v`; no effect with `-A`/`-B`/`-C`, warns)                                |
 | `--max-count NUM`       | `-m`  | unlimited         | Stop searching a file after NUM matching lines (must be >= 1)                                                                                   |
-| `--files-with-matches`  | `-l`  | —                 | Print only filenames of files containing a match (conflicts with `-c`)                                                                          |
-| `--count`               | `-c`  | —                 | Print count of matching lines per file (conflicts with `-l`)                                                                                    |
+| `--files-with-matches`  | `-l`  | —                 | Print only filenames of files containing a match (conflicts with `-c`, `-L`)                                                                    |
+| `--files-without-match` | `-L`  | —                 | Print only filenames of files containing NO match (conflicts with `-l`, `-c`)                                                                   |
+| `--count`               | `-c`  | —                 | Print count of matching lines per file (conflicts with `-l`, `-L`)                                                                              |
 | `--include PATTERN`     | —     | —                 | Only search files matching this glob (e.g. `"*.rs"`, `"*.log"`)                                                                                 |
 | `--exclude PATTERN`     | —     | —                 | Skip files matching this glob (e.g. `"*.min.js"`, `"*.lock"`); repeatable; wins over `--include` on overlap                                     |
 | `--exclude-dir PATTERN` | —     | built-in defaults | Skip directories matching this name or glob (e.g. `"node_modules"`, `"build*"`), matched by basename; repeatable; alias: `--ignore`             |
@@ -122,7 +137,7 @@ Repeatable, and accepts both plain names (`node_modules`) and glob patterns (`bu
 | `--debug`               | `-d`  | —                 | Print scan statistics and errors to stderr                                                                                                      |
 | `--quiet`               | `-q`  | —                 | No output; exit code alone reports match/no-match/error (see Exit codes below). Overrides -l/-c/-n if also set — nothing is printed either way. |
 
-`-l` and `-c` cannot be combined — they imply different output shapes (`filename` vs `filename: count`), so combining them (`argrep foo . -c -l`) is a CLI error rather than one silently overriding the other.
+`-l`, `-L`, and `-c` cannot be combined with each other — they imply mutually incompatible output contracts (`filename` matched vs `filename` unmatched vs `filename: count`), so combining any two of them (`argrep foo . -c -l`, `argrep foo . -l -L`, etc.) is a CLI error rather than one silently overriding the other.
 
 ## Default ignores
 
@@ -180,6 +195,9 @@ argrep "error" /var/log --include "*.log" -c
 
 # Invert — show lines that don't contain the query
 argrep "ok" ./results.txt -v
+
+# List files missing a required header/marker
+argrep -L '^// SPDX-License-Identifier' . --include "*.rs"
 ```
 
 ### Stdin / pipeline mode
@@ -230,6 +248,7 @@ argrep "deprecated" /large/project -j 8 --include "*.py" -n
 | Show line numbers      | `grep -rn "query" .`                           | `argrep -n "query" .`                         |
 | Context lines          | `grep -C 2 "query" .`                          | `argrep -C 2 "query" .`                       |
 | Files only             | `grep -rl "query" .`                           | `argrep -l "query" .`                         |
+| Files without match    | `grep -rL "query" .`                           | `argrep -L "query" .`                         |
 | Count per file         | `grep -rc "query" .`                           | `argrep -c "query" .`                         |
 | Invert match           | `grep -rv "query" .`                           | `argrep -v "query" .`                         |
 | File type filter       | `grep -r --include="*.rs" "query" .`           | `argrep --include "*.rs" "query" .`           |

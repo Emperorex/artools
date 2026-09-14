@@ -55,6 +55,13 @@ pub struct SearchConfig {
     pub invert: bool,
     /// -l: print only filenames, not matching lines
     pub files_with_matches: bool,
+    /// -L: print only filenames of files that contain NO match — the
+    /// opposite of -l. Mutually exclusive with -l and -c at the CLI
+    /// level (see Args in main.rs for why). A file is reported only if
+    /// it was opened successfully, read all the way to EOF, and never
+    /// produced a single matching line; see grep_file's handling for the
+    /// exact bookkeeping.
+    pub files_without_match: bool,
     /// -c: print count of matching lines per file
     pub count_per_file: bool,
     /// --include: only search files matching this glob pattern
@@ -533,6 +540,12 @@ pub fn grep_file(
     // pending -A/-C tail, 0 if no context was requested) has been fully
     // flushed. See the check at the top of the loop below.
     let mut reached_max_count = false;
+    // -L: set if a read_until call fails partway through the file. A
+    // partial read must not be reported as "this file has no matches" —
+    // it only means the *part we managed to read* had none. Distinct
+    // from the File::open failure case above (which returns before ever
+    // reaching this point, so it's excluded from -L output automatically).
+    let mut had_io_error = false;
 
     loop {
         if reached_max_count && after_remaining == 0 {
@@ -553,6 +566,7 @@ pub fn grep_file(
             Ok(_) => {}
             Err(err) => {
                 stats.io_errors.fetch_add(1, Ordering::Relaxed);
+                had_io_error = true;
                 if config.debug {
                     eprintln!("{}: {}: {}", "argrep".red(), file_path.display(), err);
                 }
@@ -608,6 +622,12 @@ pub fn grep_file(
                     is_context: false,
                     is_separator: false,
                 });
+                break;
+            } else if config.files_without_match {
+                // -L: this file just produced a match, so it's
+                // disqualified from "no match" output. Nothing to emit —
+                // stop reading; the rest of the file's content is
+                // irrelevant to -L either way.
                 break;
             } else if !config.count_per_file {
                 if config.only_matching {
@@ -690,7 +710,11 @@ pub fn grep_file(
             {
                 reached_max_count = true;
             }
-        } else if has_context && !config.count_per_file && !config.files_with_matches {
+        } else if has_context
+            && !config.count_per_file
+            && !config.files_with_matches
+            && !config.files_without_match
+        {
             if after_remaining > 0 {
                 let _ = output_tx.send(MatchResult {
                     file_path: file_path.to_path_buf(),
@@ -720,6 +744,26 @@ pub fn grep_file(
             line_num: 0,
             line_content: String::new(),
             count: Some(match_count),
+            is_context: false,
+            is_separator: false,
+        });
+    }
+
+    // -L: only reached if the loop ran all the way to EOF without the
+    // early-exit break above — i.e. every line was read and none of them
+    // matched. `had_io_error` additionally guards against a mid-file read
+    // failure being mistaken for "the rest of the file had no matches"
+    // (a file that failed to open at all never reaches this point in the
+    // first place, so that case is already excluded). -q suppresses this
+    // like every other output path; the file's outcome still feeds into
+    // the same global matched_lines/exit-code contract as everything
+    // else, so -q + -L needs no special-cased exit code.
+    if config.files_without_match && !config.quiet && match_count == 0 && !had_io_error {
+        let _ = output_tx.send(MatchResult {
+            file_path: file_path.to_path_buf(),
+            line_num: 0,
+            line_content: String::new(),
+            count: None,
             is_context: false,
             is_separator: false,
         });

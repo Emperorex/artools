@@ -111,6 +111,24 @@ Repeatable, and accepts both plain names (`node_modules`) and glob patterns (`bu
 
 `argrep` also reads from **stdin** when used in a pipeline — no path argument needed.
 
+Use `--hidden` to search hidden files and directories (names starting with `.`, e.g. `.env`, `.github`, `.config`) that are skipped by default:
+
+```
+argrep 'TODO' . --hidden
+```
+
+**`--hidden` and `--no-ignore` are independent filtering layers**, same as `ripgrep`: "hidden" (dot-prefixed name) and "ignored" (matched by a `.gitignore`/`.ignore` pattern, or one of the built-in default-ignored directory names) are different concepts, and a path can be one, the other, both, or neither.
+
+- `--hidden` alone reveals dotfiles and dot-directories, but `.git`'s contents stay excluded — `.git` is also one of the built-in default-ignored directories, a separate layer `--hidden` doesn't touch.
+- `--no-ignore` alone disables `.gitignore`/`.ignore` rules and the built-in defaults, but still skips dotfiles — that's `--hidden`'s job, not `--no-ignore`'s.
+- To search literally everything, including `.git`'s own contents, combine both:
+
+```
+argrep 'TODO' . --hidden --no-ignore
+```
+
+A hidden path given directly as `PATH` (e.g. `argrep 'TODO' .config`) is always searched regardless of `--hidden` — the flag only affects paths *discovered* while walking a directory, the same convention `grep`/`ripgrep` use for explicitly-named arguments.
+
 ## Options
 
 | Flag                    | Short | Default           | Description                                                                                                                                     |
@@ -133,6 +151,7 @@ Repeatable, and accepts both plain names (`node_modules`) and glob patterns (`bu
 | `--exclude PATTERN`     | —     | —                 | Skip files matching this glob (e.g. `"*.min.js"`, `"*.lock"`); repeatable; wins over `--include` on overlap                                     |
 | `--exclude-dir PATTERN` | —     | built-in defaults | Skip directories matching this name or glob (e.g. `"node_modules"`, `"build*"`), matched by basename; repeatable; alias: `--ignore`             |
 | `--no-ignore`           | —     | —                 | Disable the built-in directory defaults (`.git`, `node_modules`, `__pycache__`, `target`) — explicit `--exclude-dir`/`--ignore` still applies   |
+| `--hidden`              | —     | —                 | Search hidden files/directories (dot-prefixed names), independent of `--no-ignore` (see Usage above)                                            |
 | `--jobs N`              | `-j`  | CPU-aware         | Number of parallel worker threads (1–128; default is half the available cores, clamped to 1–16)                                                 |
 | `--debug`               | `-d`  | —                 | Print scan statistics and errors to stderr                                                                                                      |
 | `--quiet`               | `-q`  | —                 | No output; exit code alone reports match/no-match/error (see Exit codes below). Overrides -l/-c/-n if also set — nothing is printed either way. |
@@ -148,7 +167,7 @@ The following directories are always skipped:
 - `__pycache__`
 - `target`
 
-Hidden files and directories (names starting with `.`) are also skipped by default.
+Hidden files and directories (names starting with `.`) are also skipped by default — pass `--hidden` to include them (see Usage above for how this interacts with `--no-ignore`).
 
 ## Binary file handling
 
@@ -182,6 +201,12 @@ argrep "error" /var/log --include "*.log"
 
 # Search multiple levels with specific extension
 argrep "panic" . --include "*.rs" -n -i
+
+# Search hidden config files too
+argrep "API_KEY" . --hidden --include ".env*"
+
+# Search absolutely everything, including .git's own contents
+argrep "TODO" . --hidden --no-ignore
 ```
 
 ### Output modes
@@ -249,6 +274,7 @@ argrep "deprecated" /large/project -j 8 --include "*.py" -n
 | Context lines          | `grep -C 2 "query" .`                          | `argrep -C 2 "query" .`                       |
 | Files only             | `grep -rl "query" .`                           | `argrep -l "query" .`                         |
 | Files without match    | `grep -rL "query" .`                           | `argrep -L "query" .`                         |
+| Search hidden files    | `grep -r "query" .` (no flag needed) *         | `argrep --hidden "query" .`                   |
 | Count per file         | `grep -rc "query" .`                           | `argrep -c "query" .`                         |
 | Invert match           | `grep -rv "query" .`                           | `argrep -v "query" .`                         |
 | File type filter       | `grep -r --include="*.rs" "query" .`           | `argrep --include "*.rs" "query" .`           |
@@ -256,11 +282,13 @@ argrep "deprecated" /large/project -j 8 --include "*.py" -n
 | Skip node_modules      | `grep -r --exclude-dir=node_modules`           | automatic                                     |
 | Pipe from stdin        | `cmd \| grep "query"`                          | `cmd \| argrep "query"`                       |
 
+\* GNU `grep` never skips dotfiles on its own — `argrep` does, by default, so `--hidden` is the flag that makes it behave like plain `grep` in this one respect.
+
 ## Key advantages over `grep`
 
 - **Parallel traversal** — scales with CPU cores, significantly faster on large codebases
 - **Binary skipping** — no `-I` flag needed, binaries are automatically detected and skipped
-- **Smart ignores** — `target/`, `node_modules/`, `.git/` skipped automatically
+- **Smart ignores** — `target/`, `node_modules/`, `.git/`, and dotfiles skipped automatically (opt back in with `--no-ignore` and/or `--hidden`)
 - **stdin support** — works as a drop-in in pipes without any special flags
 - **Colored output** — matched filenames in magenta, line numbers in green, query highlighted in red
 

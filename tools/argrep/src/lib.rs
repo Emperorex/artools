@@ -77,6 +77,16 @@ pub struct SearchConfig {
     pub after_context: usize,
     /// Do not respect .gitignore / .ignore files (search everything)
     pub respect_gitignore: bool,
+    /// --hidden: search hidden files and directories (dotfiles) that are
+    /// skipped by default. Independent of `respect_gitignore` — this is a
+    /// separate filtering layer, same as ripgrep: "hidden" (dot-prefixed
+    /// name) and "ignored" (matched by a .gitignore/.ignore pattern) are
+    /// different concepts, and a file can be one, the other, both, or
+    /// neither. Only affects entries *discovered* while walking a
+    /// directory; a hidden path given directly on the command line as the
+    /// search root is always searched regardless of this flag, since it
+    /// never goes through the per-entry hidden check in scan_and_grep.
+    pub hidden: bool,
     /// -q: suppress all output; only the exit code matters. Search stops
     /// as soon as one match is found (see grep_file/scan_and_grep/the
     /// worker loop in parallel_grep for the early-exit checkpoints).
@@ -420,8 +430,8 @@ pub fn scan_and_grep(
         let os_file_name = entry.file_name();
         let file_name = os_file_name.to_string_lossy();
 
-        if file_name.starts_with('.') {
-            continue; // Skip hidden files/folders by default
+        if !config.hidden && file_name.starts_with('.') {
+            continue; // Skip hidden files/folders by default (--hidden overrides)
         }
 
         let entry_path = entry.path();

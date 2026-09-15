@@ -211,6 +211,16 @@ struct Args {
     /// Do not respect .gitignore / .ignore files (search everything)
     #[arg(long = "no-ignore")]
     no_ignore: bool,
+
+    /// Search hidden files and directories (names starting with `.`) that
+    /// are skipped by default. Independent of --no-ignore: hidden-ness and
+    /// gitignore rules are separate filters (same as ripgrep), so a hidden
+    /// but not-gitignored file needs only --hidden, and a non-hidden but
+    /// gitignored file needs only --no-ignore. To search everything —
+    /// including .git's own contents — combine both:
+    /// `argrep --hidden --no-ignore pattern .`
+    #[arg(long = "hidden")]
+    hidden: bool,
 }
 
 /// Splits `--exclude-dir`/`--ignore` entries (plus the built-in defaults,
@@ -338,6 +348,7 @@ fn main() {
         before_context,
         after_context,
         respect_gitignore,
+        hidden: args.hidden,
         quiet: args.quiet,
         only_matching: args.only_matching,
         max_count: args.max_count.map(|v| v as usize),
@@ -876,6 +887,43 @@ mod tests {
         );
         assert!(names.contains("node_modules"));
         assert_eq!(patterns.len(), 1);
+    }
+
+    // ── --hidden ────────────────────────────────────────────────────────────
+    // Independent of --no-ignore at the CLI level too: no conflicts_with in
+    // either direction, since --hidden lifts the dot-prefix check and
+    // --no-ignore lifts gitignore/DEFAULT_IGNORES filtering — two different
+    // layers that are meant to be combined (see the doc comment on the
+    // Args::hidden field for the "search literally everything" case).
+
+    #[test]
+    fn hidden_flag_defaults_to_false() {
+        let args = Args::try_parse_from(["argrep", "foo", "."]).unwrap();
+        assert!(!args.hidden);
+    }
+
+    #[test]
+    fn hidden_flag_is_parsed() {
+        let args = Args::try_parse_from(["argrep", "foo", ".", "--hidden"]).unwrap();
+        assert!(args.hidden);
+    }
+
+    #[test]
+    fn hidden_and_no_ignore_can_be_combined() {
+        let args = Args::try_parse_from(["argrep", "foo", ".", "--hidden", "--no-ignore"]).unwrap();
+        assert!(args.hidden);
+        assert!(args.no_ignore);
+    }
+
+    #[test]
+    fn hidden_does_not_imply_no_ignore() {
+        let args = Args::try_parse_from(["argrep", "foo", ".", "--hidden"]).unwrap();
+        assert!(args.hidden);
+        assert!(
+            !args.no_ignore,
+            "--hidden alone must not also set --no-ignore — they're \
+             separate filtering layers"
+        );
     }
 
     // ── -F / --fixed-strings ─────────────────────────────────────────────────

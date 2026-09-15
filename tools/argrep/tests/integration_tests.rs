@@ -55,6 +55,7 @@ fn default_config(query: &str, ignore_case: bool) -> std::sync::Arc<argrep::Sear
         before_context: 0,
         after_context: 0,
         respect_gitignore: true,
+        hidden: false,
         quiet: false,
         only_matching: false,
         max_count: None,
@@ -449,6 +450,159 @@ fn hidden_directories_are_skipped() {
     assert!(names.is_empty());
 }
 
+// ── --hidden ─────────────────────────────────────────────────────────────────
+//
+// --hidden is a separate filtering layer from --no-ignore/respect_gitignore,
+// same as ripgrep: "hidden" (dot-prefixed name) and "ignored" (matched by a
+// gitignore pattern, or one of the built-in DEFAULT_IGNORES names like
+// .git) are independent concepts. These tests lock in that independence in
+// both directions, plus the "explicit root path bypasses the check
+// entirely" contract documented on SearchConfig::hidden.
+
+fn hidden_config(query: &str, hidden: bool, no_ignore: bool) -> StdArc<SearchConfig> {
+    let ignore_dirs: HashSet<String> = if no_ignore {
+        HashSet::new()
+    } else {
+        DEFAULT_IGNORES.iter().map(|s| s.to_string()).collect()
+    };
+    StdArc::new(SearchConfig {
+        regex: build_matcher(query, MatchOptions::default()).unwrap(),
+        query: query.to_string(),
+        ignore_case: false,
+        line_number: false,
+        ignore_dirs,
+        ignore_dir_patterns: Vec::new(),
+        debug: false,
+        invert: false,
+        files_with_matches: false,
+        files_without_match: false,
+        count_per_file: false,
+        include_pattern: None,
+        exclude_patterns: Vec::new(),
+        before_context: 0,
+        after_context: 0,
+        respect_gitignore: !no_ignore,
+        hidden,
+        quiet: false,
+        only_matching: false,
+        max_count: None,
+    })
+}
+
+fn run(root: PathBuf, config: StdArc<SearchConfig>) -> Vec<String> {
+    let results: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let r = Arc::clone(&results);
+    parallel_grep(root, 4, config, SearchStats::new(), move |item| {
+        r.lock().unwrap().push(
+            item.file_path
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .to_string(),
+        );
+    });
+    let mut names = results.lock().unwrap().clone();
+    names.sort();
+    names
+}
+
+#[test]
+fn hidden_flag_includes_hidden_files() {
+    let (_dir, root) = make_tree(&[
+        (".secret", "needle inside hidden file\n"),
+        ("visible.txt", "needle in visible file\n"),
+    ]);
+    let names = run(root, hidden_config("needle", true, false));
+    assert_eq!(
+        names,
+        vec![".secret", "visible.txt"],
+        "--hidden must include dotfiles that are skipped by default"
+    );
+}
+
+#[test]
+fn hidden_flag_includes_hidden_directories() {
+    let (_dir, root) = make_tree(&[
+        (".hidden/file.txt", "needle in hidden dir\n"),
+        ("visible.txt", "nothing here\n"),
+    ]);
+    let names = run(root, hidden_config("needle", true, false));
+    assert_eq!(
+        names,
+        vec!["file.txt"],
+        "--hidden must walk into dot-prefixed directories, not just \
+         dot-prefixed files"
+    );
+}
+
+#[test]
+fn hidden_flag_does_not_disable_default_ignore_dirs() {
+    // .git is both hidden (dot-prefixed) AND one of the built-in
+    // DEFAULT_IGNORES. --hidden alone only lifts the dot-prefix check; it
+    // must not also clear ignore_dirs. That's --no-ignore's job.
+    let (_dir, root) = make_tree(&[
+        (".git/config", "needle should stay hidden\n"),
+        ("visible.txt", "nothing here\n"),
+    ]);
+    let names = run(root, hidden_config("needle", true, false));
+    assert!(
+        names.is_empty(),
+        "--hidden by itself must not reveal .git's contents — that's a \
+         DEFAULT_IGNORES entry, a different filtering layer entirely"
+    );
+}
+
+#[test]
+fn hidden_and_no_ignore_together_reveal_everything() {
+    // The reviewer's explicit "search literally everything" case:
+    // argrep --hidden --no-ignore pattern .
+    let (_dir, root) = make_tree(&[
+        (".git/config", "needle in git config\n"),
+        (".env", "needle in dotenv\n"),
+        ("visible.txt", "needle in visible file\n"),
+    ]);
+    let names = run(root, hidden_config("needle", true, true));
+    assert_eq!(
+        names,
+        vec![".env", "config", "visible.txt"],
+        "--hidden + --no-ignore together must search everything, \
+         including .git's own contents"
+    );
+}
+
+#[test]
+fn no_ignore_alone_does_not_reveal_hidden_files() {
+    // The flip side of the above: --no-ignore only lifts gitignore/
+    // DEFAULT_IGNORES filtering, not the separate dot-prefix hidden check.
+    let (_dir, root) = make_tree(&[
+        (".secret", "needle here\n"),
+        ("visible.txt", "needle there\n"),
+    ]);
+    let names = run(root, hidden_config("needle", false, true));
+    assert_eq!(
+        names,
+        vec!["visible.txt"],
+        "--no-ignore without --hidden must still skip dotfiles"
+    );
+}
+
+#[test]
+fn explicit_hidden_root_path_is_always_searched_regardless_of_hidden_flag() {
+    // Passing a hidden directory directly as the search root (rather than
+    // discovering it while walking a parent) never goes through the
+    // per-entry hidden check in scan_and_grep — same contract as grep/
+    // ripgrep: an explicitly named path is always searched.
+    let (_dir, root_parent) = make_tree(&[(".explicit/file.txt", "needle here\n")]);
+    let hidden_root = root_parent.join(".explicit");
+    let names = run(hidden_root, hidden_config("needle", false, false));
+    assert_eq!(
+        names,
+        vec!["file.txt"],
+        "a hidden directory passed explicitly as the root must be \
+         searched even without --hidden"
+    );
+}
+
 // ── Ignore dirs ───────────────────────────────────────────────────────────────
 
 #[test]
@@ -496,6 +650,7 @@ fn custom_ignore_dir_is_excluded() {
         before_context: 0,
         after_context: 0,
         respect_gitignore: true,
+        hidden: false,
         quiet: false,
         only_matching: false,
         max_count: None,
@@ -555,6 +710,7 @@ fn stats_counts_are_accurate() {
         before_context: 0,
         after_context: 0,
         respect_gitignore: true,
+        hidden: false,
         quiet: false,
         only_matching: false,
         max_count: None,
@@ -608,6 +764,7 @@ fn multiple_workers_find_same_matches_as_single_worker() {
             before_context: 0,
             after_context: 0,
             respect_gitignore: true,
+            hidden: false,
             quiet: false,
             only_matching: false,
             max_count: None,
@@ -689,6 +846,7 @@ fn invert_returns_non_matching_lines() {
         before_context: 0,
         after_context: 0,
         respect_gitignore: true,
+        hidden: false,
         quiet: false,
         only_matching: false,
         max_count: None,
@@ -735,6 +893,7 @@ fn invert_with_no_matches_returns_all_lines() {
         before_context: 0,
         after_context: 0,
         respect_gitignore: true,
+        hidden: false,
         quiet: false,
         only_matching: false,
         max_count: None,
@@ -787,6 +946,7 @@ fn files_with_matches_returns_only_filenames() {
         before_context: 0,
         after_context: 0,
         respect_gitignore: true,
+        hidden: false,
         quiet: false,
         only_matching: false,
         max_count: None,
@@ -838,6 +998,7 @@ fn files_with_matches_emits_each_file_once() {
         before_context: 0,
         after_context: 0,
         respect_gitignore: true,
+        hidden: false,
         quiet: false,
         only_matching: false,
         max_count: None,
@@ -904,6 +1065,7 @@ fn files_without_match_returns_only_unmatched_filenames() {
         before_context: 0,
         after_context: 0,
         respect_gitignore: true,
+        hidden: false,
         quiet: false,
         only_matching: false,
         max_count: None,
@@ -959,6 +1121,7 @@ fn files_without_match_emits_nothing_when_every_file_matches() {
         before_context: 0,
         after_context: 0,
         respect_gitignore: true,
+        hidden: false,
         quiet: false,
         only_matching: false,
         max_count: None,
@@ -1017,6 +1180,7 @@ fn files_without_match_with_invert_reports_files_where_every_line_matches() {
         before_context: 0,
         after_context: 0,
         respect_gitignore: true,
+        hidden: false,
         quiet: false,
         only_matching: false,
         max_count: None,
@@ -1068,6 +1232,7 @@ fn files_without_match_stops_reading_after_first_match() {
         before_context: 0,
         after_context: 0,
         respect_gitignore: true,
+        hidden: false,
         quiet: false,
         only_matching: false,
         max_count: None,
@@ -1137,6 +1302,7 @@ fn files_without_match_excludes_unreadable_files() {
         before_context: 0,
         after_context: 0,
         respect_gitignore: true,
+        hidden: false,
         quiet: false,
         only_matching: false,
         max_count: None,
@@ -1197,6 +1363,7 @@ fn files_without_match_quiet_produces_no_output() {
         before_context: 0,
         after_context: 0,
         respect_gitignore: true,
+        hidden: false,
         quiet: true,
         only_matching: false,
         max_count: None,
@@ -1259,6 +1426,7 @@ fn count_per_file_returns_correct_counts() {
         before_context: 0,
         after_context: 0,
         respect_gitignore: true,
+        hidden: false,
         quiet: false,
         only_matching: false,
         max_count: None,
@@ -1319,6 +1487,7 @@ fn count_per_file_emits_result_for_every_file() {
         before_context: 0,
         after_context: 0,
         respect_gitignore: true,
+        hidden: false,
         quiet: false,
         only_matching: false,
         max_count: None,
@@ -1381,6 +1550,7 @@ fn invert_with_count_counts_non_matching_lines() {
         before_context: 0,
         after_context: 0,
         respect_gitignore: true,
+        hidden: false,
         quiet: false,
         only_matching: false,
         max_count: None,
@@ -1445,6 +1615,7 @@ fn invert_with_files_with_matches_returns_files_with_a_non_matching_line() {
         before_context: 0,
         after_context: 0,
         respect_gitignore: true,
+        hidden: false,
         quiet: false,
         only_matching: false,
         max_count: None,
@@ -1507,6 +1678,7 @@ fn invert_with_context_builds_context_around_inverted_matches() {
         before_context: 1,
         after_context: 1,
         respect_gitignore: true,
+        hidden: false,
         quiet: false,
         only_matching: false,
         max_count: None,
@@ -1576,6 +1748,7 @@ fn include_pattern_searches_only_matching_files() {
         before_context: 0,
         after_context: 0,
         respect_gitignore: true,
+        hidden: false,
         quiet: false,
         only_matching: false,
         max_count: None,
@@ -1624,6 +1797,7 @@ fn include_pattern_no_files_match_returns_empty() {
         before_context: 0,
         after_context: 0,
         respect_gitignore: true,
+        hidden: false,
         quiet: false,
         only_matching: false,
         max_count: None,
@@ -1668,6 +1842,7 @@ fn include_wildcard_matches_all_files() {
         before_context: 0,
         after_context: 0,
         respect_gitignore: true,
+        hidden: false,
         quiet: false,
         only_matching: false,
         max_count: None,
@@ -1697,6 +1872,7 @@ fn include_wildcard_matches_all_files() {
         before_context: 0,
         after_context: 0,
         respect_gitignore: true,
+        hidden: false,
         quiet: false,
         only_matching: false,
         max_count: None,
@@ -1758,6 +1934,7 @@ fn before_context_includes_leading_lines() {
         before_context: 2,
         after_context: 0,
         respect_gitignore: true,
+        hidden: false,
         quiet: false,
         only_matching: false,
         max_count: None,
@@ -1816,6 +1993,7 @@ fn after_context_includes_trailing_lines() {
         before_context: 0,
         after_context: 2,
         respect_gitignore: true,
+        hidden: false,
         quiet: false,
         only_matching: false,
         max_count: None,
@@ -1877,6 +2055,7 @@ fn context_both_and_group_separator() {
         before_context: 1,
         after_context: 1,
         respect_gitignore: true,
+        hidden: false,
         quiet: false,
         only_matching: false,
         max_count: None,
@@ -1944,6 +2123,7 @@ fn query_is_a_regex_by_default() {
         before_context: 0,
         after_context: 0,
         respect_gitignore: true,
+        hidden: false,
         quiet: false,
         only_matching: false,
         max_count: None,
@@ -1995,6 +2175,7 @@ fn fixed_strings_mode_matches_literally() {
         before_context: 0,
         after_context: 0,
         respect_gitignore: true,
+        hidden: false,
         quiet: false,
         only_matching: false,
         max_count: None,
@@ -2058,6 +2239,7 @@ fn whole_word_matches_only_word_boundaries() {
         before_context: 0,
         after_context: 0,
         respect_gitignore: true,
+        hidden: false,
         quiet: false,
         only_matching: false,
         max_count: None,
@@ -2111,6 +2293,7 @@ fn whole_line_matches_only_exact_line() {
         before_context: 0,
         after_context: 0,
         respect_gitignore: true,
+        hidden: false,
         quiet: false,
         only_matching: false,
         max_count: None,
@@ -2159,6 +2342,7 @@ fn quiet_mode_produces_no_output() {
         before_context: 0,
         after_context: 0,
         respect_gitignore: true,
+        hidden: false,
         quiet: true,
         only_matching: false,
         max_count: None,
@@ -2206,6 +2390,7 @@ fn quiet_mode_with_no_matches_reports_zero() {
         before_context: 0,
         after_context: 0,
         respect_gitignore: true,
+        hidden: false,
         quiet: true,
         only_matching: false,
         max_count: None,
@@ -2246,6 +2431,7 @@ fn only_matching_emits_one_row_per_occurrence() {
         before_context: 0,
         after_context: 0,
         respect_gitignore: true,
+        hidden: false,
         quiet: false,
         only_matching: true,
         max_count: None,
@@ -2293,6 +2479,7 @@ fn count_per_file_takes_priority_over_only_matching() {
         before_context: 0,
         after_context: 0,
         respect_gitignore: true,
+        hidden: false,
         quiet: false,
         only_matching: true,
         max_count: None,
@@ -2334,6 +2521,7 @@ fn max_count_stops_after_n_matching_lines() {
         before_context: 0,
         after_context: 0,
         respect_gitignore: true,
+        hidden: false,
         quiet: false,
         only_matching: false,
         max_count: Some(2),
@@ -2374,6 +2562,7 @@ fn max_count_caps_the_count_per_file_total() {
         before_context: 0,
         after_context: 0,
         respect_gitignore: true,
+        hidden: false,
         quiet: false,
         only_matching: false,
         max_count: Some(2),
@@ -2417,6 +2606,7 @@ fn max_count_with_only_matching_counts_lines_not_occurrences() {
         before_context: 0,
         after_context: 0,
         respect_gitignore: true,
+        hidden: false,
         quiet: false,
         only_matching: true,
         max_count: Some(1),
@@ -2458,6 +2648,7 @@ fn max_count_still_flushes_trailing_context() {
         before_context: 0,
         after_context: 1,
         respect_gitignore: true,
+        hidden: false,
         quiet: false,
         only_matching: false,
         max_count: Some(1),
@@ -2504,6 +2695,7 @@ fn exclude_skips_matching_files() {
         before_context: 0,
         after_context: 0,
         respect_gitignore: true,
+        hidden: false,
         quiet: false,
         only_matching: false,
         max_count: None,
@@ -2550,6 +2742,7 @@ fn exclude_wins_over_include_on_overlap() {
         before_context: 0,
         after_context: 0,
         respect_gitignore: true,
+        hidden: false,
         quiet: false,
         only_matching: false,
         max_count: None,
@@ -2591,6 +2784,7 @@ fn exclude_dir_glob_skips_matching_directories() {
         before_context: 0,
         after_context: 0,
         respect_gitignore: true,
+        hidden: false,
         quiet: false,
         only_matching: false,
         max_count: None,

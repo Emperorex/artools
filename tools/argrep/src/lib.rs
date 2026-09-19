@@ -71,6 +71,16 @@ pub struct SearchConfig {
     /// deliberate simplification of GNU grep's own order-dependent
     /// "last matching flag wins" precedence (see the README for why).
     pub exclude_patterns: Vec<Pattern>,
+    /// --type: only search files matching at least one glob from the
+    /// selected type(s)' expansion (e.g. "rust" -> "*.rs"). Empty means no
+    /// type filter is in effect. ANDed with `include_pattern` when both
+    /// are set — a file must satisfy every positive filter that's active,
+    /// same relationship ripgrep's -g/--glob and -t/--type have.
+    pub type_patterns: Vec<Pattern>,
+    /// --type-not: skip files matching any glob from the selected type(s)'
+    /// expansion. Checked alongside `exclude_patterns` (same "any negative
+    /// filter excludes, and wins over the positive filters" precedence).
+    pub type_not_patterns: Vec<Pattern>,
     /// -B: number of leading context lines before a match
     pub before_context: usize,
     /// -A: number of trailing context lines after a match
@@ -456,13 +466,19 @@ pub fn scan_and_grep(
                 ignore_stack: Arc::clone(&ignore_stack),
             });
         } else {
-            // --exclude: skip files matching any exclude glob. Checked
-            // before --include and wins on overlap — see the field doc on
-            // SearchConfig.exclude_patterns for why.
+            // --exclude / --type-not: skip files matching any exclude
+            // glob, whether it came from --exclude directly or from
+            // --type-not's expanded globs. Checked before --include/
+            // --type and wins on overlap — see the field docs on
+            // SearchConfig.exclude_patterns/type_not_patterns for why.
             if config
                 .exclude_patterns
                 .iter()
                 .any(|p| p.matches(&file_name))
+                || config
+                    .type_not_patterns
+                    .iter()
+                    .any(|p| p.matches(&file_name))
             {
                 continue;
             }
@@ -473,6 +489,16 @@ pub fn scan_and_grep(
             {
                 continue;
             }
+
+            // --type: skip files that don't match any of the selected
+            // type(s)' globs. An empty type_patterns list means no --type
+            // was given, so nothing is filtered here.
+            if !config.type_patterns.is_empty()
+                && !config.type_patterns.iter().any(|p| p.matches(&file_name))
+            {
+                continue;
+            }
+
             stats.total_files.fetch_add(1, Ordering::Relaxed);
             grep_file(&entry_path, config, output_tx, stats);
         }

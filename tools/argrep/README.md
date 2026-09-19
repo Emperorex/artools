@@ -97,6 +97,43 @@ argrep 'password' . --exclude '*.lock'
 
 If a file matches both `--include` and `--exclude`, **`--exclude` wins** — this is a deliberate simplification of GNU grep's actual precedence rule, which is order-dependent ("the last matching one wins", tracking the position of each `--include`/`--exclude` flag on the command line). Replicating that exactly would need argrep to track flag order across two different options, which isn't worth the complexity for what's usually a non-overlapping pair of filters in practice; "exclude always wins" is simpler to reason about and matches what most other tools with include/exclude filters do.
 
+Use `--type NAME` to only search files of a built-in type — a shorthand for a common set of `--include`-style globs, without having to spell them out:
+
+```
+argrep 'unwrap' . --type rust
+argrep 'TODO' . --type python
+argrep 'console.log' . --type-not javascript
+```
+
+Built-in types (deliberately a small, hand-picked starter set rather than `ripgrep`'s much larger type database):
+
+| Type         | Extensions                        |
+|--------------|-----------------------------------|
+| `rust`       | `*.rs`                            |
+| `python`     | `*.py`, `*.pyi`                   |
+| `javascript` | `*.js`, `*.jsx`, `*.mjs`, `*.cjs` |
+| `typescript` | `*.ts`, `*.tsx`                   |
+| `json`       | `*.json`                          |
+| `yaml`       | `*.yaml`, `*.yml`                 |
+| `toml`       | `*.toml`                          |
+| `markdown`   | `*.md`                            |
+| `shell`      | `*.sh`, `*.bash`, `*.zsh`         |
+
+`--type` and `--type-not` are both repeatable:
+
+```
+argrep 'TODO' . --type rust --type python   # rust OR python files
+```
+
+How `--type`/`--type-not` interact with `--include`/`--exclude` and each other:
+
+- **`--type` + `--include`**: **ANDed** — a file must satisfy both (unlike `--type`'s own multiple globs, or multiple `--type` flags, which are OR'd against each other).
+- **`--type-not` + `--exclude`**: checked together, either one excludes a file — same "any negative filter excludes" rule `--exclude` already follows.
+- **`--type` + `--type-not` on the same file**: `--type-not` wins, same "exclude wins" precedent as `--include`/`--exclude`.
+- An unknown type name (e.g. `--type cobol`) is a CLI parse-time error listing the known types, not a silently-empty filter.
+
+`--type-add` (define your own types), `--type-clear` (remove a built-in type), and `--type-list` (print this table from the CLI) are intentionally not included in this first pass — happy to add them if they'd be useful, but didn't want to build out a config-file-style type system before there's a real need for one.
+
 Use `--exclude-dir PATTERN` to skip whole directories during traversal — matched against the directory's **basename only** (not the full path), same as GNU grep's `--exclude-dir`, and applied *before* a matching directory is ever handed to a worker thread, so excluded subtrees cost no traversal time:
 
 ```
@@ -149,6 +186,8 @@ A hidden path given directly as `PATH` (e.g. `argrep 'TODO' .config`) is always 
 | `--count`               | `-c`  | —                 | Print count of matching lines per file (conflicts with `-l`, `-L`)                                                                              |
 | `--include PATTERN`     | —     | —                 | Only search files matching this glob (e.g. `"*.rs"`, `"*.log"`)                                                                                 |
 | `--exclude PATTERN`     | —     | —                 | Skip files matching this glob (e.g. `"*.min.js"`, `"*.lock"`); repeatable; wins over `--include` on overlap                                     |
+| `--type NAME`           | —     | —                 | Only search files of this built-in type (e.g. `"rust"`, `"python"`); repeatable (OR'd); ANDed with `--include`                                  |
+| `--type-not NAME`       | —     | —                 | Skip files of this built-in type; repeatable; wins over `--type`/`--include` on overlap                                                         |
 | `--exclude-dir PATTERN` | —     | built-in defaults | Skip directories matching this name or glob (e.g. `"node_modules"`, `"build*"`), matched by basename; repeatable; alias: `--ignore`             |
 | `--no-ignore`           | —     | —                 | Disable the built-in directory defaults (`.git`, `node_modules`, `__pycache__`, `target`) — explicit `--exclude-dir`/`--ignore` still applies   |
 | `--hidden`              | —     | —                 | Search hidden files/directories (dot-prefixed names), independent of `--no-ignore` (see Usage above)                                            |
@@ -207,6 +246,15 @@ argrep "API_KEY" . --hidden --include ".env*"
 
 # Search absolutely everything, including .git's own contents
 argrep "TODO" . --hidden --no-ignore
+
+# Only Rust files, using --type instead of --include
+argrep "unwrap" . --type rust
+
+# Rust or Python files
+argrep "TODO" . --type rust --type python
+
+# Everything except JavaScript
+argrep "console.log" . --type-not javascript
 ```
 
 ### Output modes
@@ -278,6 +326,7 @@ argrep "deprecated" /large/project -j 8 --include "*.py" -n
 | Count per file         | `grep -rc "query" .`                           | `argrep -c "query" .`                         |
 | Invert match           | `grep -rv "query" .`                           | `argrep -v "query" .`                         |
 | File type filter       | `grep -r --include="*.rs" "query" .`           | `argrep --include "*.rs" "query" .`           |
+| Named file type        | *(no equivalent — spell out the glob)*         | `argrep --type rust "query" .`                |
 | Skip binary files      | `grep -rI "query" .`                           | automatic                                     |
 | Skip node_modules      | `grep -r --exclude-dir=node_modules`           | automatic                                     |
 | Pipe from stdin        | `cmd \| grep "query"`                          | `cmd \| argrep "query"`                       |

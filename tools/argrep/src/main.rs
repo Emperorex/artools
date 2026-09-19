@@ -15,6 +15,54 @@ use std::{
     time::Instant,
 };
 
+/// Built-in file types for --type/--type-not: a small, deliberately
+/// hand-picked starter set rather than ripgrep's much larger built-in type
+/// database (which covers hundreds of types). --type-add/--type-clear for
+/// user-defined types, and a --type-list flag to print this table, are
+/// intentionally left for a later change — see the README.
+const TYPE_TABLE: &[(&str, &[&str])] = &[
+    ("rust", &["*.rs"]),
+    ("python", &["*.py", "*.pyi"]),
+    ("javascript", &["*.js", "*.jsx", "*.mjs", "*.cjs"]),
+    ("typescript", &["*.ts", "*.tsx"]),
+    ("json", &["*.json"]),
+    ("yaml", &["*.yaml", "*.yml"]),
+    ("toml", &["*.toml"]),
+    ("markdown", &["*.md"]),
+    ("shell", &["*.sh", "*.bash", "*.zsh"]),
+];
+
+fn type_globs(name: &str) -> Option<&'static [&'static str]> {
+    TYPE_TABLE
+        .iter()
+        .find(|(n, _)| *n == name)
+        .map(|(_, globs)| *globs)
+}
+
+fn known_type_names() -> String {
+    TYPE_TABLE
+        .iter()
+        .map(|(n, _)| *n)
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// clap value_parser for --type/--type-not: validates the name against
+/// TYPE_TABLE at parse time, so an unknown type is reported as a CLI usage
+/// error (exit 2) rather than a config error, same tier as e.g. -m 0 or
+/// -j 0 being rejected at parse time.
+fn type_name_parser(s: &str) -> Result<String, String> {
+    if type_globs(s).is_some() {
+        Ok(s.to_string())
+    } else {
+        Err(format!(
+            "unknown type '{}' (known types: {})",
+            s,
+            known_type_names()
+        ))
+    }
+}
+
 /// CPU-aware default worker count, used as the -j/--jobs default.
 ///
 /// Half of available_parallelism(), clamped to [1, 16]: using every core by
@@ -188,6 +236,20 @@ struct Args {
     #[arg(long)]
     exclude: Vec<String>,
 
+    /// Only search files of this built-in type (e.g. "rust", "python").
+    /// Can be given multiple times — a file matching ANY selected type is
+    /// included. ANDed with --include when both are given: a file must
+    /// satisfy every positive filter in effect, not just one of them. See
+    /// the README for the full list of built-in types.
+    #[arg(long = "type", value_parser = type_name_parser)]
+    r#type: Vec<String>,
+
+    /// Skip files of this built-in type — the opposite of --type. Can be
+    /// given multiple times. Wins over --type/--include on overlap, same
+    /// "exclude wins" precedent as --exclude over --include.
+    #[arg(long = "type-not", value_parser = type_name_parser)]
+    type_not: Vec<String>,
+
     /// Show NUM lines of leading context before matching lines
     #[arg(short = 'B', long = "before-context", value_parser = context_lines_parser)]
     before_context: Option<usize>,
@@ -314,6 +376,24 @@ fn main() {
         .map(|p| compile_glob(p, "--exclude", args.quiet))
         .collect();
 
+    // --type/--type-not: expand each validated type name into its globs.
+    // type_name_parser already guaranteed every name is in TYPE_TABLE, and
+    // every glob in TYPE_TABLE is hand-written and valid, so Pattern::new
+    // here can't actually fail — expect() documents that invariant rather
+    // than going through compile_glob's user-facing error path.
+    fn expand_types(names: &[String]) -> Vec<Pattern> {
+        let mut patterns = Vec::new();
+        for name in names {
+            let globs = type_globs(name).expect("validated by type_name_parser");
+            for glob in globs.iter().copied() {
+                patterns.push(Pattern::new(glob).expect("TYPE_TABLE globs must be valid"));
+            }
+        }
+        patterns
+    }
+    let type_patterns: Vec<Pattern> = expand_types(&args.r#type);
+    let type_not_patterns: Vec<Pattern> = expand_types(&args.type_not);
+
     let mut before_context = args.before_context.or(args.context).unwrap_or(0);
     let mut after_context = args.after_context.or(args.context).unwrap_or(0);
     if args.only_matching && (before_context > 0 || after_context > 0) {
@@ -345,6 +425,8 @@ fn main() {
         count_per_file: args.count_per_file,
         include_pattern,
         exclude_patterns,
+        type_patterns,
+        type_not_patterns,
         before_context,
         after_context,
         respect_gitignore,
@@ -696,7 +778,7 @@ fn print_result(
 
 #[cfg(test)]
 mod tests {
-    use super::{Args, build_ignore_dirs, default_jobs};
+    use super::{Args, TYPE_TABLE, build_ignore_dirs, default_jobs};
     use clap::Parser;
 
     // ── -j / --jobs boundary ─────────────────────────────────────────────────
@@ -924,6 +1006,84 @@ mod tests {
             "--hidden alone must not also set --no-ignore — they're \
              separate filtering layers"
         );
+    }
+
+    // ── --type / --type-not ────────────────────────────────────────────────
+    // Deliberately a small, fixed built-in type table for now (see
+    // TYPE_TABLE's doc comment) — --type-add/--type-clear/--type-list are
+    // left for later, per the review that requested this feature.
+
+    #[test]
+    fn type_defaults_to_empty() {
+        let args = Args::try_parse_from(["argrep", "foo", "."]).unwrap();
+        assert!(args.r#type.is_empty());
+        assert!(args.type_not.is_empty());
+    }
+
+    #[test]
+    fn type_accepts_a_known_name() {
+        let args = Args::try_parse_from(["argrep", "foo", ".", "--type", "rust"]).unwrap();
+        assert_eq!(args.r#type, vec!["rust".to_string()]);
+    }
+
+    #[test]
+    fn type_can_be_given_multiple_times() {
+        let args =
+            Args::try_parse_from(["argrep", "foo", ".", "--type", "rust", "--type", "python"])
+                .unwrap();
+        assert_eq!(args.r#type, vec!["rust".to_string(), "python".to_string()]);
+    }
+
+    #[test]
+    fn type_rejects_an_unknown_name_at_parse_time() {
+        let result = Args::try_parse_from(["argrep", "foo", ".", "--type", "cobol"]);
+        assert!(
+            result.is_err(),
+            "an unknown --type name must be a CLI parse error, not a \
+             silently-empty filter"
+        );
+    }
+
+    #[test]
+    fn type_not_accepts_a_known_name() {
+        let args =
+            Args::try_parse_from(["argrep", "foo", ".", "--type-not", "javascript"]).unwrap();
+        assert_eq!(args.type_not, vec!["javascript".to_string()]);
+    }
+
+    #[test]
+    fn type_not_rejects_an_unknown_name_at_parse_time() {
+        let result = Args::try_parse_from(["argrep", "foo", ".", "--type-not", "cobol"]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn type_and_type_not_can_be_combined() {
+        // Not rejected at the CLI level, even for the same name — same
+        // "not mutually exclusive, negative filter just wins" precedent
+        // as --include/--exclude overlapping on the same file.
+        let args =
+            Args::try_parse_from(["argrep", "foo", ".", "--type", "rust", "--type-not", "rust"])
+                .unwrap();
+        assert_eq!(args.r#type, vec!["rust".to_string()]);
+        assert_eq!(args.type_not, vec!["rust".to_string()]);
+    }
+
+    #[test]
+    fn all_type_table_entries_compile_as_valid_globs() {
+        // Every glob in TYPE_TABLE is expected to be a compile-time-valid
+        // pattern (main() builds them with Pattern::new(...).expect(...),
+        // treating a failure here as a bug in the table, not a user
+        // error) — this test is what actually backs that invariant.
+        for (name, globs) in TYPE_TABLE {
+            assert!(!globs.is_empty(), "type '{name}' has no globs");
+            for glob in *globs {
+                assert!(
+                    glob::Pattern::new(glob).is_ok(),
+                    "type '{name}' has an invalid glob: '{glob}'"
+                );
+            }
+        }
     }
 
     // ── -F / --fixed-strings ─────────────────────────────────────────────────

@@ -52,6 +52,8 @@ fn default_config(query: &str, ignore_case: bool) -> std::sync::Arc<argrep::Sear
         count_per_file: false,
         include_pattern: None,
         exclude_patterns: Vec::new(),
+        type_patterns: Vec::new(),
+        type_not_patterns: Vec::new(),
         before_context: 0,
         after_context: 0,
         respect_gitignore: true,
@@ -479,6 +481,8 @@ fn hidden_config(query: &str, hidden: bool, no_ignore: bool) -> StdArc<SearchCon
         count_per_file: false,
         include_pattern: None,
         exclude_patterns: Vec::new(),
+        type_patterns: Vec::new(),
+        type_not_patterns: Vec::new(),
         before_context: 0,
         after_context: 0,
         respect_gitignore: !no_ignore,
@@ -603,6 +607,148 @@ fn explicit_hidden_root_path_is_always_searched_regardless_of_hidden_flag() {
     );
 }
 
+// ── --type / --type-not ────────────────────────────────────────────────────
+//
+// A small, fixed built-in type table (see TYPE_TABLE in main.rs). These
+// tests exercise the filtering semantics: OR within a type's own globs,
+// OR across multiple selected types, AND with --include, and --type-not
+// winning over --type/--include on overlap (same "negative filter wins"
+// precedent as --exclude over --include).
+
+fn type_config(
+    query: &str,
+    type_globs: &[&str],
+    type_not_globs: &[&str],
+    include: Option<&str>,
+) -> StdArc<SearchConfig> {
+    StdArc::new(SearchConfig {
+        regex: build_matcher(query, MatchOptions::default()).unwrap(),
+        query: query.to_string(),
+        ignore_case: false,
+        line_number: false,
+        ignore_dirs: DEFAULT_IGNORES.iter().map(|s| s.to_string()).collect(),
+        ignore_dir_patterns: Vec::new(),
+        debug: false,
+        invert: false,
+        files_with_matches: false,
+        files_without_match: false,
+        count_per_file: false,
+        include_pattern: include.map(|p| Pattern::new(p).unwrap()),
+        exclude_patterns: Vec::new(),
+        type_patterns: type_globs
+            .iter()
+            .map(|g| Pattern::new(g).unwrap())
+            .collect(),
+        type_not_patterns: type_not_globs
+            .iter()
+            .map(|g| Pattern::new(g).unwrap())
+            .collect(),
+        before_context: 0,
+        after_context: 0,
+        respect_gitignore: true,
+        hidden: false,
+        quiet: false,
+        only_matching: false,
+        max_count: None,
+    })
+}
+
+#[test]
+fn type_filters_to_a_single_extension() {
+    let (_dir, root) = make_tree(&[
+        ("main.rs", "needle in rust\n"),
+        ("script.py", "needle in python\n"),
+        ("readme.md", "needle in markdown\n"),
+    ]);
+    let names = run(root, type_config("needle", &["*.rs"], &[], None));
+    assert_eq!(names, vec!["main.rs"]);
+}
+
+#[test]
+fn type_with_multiple_extensions_matches_any_of_them() {
+    // "python" expands to *.py AND *.pyi — a file matching either must be
+    // included (OR within one type's own glob list).
+    let (_dir, root) = make_tree(&[
+        ("mod.py", "needle here\n"),
+        ("mod.pyi", "needle here too\n"),
+        ("mod.rs", "needle irrelevant\n"),
+    ]);
+    let names = run(root, type_config("needle", &["*.py", "*.pyi"], &[], None));
+    assert_eq!(names, vec!["mod.py", "mod.pyi"]);
+}
+
+#[test]
+fn multiple_types_are_unioned() {
+    // --type rust --type python: a file matching EITHER type is included
+    // (OR across types, not AND).
+    let (_dir, root) = make_tree(&[
+        ("a.rs", "needle\n"),
+        ("b.py", "needle\n"),
+        ("c.js", "needle\n"),
+    ]);
+    let names = run(
+        root,
+        type_config("needle", &["*.rs", "*.py", "*.pyi"], &[], None),
+    );
+    assert_eq!(names, vec!["a.rs", "b.py"]);
+}
+
+#[test]
+fn type_not_excludes_matching_files() {
+    let (_dir, root) = make_tree(&[("app.js", "needle in js\n"), ("app.py", "needle in py\n")]);
+    let names = run(
+        root,
+        type_config("needle", &[], &["*.js", "*.jsx", "*.mjs", "*.cjs"], None),
+    );
+    assert_eq!(names, vec!["app.py"]);
+}
+
+#[test]
+fn type_not_wins_over_type_on_the_same_file() {
+    // Contradictory but not a CLI error (see type_and_type_not_can_be_combined
+    // in main.rs) — same "negative filter wins" precedent as --exclude
+    // over --include.
+    let (_dir, root) = make_tree(&[("main.rs", "needle\n")]);
+    let names = run(root, type_config("needle", &["*.rs"], &["*.rs"], None));
+    assert!(
+        names.is_empty(),
+        "--type-not must win when the same file matches both --type and \
+         --type-not"
+    );
+}
+
+#[test]
+fn type_is_anded_with_include() {
+    // A file must satisfy BOTH --include and --type when both are given,
+    // not just one of them.
+    let (_dir, root) = make_tree(&[
+        ("src/main.rs", "needle in src\n"),
+        ("vendor/lib.rs", "needle in vendor\n"),
+    ]);
+    let names = run(root, type_config("needle", &["*.rs"], &[], Some("main.rs")));
+    assert_eq!(
+        names,
+        vec!["main.rs"],
+        "--type rust --include main.rs must only match files satisfying \
+         both filters"
+    );
+}
+
+#[test]
+fn empty_type_patterns_means_no_type_filter() {
+    // No --type given at all (type_patterns empty) must not restrict
+    // anything — this is the "type_patterns.is_empty()" escape hatch in
+    // scan_and_grep, distinct from an empty *result* of a type that
+    // matched nothing.
+    let (_dir, root) = make_tree(&[
+        ("a.rs", "needle\n"),
+        ("b.py", "needle\n"),
+        ("c.txt", "needle\n"),
+    ]);
+    let names = run(root, type_config("needle", &[], &[], None));
+    assert_eq!(names, vec!["a.rs", "b.py", "c.txt"]);
+}
+
 // ── Ignore dirs ───────────────────────────────────────────────────────────────
 
 #[test]
@@ -647,6 +793,8 @@ fn custom_ignore_dir_is_excluded() {
         count_per_file: false,
         include_pattern: None,
         exclude_patterns: Vec::new(),
+        type_patterns: Vec::new(),
+        type_not_patterns: Vec::new(),
         before_context: 0,
         after_context: 0,
         respect_gitignore: true,
@@ -707,6 +855,8 @@ fn stats_counts_are_accurate() {
         count_per_file: false,
         include_pattern: None,
         exclude_patterns: Vec::new(),
+        type_patterns: Vec::new(),
+        type_not_patterns: Vec::new(),
         before_context: 0,
         after_context: 0,
         respect_gitignore: true,
@@ -761,6 +911,8 @@ fn multiple_workers_find_same_matches_as_single_worker() {
             count_per_file: false,
             include_pattern: None,
             exclude_patterns: Vec::new(),
+            type_patterns: Vec::new(),
+            type_not_patterns: Vec::new(),
             before_context: 0,
             after_context: 0,
             respect_gitignore: true,
@@ -843,6 +995,8 @@ fn invert_returns_non_matching_lines() {
         count_per_file: false,
         include_pattern: None,
         exclude_patterns: Vec::new(),
+        type_patterns: Vec::new(),
+        type_not_patterns: Vec::new(),
         before_context: 0,
         after_context: 0,
         respect_gitignore: true,
@@ -890,6 +1044,8 @@ fn invert_with_no_matches_returns_all_lines() {
         count_per_file: false,
         include_pattern: None,
         exclude_patterns: Vec::new(),
+        type_patterns: Vec::new(),
+        type_not_patterns: Vec::new(),
         before_context: 0,
         after_context: 0,
         respect_gitignore: true,
@@ -943,6 +1099,8 @@ fn files_with_matches_returns_only_filenames() {
         count_per_file: false,
         include_pattern: None,
         exclude_patterns: Vec::new(),
+        type_patterns: Vec::new(),
+        type_not_patterns: Vec::new(),
         before_context: 0,
         after_context: 0,
         respect_gitignore: true,
@@ -995,6 +1153,8 @@ fn files_with_matches_emits_each_file_once() {
         count_per_file: false,
         include_pattern: None,
         exclude_patterns: Vec::new(),
+        type_patterns: Vec::new(),
+        type_not_patterns: Vec::new(),
         before_context: 0,
         after_context: 0,
         respect_gitignore: true,
@@ -1062,6 +1222,8 @@ fn files_without_match_returns_only_unmatched_filenames() {
         count_per_file: false,
         include_pattern: None,
         exclude_patterns: Vec::new(),
+        type_patterns: Vec::new(),
+        type_not_patterns: Vec::new(),
         before_context: 0,
         after_context: 0,
         respect_gitignore: true,
@@ -1118,6 +1280,8 @@ fn files_without_match_emits_nothing_when_every_file_matches() {
         count_per_file: false,
         include_pattern: None,
         exclude_patterns: Vec::new(),
+        type_patterns: Vec::new(),
+        type_not_patterns: Vec::new(),
         before_context: 0,
         after_context: 0,
         respect_gitignore: true,
@@ -1177,6 +1341,8 @@ fn files_without_match_with_invert_reports_files_where_every_line_matches() {
         count_per_file: false,
         include_pattern: None,
         exclude_patterns: Vec::new(),
+        type_patterns: Vec::new(),
+        type_not_patterns: Vec::new(),
         before_context: 0,
         after_context: 0,
         respect_gitignore: true,
@@ -1229,6 +1395,8 @@ fn files_without_match_stops_reading_after_first_match() {
         count_per_file: false,
         include_pattern: None,
         exclude_patterns: Vec::new(),
+        type_patterns: Vec::new(),
+        type_not_patterns: Vec::new(),
         before_context: 0,
         after_context: 0,
         respect_gitignore: true,
@@ -1299,6 +1467,8 @@ fn files_without_match_excludes_unreadable_files() {
         count_per_file: false,
         include_pattern: None,
         exclude_patterns: Vec::new(),
+        type_patterns: Vec::new(),
+        type_not_patterns: Vec::new(),
         before_context: 0,
         after_context: 0,
         respect_gitignore: true,
@@ -1360,6 +1530,8 @@ fn files_without_match_quiet_produces_no_output() {
         count_per_file: false,
         include_pattern: None,
         exclude_patterns: Vec::new(),
+        type_patterns: Vec::new(),
+        type_not_patterns: Vec::new(),
         before_context: 0,
         after_context: 0,
         respect_gitignore: true,
@@ -1423,6 +1595,8 @@ fn count_per_file_returns_correct_counts() {
         count_per_file: true,
         include_pattern: None,
         exclude_patterns: Vec::new(),
+        type_patterns: Vec::new(),
+        type_not_patterns: Vec::new(),
         before_context: 0,
         after_context: 0,
         respect_gitignore: true,
@@ -1484,6 +1658,8 @@ fn count_per_file_emits_result_for_every_file() {
         count_per_file: true,
         include_pattern: None,
         exclude_patterns: Vec::new(),
+        type_patterns: Vec::new(),
+        type_not_patterns: Vec::new(),
         before_context: 0,
         after_context: 0,
         respect_gitignore: true,
@@ -1547,6 +1723,8 @@ fn invert_with_count_counts_non_matching_lines() {
         count_per_file: true,
         include_pattern: None,
         exclude_patterns: Vec::new(),
+        type_patterns: Vec::new(),
+        type_not_patterns: Vec::new(),
         before_context: 0,
         after_context: 0,
         respect_gitignore: true,
@@ -1612,6 +1790,8 @@ fn invert_with_files_with_matches_returns_files_with_a_non_matching_line() {
         count_per_file: false,
         include_pattern: None,
         exclude_patterns: Vec::new(),
+        type_patterns: Vec::new(),
+        type_not_patterns: Vec::new(),
         before_context: 0,
         after_context: 0,
         respect_gitignore: true,
@@ -1675,6 +1855,8 @@ fn invert_with_context_builds_context_around_inverted_matches() {
         count_per_file: false,
         include_pattern: None,
         exclude_patterns: Vec::new(),
+        type_patterns: Vec::new(),
+        type_not_patterns: Vec::new(),
         before_context: 1,
         after_context: 1,
         respect_gitignore: true,
@@ -1745,6 +1927,8 @@ fn include_pattern_searches_only_matching_files() {
         count_per_file: false,
         include_pattern: Some(Pattern::new("*.rs").unwrap()),
         exclude_patterns: Vec::new(),
+        type_patterns: Vec::new(),
+        type_not_patterns: Vec::new(),
         before_context: 0,
         after_context: 0,
         respect_gitignore: true,
@@ -1794,6 +1978,8 @@ fn include_pattern_no_files_match_returns_empty() {
         count_per_file: false,
         include_pattern: Some(Pattern::new("*.txt").unwrap()),
         exclude_patterns: Vec::new(),
+        type_patterns: Vec::new(),
+        type_not_patterns: Vec::new(),
         before_context: 0,
         after_context: 0,
         respect_gitignore: true,
@@ -1839,6 +2025,8 @@ fn include_wildcard_matches_all_files() {
         count_per_file: false,
         include_pattern: None,
         exclude_patterns: Vec::new(),
+        type_patterns: Vec::new(),
+        type_not_patterns: Vec::new(),
         before_context: 0,
         after_context: 0,
         respect_gitignore: true,
@@ -1869,6 +2057,8 @@ fn include_wildcard_matches_all_files() {
         count_per_file: false,
         include_pattern: Some(Pattern::new("*").unwrap()),
         exclude_patterns: Vec::new(),
+        type_patterns: Vec::new(),
+        type_not_patterns: Vec::new(),
         before_context: 0,
         after_context: 0,
         respect_gitignore: true,
@@ -1931,6 +2121,8 @@ fn before_context_includes_leading_lines() {
         count_per_file: false,
         include_pattern: None,
         exclude_patterns: Vec::new(),
+        type_patterns: Vec::new(),
+        type_not_patterns: Vec::new(),
         before_context: 2,
         after_context: 0,
         respect_gitignore: true,
@@ -1990,6 +2182,8 @@ fn after_context_includes_trailing_lines() {
         count_per_file: false,
         include_pattern: None,
         exclude_patterns: Vec::new(),
+        type_patterns: Vec::new(),
+        type_not_patterns: Vec::new(),
         before_context: 0,
         after_context: 2,
         respect_gitignore: true,
@@ -2052,6 +2246,8 @@ fn context_both_and_group_separator() {
         count_per_file: false,
         include_pattern: None,
         exclude_patterns: Vec::new(),
+        type_patterns: Vec::new(),
+        type_not_patterns: Vec::new(),
         before_context: 1,
         after_context: 1,
         respect_gitignore: true,
@@ -2120,6 +2316,8 @@ fn query_is_a_regex_by_default() {
         count_per_file: false,
         include_pattern: None,
         exclude_patterns: Vec::new(),
+        type_patterns: Vec::new(),
+        type_not_patterns: Vec::new(),
         before_context: 0,
         after_context: 0,
         respect_gitignore: true,
@@ -2172,6 +2370,8 @@ fn fixed_strings_mode_matches_literally() {
         count_per_file: false,
         include_pattern: None,
         exclude_patterns: Vec::new(),
+        type_patterns: Vec::new(),
+        type_not_patterns: Vec::new(),
         before_context: 0,
         after_context: 0,
         respect_gitignore: true,
@@ -2236,6 +2436,8 @@ fn whole_word_matches_only_word_boundaries() {
         count_per_file: false,
         include_pattern: None,
         exclude_patterns: Vec::new(),
+        type_patterns: Vec::new(),
+        type_not_patterns: Vec::new(),
         before_context: 0,
         after_context: 0,
         respect_gitignore: true,
@@ -2290,6 +2492,8 @@ fn whole_line_matches_only_exact_line() {
         count_per_file: false,
         include_pattern: None,
         exclude_patterns: Vec::new(),
+        type_patterns: Vec::new(),
+        type_not_patterns: Vec::new(),
         before_context: 0,
         after_context: 0,
         respect_gitignore: true,
@@ -2339,6 +2543,8 @@ fn quiet_mode_produces_no_output() {
         count_per_file: false,
         include_pattern: None,
         exclude_patterns: Vec::new(),
+        type_patterns: Vec::new(),
+        type_not_patterns: Vec::new(),
         before_context: 0,
         after_context: 0,
         respect_gitignore: true,
@@ -2387,6 +2593,8 @@ fn quiet_mode_with_no_matches_reports_zero() {
         count_per_file: false,
         include_pattern: None,
         exclude_patterns: Vec::new(),
+        type_patterns: Vec::new(),
+        type_not_patterns: Vec::new(),
         before_context: 0,
         after_context: 0,
         respect_gitignore: true,
@@ -2428,6 +2636,8 @@ fn only_matching_emits_one_row_per_occurrence() {
         count_per_file: false,
         include_pattern: None,
         exclude_patterns: Vec::new(),
+        type_patterns: Vec::new(),
+        type_not_patterns: Vec::new(),
         before_context: 0,
         after_context: 0,
         respect_gitignore: true,
@@ -2476,6 +2686,8 @@ fn count_per_file_takes_priority_over_only_matching() {
         count_per_file: true,
         include_pattern: None,
         exclude_patterns: Vec::new(),
+        type_patterns: Vec::new(),
+        type_not_patterns: Vec::new(),
         before_context: 0,
         after_context: 0,
         respect_gitignore: true,
@@ -2518,6 +2730,8 @@ fn max_count_stops_after_n_matching_lines() {
         count_per_file: false,
         include_pattern: None,
         exclude_patterns: Vec::new(),
+        type_patterns: Vec::new(),
+        type_not_patterns: Vec::new(),
         before_context: 0,
         after_context: 0,
         respect_gitignore: true,
@@ -2559,6 +2773,8 @@ fn max_count_caps_the_count_per_file_total() {
         count_per_file: true,
         include_pattern: None,
         exclude_patterns: Vec::new(),
+        type_patterns: Vec::new(),
+        type_not_patterns: Vec::new(),
         before_context: 0,
         after_context: 0,
         respect_gitignore: true,
@@ -2603,6 +2819,8 @@ fn max_count_with_only_matching_counts_lines_not_occurrences() {
         count_per_file: false,
         include_pattern: None,
         exclude_patterns: Vec::new(),
+        type_patterns: Vec::new(),
+        type_not_patterns: Vec::new(),
         before_context: 0,
         after_context: 0,
         respect_gitignore: true,
@@ -2645,6 +2863,8 @@ fn max_count_still_flushes_trailing_context() {
         count_per_file: false,
         include_pattern: None,
         exclude_patterns: Vec::new(),
+        type_patterns: Vec::new(),
+        type_not_patterns: Vec::new(),
         before_context: 0,
         after_context: 1,
         respect_gitignore: true,
@@ -2692,6 +2912,8 @@ fn exclude_skips_matching_files() {
         count_per_file: false,
         include_pattern: None,
         exclude_patterns: vec![Pattern::new("*.min.js").unwrap()],
+        type_patterns: Vec::new(),
+        type_not_patterns: Vec::new(),
         before_context: 0,
         after_context: 0,
         respect_gitignore: true,
@@ -2739,6 +2961,8 @@ fn exclude_wins_over_include_on_overlap() {
         // Both --include and --exclude match "a.txt" here.
         include_pattern: Some(Pattern::new("*.txt").unwrap()),
         exclude_patterns: vec![Pattern::new("*.txt").unwrap()],
+        type_patterns: Vec::new(),
+        type_not_patterns: Vec::new(),
         before_context: 0,
         after_context: 0,
         respect_gitignore: true,
@@ -2781,6 +3005,8 @@ fn exclude_dir_glob_skips_matching_directories() {
         count_per_file: false,
         include_pattern: None,
         exclude_patterns: Vec::new(),
+        type_patterns: Vec::new(),
+        type_not_patterns: Vec::new(),
         before_context: 0,
         after_context: 0,
         respect_gitignore: true,

@@ -122,8 +122,15 @@ pub struct SearchConfig {
 /// Shared statistics counters
 #[derive(Clone)]
 pub struct SearchStats {
+    /// Files that were actually opened and read (or at least attempted —
+    /// this includes files that turned out binary, or hit a read error
+    /// partway through; it does not include files filtered out before
+    /// ever being opened, see `files_skipped`). Displayed as "Files
+    /// searched" by --stats.
     pub total_files: Arc<AtomicUsize>,
+    /// Directories visited during traversal (displayed as "Directories").
     pub total_dirs: Arc<AtomicUsize>,
+    /// Matching lines found (displayed as "Matches").
     pub matched_lines: Arc<AtomicUsize>,
     /// Files or directories that could not be read (permission denied, I/O
     /// error mid-read, etc). Search continues past these — they don't stop
@@ -132,6 +139,27 @@ pub struct SearchStats {
     /// Silently succeeding when some files were unreadable would be
     /// misleading for a grep-like tool, especially in automation.
     pub io_errors: Arc<AtomicUsize>,
+    /// Every file-type directory entry encountered while walking the tree,
+    /// counted *before* any filtering (hidden, gitignore, --exclude-dir
+    /// doesn't apply here since that's directories, --include/--exclude/
+    /// --type/--type-not). An explicitly-named single-file root path also
+    /// counts as one discovered file. `files_discovered` is always equal
+    /// to `total_files` (searched) + `files_skipped` — nothing else
+    /// removes a file from consideration. Displayed as "Files discovered".
+    pub files_discovered: Arc<AtomicUsize>,
+    /// Files filtered out by name/path rules — hidden, gitignore/
+    /// .ignore, --exclude, --include, --type, --type-not — before ever
+    /// being opened. Deliberately does *not* include binary files (they
+    /// were opened, just not fully read) or files that failed to open
+    /// (that's `io_errors`, a different failure category from "skipped by
+    /// our own filtering rules"). Displayed as "Files skipped".
+    pub files_skipped: Arc<AtomicUsize>,
+    /// Total bytes read from file contents during scanning (the sniff
+    /// read plus every read_until call in grep_file; approximated for
+    /// stdin as line length + 1 per line, since BufRead::lines() strips
+    /// the newline it actually consumed). Displayed as "Bytes read" —
+    /// mainly useful for benchmarking throughput.
+    pub bytes_read: Arc<AtomicUsize>,
 }
 
 impl SearchStats {
@@ -141,6 +169,9 @@ impl SearchStats {
             total_dirs: Arc::new(AtomicUsize::new(0)),
             matched_lines: Arc::new(AtomicUsize::new(0)),
             io_errors: Arc::new(AtomicUsize::new(0)),
+            files_discovered: Arc::new(AtomicUsize::new(0)),
+            files_skipped: Arc::new(AtomicUsize::new(0)),
+            bytes_read: Arc::new(AtomicUsize::new(0)),
         }
     }
 }
@@ -374,6 +405,10 @@ pub fn scan_and_grep(
     let dir_path = task.path.as_path();
 
     if dir_path.is_file() {
+        // An explicitly-named single-file root always counts as one
+        // discovered (and searched) file — see files_discovered's field
+        // doc for why this must stay in sync with the entries-loop below.
+        stats.files_discovered.fetch_add(1, Ordering::Relaxed);
         stats.total_files.fetch_add(1, Ordering::Relaxed);
         grep_file(dir_path, config, output_tx, stats);
         return;
@@ -439,15 +474,28 @@ pub fn scan_and_grep(
 
         let os_file_name = entry.file_name();
         let file_name = os_file_name.to_string_lossy();
+        let is_dir = file_type.is_dir();
+
+        // files_discovered counts every file-type entry seen, before any
+        // filtering below — see the field doc on SearchStats for the
+        // accounting identity this is meant to satisfy.
+        if !is_dir {
+            stats.files_discovered.fetch_add(1, Ordering::Relaxed);
+        }
 
         if !config.hidden && file_name.starts_with('.') {
+            if !is_dir {
+                stats.files_skipped.fetch_add(1, Ordering::Relaxed);
+            }
             continue; // Skip hidden files/folders by default (--hidden overrides)
         }
 
         let entry_path = entry.path();
-        let is_dir = file_type.is_dir();
 
         if config.respect_gitignore && is_path_ignored(&ignore_stack, &entry_path, is_dir) {
+            if !is_dir {
+                stats.files_skipped.fetch_add(1, Ordering::Relaxed);
+            }
             continue;
         }
 
@@ -480,6 +528,7 @@ pub fn scan_and_grep(
                     .iter()
                     .any(|p| p.matches(&file_name))
             {
+                stats.files_skipped.fetch_add(1, Ordering::Relaxed);
                 continue;
             }
 
@@ -487,6 +536,7 @@ pub fn scan_and_grep(
             if let Some(pattern) = &config.include_pattern
                 && !pattern.matches(&file_name)
             {
+                stats.files_skipped.fetch_add(1, Ordering::Relaxed);
                 continue;
             }
 
@@ -496,6 +546,7 @@ pub fn scan_and_grep(
             if !config.type_patterns.is_empty()
                 && !config.type_patterns.iter().any(|p| p.matches(&file_name))
             {
+                stats.files_skipped.fetch_add(1, Ordering::Relaxed);
                 continue;
             }
 
@@ -526,8 +577,9 @@ pub fn grep_file(
 
     // Fast binary file sniffing: check the first 1024 bytes for a null byte
     let mut sniffer_buffer = [0u8; 1024];
-    if let Ok(bytes_read) = reader.read(&mut sniffer_buffer) {
-        if sniffer_buffer[..bytes_read].contains(&0u8) {
+    if let Ok(sniffed) = reader.read(&mut sniffer_buffer) {
+        stats.bytes_read.fetch_add(sniffed, Ordering::Relaxed);
+        if sniffer_buffer[..sniffed].contains(&0u8) {
             return; // Skip compiled binaries or media files
         }
         if let Err(err) = reader.seek(SeekFrom::Start(0)) {
@@ -599,7 +651,9 @@ pub fn grep_file(
         line_bytes.clear();
         match reader.read_until(b'\n', &mut line_bytes) {
             Ok(0) => break, // EOF
-            Ok(_) => {}
+            Ok(n) => {
+                stats.bytes_read.fetch_add(n, Ordering::Relaxed);
+            }
             Err(err) => {
                 stats.io_errors.fetch_add(1, Ordering::Relaxed);
                 had_io_error = true;

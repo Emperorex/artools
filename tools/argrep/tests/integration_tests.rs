@@ -876,6 +876,138 @@ fn stats_counts_are_accurate() {
     assert_eq!(stats.matched_lines.load(Ordering::Relaxed), 2); // only a and c
 }
 
+// ── --stats counters (files_discovered / files_skipped / bytes_read) ───────────
+
+fn stats_config(query: &str, exclude: &[&str]) -> StdArc<SearchConfig> {
+    StdArc::new(SearchConfig {
+        regex: build_matcher(query, MatchOptions::default()).unwrap(),
+        query: query.to_string(),
+        ignore_case: false,
+        line_number: false,
+        ignore_dirs: DEFAULT_IGNORES.iter().map(|s| s.to_string()).collect(),
+        ignore_dir_patterns: Vec::new(),
+        debug: false,
+        invert: false,
+        files_with_matches: false,
+        files_without_match: false,
+        count_per_file: false,
+        include_pattern: None,
+        exclude_patterns: exclude.iter().map(|g| Pattern::new(g).unwrap()).collect(),
+        type_patterns: Vec::new(),
+        type_not_patterns: Vec::new(),
+        before_context: 0,
+        after_context: 0,
+        respect_gitignore: true,
+        hidden: false,
+        quiet: false,
+        only_matching: false,
+        max_count: None,
+    })
+}
+
+#[test]
+fn files_discovered_counts_every_file_regardless_of_filtering() {
+    let (_dir, root) = make_tree(&[
+        ("a.txt", "needle\n"),
+        ("b.min.js", "needle\n"),
+        ("sub/c.txt", "needle\n"),
+    ]);
+    let config = stats_config("needle", &["*.min.js"]);
+    let stats = SearchStats::new();
+    parallel_grep(root, 4, config, stats.clone(), |_| {});
+
+    assert_eq!(
+        stats.files_discovered.load(Ordering::Relaxed),
+        3,
+        "files_discovered must count b.min.js too, even though \
+         --exclude filters it out before it's ever opened"
+    );
+}
+
+#[test]
+fn files_skipped_counts_excluded_files_not_binary_ones() {
+    let (_dir, root) = make_tree(&[
+        ("a.txt", "needle\n"),
+        ("b.min.js", "needle\n"),
+        ("c.min.js", "needle\n"),
+    ]);
+    let config = stats_config("needle", &["*.min.js"]);
+    let stats = SearchStats::new();
+    parallel_grep(root, 4, config, stats.clone(), |_| {});
+
+    assert_eq!(
+        stats.files_skipped.load(Ordering::Relaxed),
+        2,
+        "files_skipped must count both files excluded by --exclude"
+    );
+    assert_eq!(stats.total_files.load(Ordering::Relaxed), 1); // a.txt only
+}
+
+#[test]
+fn files_discovered_equals_searched_plus_skipped_when_nothing_errors() {
+    // The accounting identity documented on SearchStats::files_discovered:
+    // with no io_errors, every discovered file ends up either searched or
+    // skipped — never both, never neither.
+    let (_dir, root) = make_tree(&[
+        ("a.txt", "needle\n"),
+        ("b.min.js", "needle\n"),
+        ("sub/c.txt", "nothing\n"),
+        ("sub/d.min.js", "nothing\n"),
+    ]);
+    let config = stats_config("needle", &["*.min.js"]);
+    let stats = SearchStats::new();
+    parallel_grep(root, 4, config, stats.clone(), |_| {});
+
+    assert_eq!(stats.io_errors.load(Ordering::Relaxed), 0);
+    assert_eq!(
+        stats.files_discovered.load(Ordering::Relaxed),
+        stats.total_files.load(Ordering::Relaxed) + stats.files_skipped.load(Ordering::Relaxed)
+    );
+}
+
+#[test]
+fn binary_files_count_as_searched_not_skipped() {
+    // A binary file is opened (it passes every name-based filter) and
+    // only then found to be binary and abandoned — that's a different
+    // event from being filtered out by --exclude/--include/--type/
+    // hidden/gitignore before ever being opened, so it must land in
+    // files_searched (total_files), not files_skipped.
+    let (dir, root) = make_tree(&[("a.txt", "needle\n")]);
+    let binary_path = dir.path().join("b.bin");
+    fs::write(
+        &binary_path,
+        [0x00u8, 0x01, 0x02, b'n', b'e', b'e', b'd', b'l', b'e'],
+    )
+    .unwrap();
+
+    let config = stats_config("needle", &[]);
+    let stats = SearchStats::new();
+    parallel_grep(root, 4, config, stats.clone(), |_| {});
+
+    assert_eq!(stats.files_discovered.load(Ordering::Relaxed), 2);
+    assert_eq!(
+        stats.total_files.load(Ordering::Relaxed),
+        2,
+        "the binary file was opened and attempted, so it counts as \
+         searched even though grep_file bailed out early"
+    );
+    assert_eq!(stats.files_skipped.load(Ordering::Relaxed), 0);
+    assert_eq!(stats.matched_lines.load(Ordering::Relaxed), 1); // only a.txt
+}
+
+#[test]
+fn bytes_read_is_nonzero_after_reading_file_content() {
+    let (_dir, root) = make_tree(&[("a.txt", "needle and some more text\n")]);
+    let config = stats_config("needle", &[]);
+    let stats = SearchStats::new();
+    parallel_grep(root, 4, config, stats.clone(), |_| {});
+
+    assert!(
+        stats.bytes_read.load(Ordering::Relaxed) >= "needle and some more text\n".len(),
+        "bytes_read must reflect at least the content actually read"
+    );
+}
+
 // ── Parallelism stability ─────────────────────────────────────────────────────
 
 #[test]

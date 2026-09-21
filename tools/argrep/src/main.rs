@@ -181,9 +181,18 @@ struct Args {
     )]
     jobs: usize,
 
-    /// Show search statistics and operational errors
+    /// Show search statistics and operational errors (per-file/per-dir
+    /// error lines, plus the same summary block --stats prints)
     #[arg(short, long)]
     debug: bool,
+
+    /// Print a clean summary of the search — files discovered/searched/
+    /// skipped, directories, matches, bytes read, workers, elapsed time —
+    /// without the per-file/per-dir operational error noise --debug also
+    /// produces. Independent of --debug: either flag alone prints the
+    /// summary block; --debug additionally prints per-item error lines.
+    #[arg(long)]
+    stats: bool,
 
     /// Invert match: print lines that do NOT contain the query
     #[arg(short = 'v', long)]
@@ -471,23 +480,53 @@ fn main() {
 
     let duration = start_time.elapsed();
 
-    if args.debug {
+    // --stats and --debug both print this summary block — --debug
+    // additionally prints per-file/per-dir operational error lines as it
+    // goes (gated separately by `config.debug`/`args.debug` at each error
+    // site in lib.rs), but the block itself is the same clean summary
+    // either way, so a --stats user never sees the error noise and a
+    // --debug user isn't missing anything they had before.
+    if args.debug || args.stats {
         eprintln!("{}", "\n=== Search Statistics ===".yellow().bold());
         if use_stdin {
-            eprintln!("Worker threads:      {}", "n/a (stdin mode)".cyan());
+            eprintln!("Workers:            {}", "n/a (stdin mode)".cyan());
+            eprintln!(
+                "Bytes read:         {}",
+                stats.bytes_read.load(Ordering::Relaxed).to_string().cyan()
+            );
         } else {
-            eprintln!("Worker threads:      {}", args.jobs.to_string().cyan());
+            eprintln!(
+                "Files discovered:   {}",
+                stats
+                    .files_discovered
+                    .load(Ordering::Relaxed)
+                    .to_string()
+                    .cyan()
+            );
+            eprintln!(
+                "Files searched:     {}",
+                stats.total_files.load(Ordering::Relaxed).to_string().cyan()
+            );
+            eprintln!(
+                "Files skipped:      {}",
+                stats
+                    .files_skipped
+                    .load(Ordering::Relaxed)
+                    .to_string()
+                    .cyan()
+            );
+            eprintln!(
+                "Directories:        {}",
+                stats.total_dirs.load(Ordering::Relaxed).to_string().cyan()
+            );
+            eprintln!(
+                "Bytes read:         {}",
+                stats.bytes_read.load(Ordering::Relaxed).to_string().cyan()
+            );
+            eprintln!("Workers:            {}", args.jobs.to_string().cyan());
         }
         eprintln!(
-            "Directories checked: {}",
-            stats.total_dirs.load(Ordering::Relaxed).to_string().cyan()
-        );
-        eprintln!(
-            "Files scanned:       {}",
-            stats.total_files.load(Ordering::Relaxed).to_string().cyan()
-        );
-        eprintln!(
-            "Total text matches:  {}",
+            "Matches:            {}",
             stats
                 .matched_lines
                 .load(Ordering::Relaxed)
@@ -495,7 +534,7 @@ fn main() {
                 .green()
                 .bold()
         );
-        eprintln!("Execution time:      {:.2?}", duration);
+        eprintln!("Elapsed:            {:.2?}", duration);
     }
 
     // Contract: if every file was read successfully, exit 0. If any file or
@@ -569,6 +608,13 @@ fn grep_stdin(config: &argrep::SearchConfig, stats: &argrep::SearchStats) {
         }
 
         line_num += 1;
+        // BufRead::lines() strips the newline it consumed, so this is an
+        // approximation (off by one for a final line with no trailing
+        // newline) — good enough for --stats' throughput/benchmarking
+        // purpose without buffering raw bytes just to count them exactly.
+        stats
+            .bytes_read
+            .fetch_add(line.len() + 1, Ordering::Relaxed);
 
         let line_matches = config.regex.is_match(&line);
 
@@ -1084,6 +1130,43 @@ mod tests {
                 );
             }
         }
+    }
+
+    // ── --stats ───────────────────────────────────────────────────────────
+    // Independent of --debug: neither implies nor conflicts with the
+    // other. Both trigger the same summary block in main() (see the doc
+    // comment on Args::stats); this module only covers CLI parsing, not
+    // what gets printed — that's covered by the SearchStats counters
+    // themselves in the integration tests.
+
+    #[test]
+    fn stats_flag_defaults_to_false() {
+        let args = Args::try_parse_from(["argrep", "foo", "."]).unwrap();
+        assert!(!args.stats);
+    }
+
+    #[test]
+    fn stats_flag_is_parsed() {
+        let args = Args::try_parse_from(["argrep", "foo", ".", "--stats"]).unwrap();
+        assert!(args.stats);
+    }
+
+    #[test]
+    fn stats_and_debug_can_be_combined() {
+        let args = Args::try_parse_from(["argrep", "foo", ".", "--stats", "--debug"]).unwrap();
+        assert!(args.stats);
+        assert!(args.debug);
+    }
+
+    #[test]
+    fn stats_does_not_imply_debug() {
+        let args = Args::try_parse_from(["argrep", "foo", ".", "--stats"]).unwrap();
+        assert!(args.stats);
+        assert!(
+            !args.debug,
+            "--stats alone must not also set --debug — a --stats user \
+             should get the clean summary without per-item error noise"
+        );
     }
 
     // ── -F / --fixed-strings ─────────────────────────────────────────────────

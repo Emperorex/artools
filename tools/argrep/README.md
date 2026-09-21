@@ -166,34 +166,62 @@ argrep 'TODO' . --hidden --no-ignore
 
 A hidden path given directly as `PATH` (e.g. `argrep 'TODO' .config`) is always searched regardless of `--hidden` — the flag only affects paths *discovered* while walking a directory, the same convention `grep`/`ripgrep` use for explicitly-named arguments.
 
+Use `--stats` to print a clean summary of the search to stderr after it finishes — useful for sanity-checking a run, or benchmarking throughput:
+
+```
+argrep 'TODO' . --stats
+```
+
+```
+=== Search Statistics ===
+Files discovered:   1042
+Files searched:     861
+Files skipped:      181
+Directories:        94
+Bytes read:         8391204
+Workers:            8
+Matches:            37
+Elapsed:            142.31ms
+```
+
+- **Files discovered**: every file `argrep` walked past, before any filtering.
+- **Files searched**: files actually opened and read (this includes binary files, which are opened and sniffed before being abandoned — a different, content-based skip from the name/path-based one below).
+- **Files skipped**: files filtered out by name/path rules (hidden, `.gitignore`/`.ignore`, `--exclude`, `--include`, `--type`, `--type-not`) *before* ever being opened. `Files discovered` always equals `Files searched` + `Files skipped` when nothing failed to open (an unreadable file is neither — see Exit codes below).
+- **Bytes read**: total bytes read from file contents (or from stdin, approximated per line). Mainly useful for a throughput figure alongside `Elapsed`.
+
+`--stats` is independent of `--debug`: `--debug` prints this same block *plus* a line for every individual file/directory that failed to read, as it happens, which is useful for diagnosing a specific failure but is noise for a quick summary or a benchmark script. Use whichever fits — or both together, since they're not mutually exclusive.
+
+**`--stats` combined with `-q`/`--quiet` will undercount `Files discovered`/`Files searched`/`Files skipped`.** `-q` stops the entire search as soon as one match is found anywhere, so the counts reflect only however much of the tree was walked before that happened, not the full tree. For an accurate benchmark, leave `-q` off (or search for something with zero matches, where `-q`'s early-exit never triggers).
+
 ## Options
 
-| Flag                    | Short | Default           | Description                                                                                                                                     |
-|-------------------------|-------|-------------------|-------------------------------------------------------------------------------------------------------------------------------------------------|
-| `--ignore-case`         | `-i`  | —                 | Case-insensitive matching                                                                                                                       |
-| `--fixed-strings`       | `-F`  | —                 | Treat QUERY as a literal string instead of a regex                                                                                              |
-| `--word-regexp`         | `-w`  | —                 | Match only whole words (wraps QUERY in `\b(?:...)\b`)                                                                                           |
-| `--line-regexp`         | `-x`  | —                 | Match only whole lines (wraps QUERY in `^(?:...)$`)                                                                                             |
-| `--line-number`         | `-n`  | —                 | Show line numbers in output                                                                                                                     |
-| `--before-context NUM`  | `-B`  | —                 | Show NUM lines of leading context before matches (max 100,000)                                                                                  |
-| `--after-context NUM`   | `-A`  | —                 | Show NUM lines of trailing context after matches (max 100,000)                                                                                  |
-| `--context NUM`         | `-C`  | —                 | Show NUM lines of leading and trailing context around matches (max 100,000)                                                                     |
-| `--invert`              | `-v`  | —                 | Print lines that do NOT match the query (conflicts with `-o`)                                                                                   |
-| `--only-matching`       | `-o`  | —                 | Print only the matched text, one occurrence per line (conflicts with `-v`; no effect with `-A`/`-B`/`-C`, warns)                                |
-| `--max-count NUM`       | `-m`  | unlimited         | Stop searching a file after NUM matching lines (must be >= 1)                                                                                   |
-| `--files-with-matches`  | `-l`  | —                 | Print only filenames of files containing a match (conflicts with `-c`, `-L`)                                                                    |
-| `--files-without-match` | `-L`  | —                 | Print only filenames of files containing NO match (conflicts with `-l`, `-c`)                                                                   |
-| `--count`               | `-c`  | —                 | Print count of matching lines per file (conflicts with `-l`, `-L`)                                                                              |
-| `--include PATTERN`     | —     | —                 | Only search files matching this glob (e.g. `"*.rs"`, `"*.log"`)                                                                                 |
-| `--exclude PATTERN`     | —     | —                 | Skip files matching this glob (e.g. `"*.min.js"`, `"*.lock"`); repeatable; wins over `--include` on overlap                                     |
-| `--type NAME`           | —     | —                 | Only search files of this built-in type (e.g. `"rust"`, `"python"`); repeatable (OR'd); ANDed with `--include`                                  |
-| `--type-not NAME`       | —     | —                 | Skip files of this built-in type; repeatable; wins over `--type`/`--include` on overlap                                                         |
-| `--exclude-dir PATTERN` | —     | built-in defaults | Skip directories matching this name or glob (e.g. `"node_modules"`, `"build*"`), matched by basename; repeatable; alias: `--ignore`             |
-| `--no-ignore`           | —     | —                 | Disable the built-in directory defaults (`.git`, `node_modules`, `__pycache__`, `target`) — explicit `--exclude-dir`/`--ignore` still applies   |
-| `--hidden`              | —     | —                 | Search hidden files/directories (dot-prefixed names), independent of `--no-ignore` (see Usage above)                                            |
-| `--jobs N`              | `-j`  | CPU-aware         | Number of parallel worker threads (1–128; default is half the available cores, clamped to 1–16)                                                 |
-| `--debug`               | `-d`  | —                 | Print scan statistics and errors to stderr                                                                                                      |
-| `--quiet`               | `-q`  | —                 | No output; exit code alone reports match/no-match/error (see Exit codes below). Overrides -l/-c/-n if also set — nothing is printed either way. |
+| Flag                    | Short | Default           | Description                                                                                                                                              |
+|-------------------------|-------|-------------------|----------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `--ignore-case`         | `-i`  | —                 | Case-insensitive matching                                                                                                                                |
+| `--fixed-strings`       | `-F`  | —                 | Treat QUERY as a literal string instead of a regex                                                                                                       |
+| `--word-regexp`         | `-w`  | —                 | Match only whole words (wraps QUERY in `\b(?:...)\b`)                                                                                                    |
+| `--line-regexp`         | `-x`  | —                 | Match only whole lines (wraps QUERY in `^(?:...)$`)                                                                                                      |
+| `--line-number`         | `-n`  | —                 | Show line numbers in output                                                                                                                              |
+| `--before-context NUM`  | `-B`  | —                 | Show NUM lines of leading context before matches (max 100,000)                                                                                           |
+| `--after-context NUM`   | `-A`  | —                 | Show NUM lines of trailing context after matches (max 100,000)                                                                                           |
+| `--context NUM`         | `-C`  | —                 | Show NUM lines of leading and trailing context around matches (max 100,000)                                                                              |
+| `--invert`              | `-v`  | —                 | Print lines that do NOT match the query (conflicts with `-o`)                                                                                            |
+| `--only-matching`       | `-o`  | —                 | Print only the matched text, one occurrence per line (conflicts with `-v`; no effect with `-A`/`-B`/`-C`, warns)                                         |
+| `--max-count NUM`       | `-m`  | unlimited         | Stop searching a file after NUM matching lines (must be >= 1)                                                                                            |
+| `--files-with-matches`  | `-l`  | —                 | Print only filenames of files containing a match (conflicts with `-c`, `-L`)                                                                             |
+| `--files-without-match` | `-L`  | —                 | Print only filenames of files containing NO match (conflicts with `-l`, `-c`)                                                                            |
+| `--count`               | `-c`  | —                 | Print count of matching lines per file (conflicts with `-l`, `-L`)                                                                                       |
+| `--include PATTERN`     | —     | —                 | Only search files matching this glob (e.g. `"*.rs"`, `"*.log"`)                                                                                          |
+| `--exclude PATTERN`     | —     | —                 | Skip files matching this glob (e.g. `"*.min.js"`, `"*.lock"`); repeatable; wins over `--include` on overlap                                              |
+| `--type NAME`           | —     | —                 | Only search files of this built-in type (e.g. `"rust"`, `"python"`); repeatable (OR'd); ANDed with `--include`                                           |
+| `--type-not NAME`       | —     | —                 | Skip files of this built-in type; repeatable; wins over `--type`/`--include` on overlap                                                                  |
+| `--exclude-dir PATTERN` | —     | built-in defaults | Skip directories matching this name or glob (e.g. `"node_modules"`, `"build*"`), matched by basename; repeatable; alias: `--ignore`                      |
+| `--no-ignore`           | —     | —                 | Disable the built-in directory defaults (`.git`, `node_modules`, `__pycache__`, `target`) — explicit `--exclude-dir`/`--ignore` still applies            |
+| `--hidden`              | —     | —                 | Search hidden files/directories (dot-prefixed names), independent of `--no-ignore` (see Usage above)                                                     |
+| `--jobs N`              | `-j`  | CPU-aware         | Number of parallel worker threads (1–128; default is half the available cores, clamped to 1–16)                                                          |
+| `--debug`               | `-d`  | —                 | Print the --stats summary plus a line for every file/dir that failed to read, as it happens                                                              |
+| `--stats`               | —     | —                 | Print a clean search summary (files discovered/searched/skipped, directories, bytes read, workers, matches, elapsed) to stderr; independent of `--debug` |
+| `--quiet`               | `-q`  | —                 | No output; exit code alone reports match/no-match/error (see Exit codes below). Overrides -l/-c/-n if also set — nothing is printed either way.          |
 
 `-l`, `-L`, and `-c` cannot be combined with each other — they imply mutually incompatible output contracts (`filename` matched vs `filename` unmatched vs `filename: count`), so combining any two of them (`argrep foo . -c -l`, `argrep foo . -l -L`, etc.) is a CLI error rather than one silently overriding the other.
 
@@ -302,6 +330,11 @@ argrep "error" /var/log -c --include "*.log"
 
 # Search with 8 workers on a large codebase
 argrep "deprecated" /large/project -j 8 --include "*.py" -n
+
+# Quick benchmark: how much did this run touch? (avoid -q here — it
+# stops the whole search at the first match, which would undercount
+# the file totals below)
+argrep "TODO" /large/project --stats -l
 ```
 
 ## Comparison with `grep`

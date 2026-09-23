@@ -1008,6 +1008,204 @@ fn bytes_read_is_nonzero_after_reading_file_content() {
     );
 }
 
+// ── Terminal-safety: control characters in matched content ─────────────────────
+//
+// A file that passes the binary sniff (no NUL in the first 1024 bytes) can
+// still contain other control bytes — bell, escape, carriage return, etc.
+// Printing those raw to the terminal can ring the bell or, worse, inject
+// arbitrary ANSI sequences. These tests confirm grep_file's line_content
+// (what actually gets printed) is sanitized, without that sanitization
+// affecting whether a line counts as a match in the first place.
+
+#[test]
+fn matched_line_containing_bell_character_is_escaped_in_output() {
+    let (_dir, root) = make_tree(&[("a.txt", "before\x07needle\x07after\n")]);
+    let config = stats_config("needle", &[]);
+    let results: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let r = Arc::clone(&results);
+    parallel_grep(root, 2, config, SearchStats::new(), move |item| {
+        r.lock().unwrap().push(item.line_content.clone());
+    });
+
+    let lines = results.lock().unwrap().clone();
+    assert_eq!(
+        lines,
+        vec!["before\\x07needle\\x07after".to_string()],
+        "the raw BEL byte must never reach stdout — it must be escaped \
+         as literal text instead, so argrep's own output can't ring the \
+         terminal bell"
+    );
+}
+
+#[test]
+fn only_matching_output_escapes_control_characters_in_matched_text() {
+    // The matched substring itself (not just the surrounding line) must
+    // be sanitized under -o, since that's the entire content that gets
+    // printed in that mode.
+    let (_dir, root) = make_tree(&[("a.txt", "x needle\x1b[31m here\n")]);
+    let config = StdArc::new(SearchConfig {
+        regex: build_matcher("needle\x1b\\[31m", MatchOptions::default()).unwrap(),
+        query: "needle\u{1b}[31m".to_string(),
+        ignore_case: false,
+        line_number: false,
+        ignore_dirs: DEFAULT_IGNORES.iter().map(|s| s.to_string()).collect(),
+        ignore_dir_patterns: Vec::new(),
+        debug: false,
+        invert: false,
+        files_with_matches: false,
+        files_without_match: false,
+        count_per_file: false,
+        include_pattern: None,
+        exclude_patterns: Vec::new(),
+        type_patterns: Vec::new(),
+        type_not_patterns: Vec::new(),
+        before_context: 0,
+        after_context: 0,
+        respect_gitignore: true,
+        hidden: false,
+        quiet: false,
+        only_matching: true,
+        max_count: None,
+    });
+    let results: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let r = Arc::clone(&results);
+    parallel_grep(root, 2, config, SearchStats::new(), move |item| {
+        r.lock().unwrap().push(item.line_content.clone());
+    });
+
+    let lines = results.lock().unwrap().clone();
+    assert_eq!(lines, vec!["needle\\x1b[31m".to_string()]);
+}
+
+#[test]
+fn context_lines_with_control_characters_are_also_escaped() {
+    // Context lines (-A/-B/-C) go through a different code path than the
+    // matching line itself (the before_buffer, and the after-context
+    // branch) — both must sanitize independently, not just the match.
+    let (_dir, root) = make_tree(&[(
+        "a.txt",
+        "before\x07context\nneedle here\nafter\x07context\n",
+    )]);
+    let config = StdArc::new(SearchConfig {
+        regex: build_matcher("needle", MatchOptions::default()).unwrap(),
+        query: "needle".to_string(),
+        ignore_case: false,
+        line_number: false,
+        ignore_dirs: DEFAULT_IGNORES.iter().map(|s| s.to_string()).collect(),
+        ignore_dir_patterns: Vec::new(),
+        debug: false,
+        invert: false,
+        files_with_matches: false,
+        files_without_match: false,
+        count_per_file: false,
+        include_pattern: None,
+        exclude_patterns: Vec::new(),
+        type_patterns: Vec::new(),
+        type_not_patterns: Vec::new(),
+        before_context: 1,
+        after_context: 1,
+        respect_gitignore: true,
+        hidden: false,
+        quiet: false,
+        only_matching: false,
+        max_count: None,
+    });
+    let results: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let r = Arc::clone(&results);
+    parallel_grep(root, 2, config, SearchStats::new(), move |item| {
+        r.lock().unwrap().push(item.line_content.clone());
+    });
+
+    let lines = results.lock().unwrap().clone();
+    assert_eq!(
+        lines,
+        vec![
+            "before\\x07context".to_string(),
+            "needle here".to_string(),
+            "after\\x07context".to_string(),
+        ]
+    );
+}
+
+#[test]
+fn control_characters_do_not_affect_whether_a_line_matches() {
+    // Sanitization is a display-only concern — the regex still sees the
+    // original raw text when deciding what matches, so a query that
+    // spans a control byte must still work exactly as if it didn't.
+    //
+    // Uses fixed_strings mode deliberately: the regex crate treats
+    // "\x07" in a *pattern* as a hex escape for the BEL byte itself, so
+    // testing the "literal backslash-x-0-7 text must not match a real
+    // BEL byte" case with the default regex mode would be testing the
+    // wrong thing (that pattern would already match a real BEL byte via
+    // the regex engine's own hex-escape support, nothing to do with
+    // sanitize_for_display at all). Fixed-strings mode removes that
+    // ambiguity: the pattern text is matched completely literally.
+    fn fixed_string_config(query: &str) -> StdArc<SearchConfig> {
+        StdArc::new(SearchConfig {
+            regex: build_matcher(
+                query,
+                MatchOptions {
+                    fixed_strings: true,
+                    ..Default::default()
+                },
+            )
+            .unwrap(),
+            query: query.to_string(),
+            ignore_case: false,
+            line_number: false,
+            ignore_dirs: DEFAULT_IGNORES.iter().map(|s| s.to_string()).collect(),
+            ignore_dir_patterns: Vec::new(),
+            debug: false,
+            invert: false,
+            files_with_matches: false,
+            files_without_match: false,
+            count_per_file: false,
+            include_pattern: None,
+            exclude_patterns: Vec::new(),
+            type_patterns: Vec::new(),
+            type_not_patterns: Vec::new(),
+            before_context: 0,
+            after_context: 0,
+            respect_gitignore: true,
+            hidden: false,
+            quiet: false,
+            only_matching: false,
+            max_count: None,
+        })
+    }
+
+    let (_dir, root) = make_tree(&[("a.txt", "need\x07le\n")]);
+    let config = fixed_string_config("need\\x07le"); // literal backslash-x-0-7 text, NOT the byte
+    let results: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let r = Arc::clone(&results);
+    parallel_grep(root, 2, config, SearchStats::new(), move |item| {
+        r.lock().unwrap().push(item.line_content.clone());
+    });
+    assert!(
+        results.lock().unwrap().is_empty(),
+        "the fixed-string query 'need\\x07le' (literal backslash-x-0-7 \
+         text, 10 characters) must NOT match a real single BEL byte — \
+         matching happens against the original raw text, not the \
+         sanitized display form"
+    );
+
+    let (_dir2, root2) = make_tree(&[("a.txt", "need\x07le\n")]);
+    let config2 = fixed_string_config("need\u{7}le"); // the actual BEL byte, in the pattern itself
+    let results2: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let r2 = Arc::clone(&results2);
+    parallel_grep(root2, 2, config2, SearchStats::new(), move |item| {
+        r2.lock().unwrap().push(item.line_content.clone());
+    });
+    assert_eq!(
+        results2.lock().unwrap().clone(),
+        vec!["need\\x07le".to_string()],
+        "a query containing the real BEL byte must still match the real \
+         BEL byte in the file, and the emitted content must still come \
+         back sanitized for display"
+    );
+}
+
 // ── Parallelism stability ─────────────────────────────────────────────────────
 
 #[test]

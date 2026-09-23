@@ -1,5 +1,6 @@
 use argrep::{
     DEFAULT_IGNORES, MatchOptions, SearchConfig, SearchStats, build_matcher, parallel_grep,
+    sanitize_for_display,
 };
 use clap::Parser;
 use clap::builder::TypedValueParser as _;
@@ -751,6 +752,15 @@ fn highlight_matches(line: &str, regex: &Regex) -> String {
 }
 
 fn print_stdin_line(line: &str, line_num: usize, is_context: bool, config: &argrep::SearchConfig) {
+    // Sanitize before anything else touches this line — highlight_matches
+    // below only adds our own ANSI codes on top, so sanitizing first
+    // guarantees we never escape those. See sanitize_for_display's doc
+    // comment for why this doesn't affect what counts as a match, only
+    // what gets printed for one (matching against stdin already happened
+    // in grep_stdin, against the original unsanitized line, before this
+    // function was ever called).
+    let line = sanitize_for_display(line);
+
     if is_context {
         if config.line_number {
             println!("{}-{}", line_num.to_string().green(), line.trim_end());
@@ -758,7 +768,7 @@ fn print_stdin_line(line: &str, line_num: usize, is_context: bool, config: &argr
             println!("{}", line.trim_end());
         }
     } else {
-        let highlighted = highlight_matches(line, &config.regex);
+        let highlighted = highlight_matches(&line, &config.regex);
         if config.line_number {
             println!(
                 "{}:{}",

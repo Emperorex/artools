@@ -242,6 +242,8 @@ Hidden files and directories (names starting with `.`) are also skipped by defau
 
 Text files with invalid UTF-8 (a stray byte from a legacy encoding, a corrupted line, etc.) are still searched in full: an invalid sequence becomes `U+FFFD` in that one line rather than ending the scan partway through the file. This matches how tools like `ripgrep` treat non-UTF-8 text by default.
 
+The null-byte sniff only catches files that are binary *in that specific way* — plenty of non-NUL content still isn't meant to be printed as text (cache files, compiled artifacts without embedded NULs, etc.), and a search run with `--hidden --no-ignore` deliberately walks into exactly that kind of content. So as a second, independent layer of protection: any control character in a matched or context line — bell, escape, carriage return, and the rest of the C0 control range plus DEL — is escaped as visible `\xHH` text before printing, rather than being sent to the terminal raw. Without this, a match landing inside such a file could ring the terminal bell, overwrite the current line, or in principle inject arbitrary ANSI sequences into your terminal. This only affects what gets *printed*: the query still matches against the original, unescaped content, so a pattern that's meant to match a real control byte still works exactly as before.
+
 ## Examples
 
 ### Basic search

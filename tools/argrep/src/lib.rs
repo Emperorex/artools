@@ -7,6 +7,7 @@ use ignore::{
 };
 use regex::{Regex, RegexBuilder};
 use std::{
+    borrow::Cow,
     collections::{HashSet, VecDeque},
     fs::{self, File},
     io::{BufRead, BufReader, Read, Seek, SeekFrom},
@@ -20,6 +21,58 @@ use std::{
 
 /// Default directories to ignore during text search
 pub const DEFAULT_IGNORES: &[&str] = &[".git", "node_modules", "__pycache__", "target"];
+
+/// Replaces control characters that could manipulate the terminal — bell
+/// (rings it), escape (arbitrary ANSI sequences: colors, cursor moves,
+/// even in vulnerable terminal emulators worse than that), carriage
+/// return (overwrites the current line), and the rest of the C0 control
+/// range plus DEL — with a visible `\xHH` escape, so a match inside a
+/// file that happens to contain such bytes can never make argrep's own
+/// output do any of that to the user's terminal. This is a real risk on
+/// a search this permissive: `--hidden --no-ignore` deliberately walks
+/// into caches, compiled artifacts, and other content that was never
+/// meant to be printed as text, and the existing binary sniff only
+/// catches a NUL byte in the first 1024 bytes — plenty of non-NUL binary
+/// content passes it right through.
+///
+/// Deliberately scoped to C0 controls (0x00-0x1F) and DEL (0x7F) only,
+/// not the 8-bit C1 range (U+0080-U+009F) some terminals also treat as
+/// control codes — those only arise from a genuine multi-byte UTF-8
+/// sequence decoding to one of those codepoints, which is rare enough in
+/// practice not to be worth the extra complexity here.
+///
+/// Tab is left alone (common in ordinary text and harmless). Applied at
+/// the point content is packaged for display, not at the point it's
+/// matched against the query — the regex still sees the original raw
+/// text, so this changes nothing about what counts as a match, only what
+/// gets printed for one. Returns the input unchanged (no allocation) in
+/// the overwhelmingly common case of a line with no control characters;
+/// the fast-path check operates on raw bytes rather than decoded chars,
+/// which is safe here specifically because every byte in 0x00-0x1F/0x7F
+/// is unambiguously a literal ASCII byte in valid UTF-8 — those values
+/// never occur as a continuation byte (0x80-0xBF) of a multi-byte
+/// sequence, so there's no risk of a false match inside one.
+pub fn sanitize_for_display(s: &str) -> Cow<'_, str> {
+    let needs_escaping = s
+        .bytes()
+        .any(|b| matches!(b, 0x00..=0x08 | 0x0B..=0x1F | 0x7F));
+    if !needs_escaping {
+        return Cow::Borrowed(s);
+    }
+
+    let mut out = String::with_capacity(s.len());
+    for ch in s.chars() {
+        let code = ch as u32;
+        if ch == '\t' {
+            out.push(ch);
+        } else if code <= 0x1F || code == 0x7F {
+            out.push_str(&format!("\\x{code:02x}"));
+        } else {
+            out.push(ch);
+        }
+    }
+    Cow::Owned(out)
+}
 
 /// Task sent to workers representing a directory or file to scan
 pub struct Task {
@@ -682,6 +735,12 @@ pub fn grep_file(
 
         let line_matches = config.regex.is_match(line);
 
+        // Sanitized once per line, reused everywhere this line's content
+        // gets packaged into a MatchResult below — matching itself always
+        // uses the original `line`/`m.as_str()`, never this. See
+        // sanitize_for_display's doc comment for why.
+        let clean_line = sanitize_for_display(line);
+
         // Apply -v inversion
         let should_emit = if config.invert {
             !line_matches
@@ -733,7 +792,7 @@ pub fn grep_file(
                         let _ = output_tx.send(MatchResult {
                             file_path: file_path.to_path_buf(),
                             line_num,
-                            line_content: m.as_str().to_string(),
+                            line_content: sanitize_for_display(m.as_str()).to_string(),
                             count: None,
                             is_context: false,
                             is_separator: false,
@@ -779,7 +838,7 @@ pub fn grep_file(
                     let _ = output_tx.send(MatchResult {
                         file_path: file_path.to_path_buf(),
                         line_num,
-                        line_content: line.to_string(),
+                        line_content: clean_line.to_string(),
                         count: None,
                         is_context: false,
                         is_separator: false,
@@ -789,7 +848,7 @@ pub fn grep_file(
                     after_remaining = after_ctx;
 
                     if before_ctx > 0 {
-                        before_buffer.push_back((line_num, line.to_string()));
+                        before_buffer.push_back((line_num, clean_line.to_string()));
                     }
                 }
             }
@@ -809,7 +868,7 @@ pub fn grep_file(
                 let _ = output_tx.send(MatchResult {
                     file_path: file_path.to_path_buf(),
                     line_num,
-                    line_content: line.to_string(),
+                    line_content: clean_line.to_string(),
                     count: None,
                     is_context: true,
                     is_separator: false,
@@ -822,7 +881,7 @@ pub fn grep_file(
                 if before_buffer.len() == before_ctx {
                     before_buffer.pop_front();
                 }
-                before_buffer.push_back((line_num, line.to_string()));
+                before_buffer.push_back((line_num, clean_line.to_string()));
             }
         }
     }
@@ -921,5 +980,114 @@ mod ignore_tests {
 
         let gi = build_dir_gitignore(dir.path(), &[".gitignore"], false);
         assert!(gi.is_none());
+    }
+}
+
+#[cfg(test)]
+mod sanitize_tests {
+    // ── sanitize_for_display ─────────────────────────────────────────────────
+    //
+    // The fix for the terminal-bell/escape-injection report: a file that
+    // passes the binary sniff (no NUL in the first 1024 bytes) can still
+    // contain other control bytes, and printing those raw to the user's
+    // terminal can ring the bell, move the cursor, or worse. These tests
+    // cover the escaping rules and, just as importantly, that ordinary
+    // text (including non-ASCII) is left completely alone.
+
+    use super::sanitize_for_display;
+
+    #[test]
+    fn plain_text_is_returned_unchanged_and_unallocated() {
+        let input = "just an ordinary line, nothing weird here";
+        let result = sanitize_for_display(input);
+        assert_eq!(result, input);
+        assert!(
+            matches!(result, std::borrow::Cow::Borrowed(_)),
+            "the common case (no control chars) must not allocate"
+        );
+    }
+
+    #[test]
+    fn bell_character_is_escaped() {
+        // The exact byte from the bug report: BEL rings the terminal.
+        let input = "before\x07after";
+        assert_eq!(sanitize_for_display(input), "before\\x07after");
+    }
+
+    #[test]
+    fn escape_character_is_escaped() {
+        // ESC is the start of arbitrary ANSI sequences — colors, cursor
+        // moves, and on vulnerable terminals worse than that.
+        let input = "\x1b[31mfake red\x1b[0m";
+        assert_eq!(sanitize_for_display(input), "\\x1b[31mfake red\\x1b[0m");
+    }
+
+    #[test]
+    fn carriage_return_is_escaped() {
+        // A raw \r would overwrite the current terminal line.
+        let input = "visible\rhidden";
+        assert_eq!(sanitize_for_display(input), "visible\\x0dhidden");
+    }
+
+    #[test]
+    fn null_byte_is_escaped() {
+        let input = "a\x00b";
+        assert_eq!(sanitize_for_display(input), "a\\x00b");
+    }
+
+    #[test]
+    fn delete_character_is_escaped() {
+        let input = "a\x7fb";
+        assert_eq!(sanitize_for_display(input), "a\\x7fb");
+    }
+
+    #[test]
+    fn tab_is_left_alone() {
+        // Tabs are common in ordinary text (indentation, TSV data) and
+        // harmless to print — must not be escaped like the other C0
+        // controls around it.
+        let input = "col1\tcol2\tcol3";
+        let result = sanitize_for_display(input);
+        assert_eq!(result, input);
+        assert!(matches!(result, std::borrow::Cow::Borrowed(_)));
+    }
+
+    #[test]
+    fn non_ascii_text_is_left_alone() {
+        // Multi-byte UTF-8 must not be mistaken for control bytes — this
+        // is the case the byte-level fast-path check has to get right,
+        // since continuation bytes (0x80-0xBF) sit right next to the
+        // ASCII control range this function targets.
+        let input = "héllo wörld —日本語 — emoji 🎉 here";
+        let result = sanitize_for_display(input);
+        assert_eq!(result, input);
+        assert!(matches!(result, std::borrow::Cow::Borrowed(_)));
+    }
+
+    #[test]
+    fn multiple_control_characters_are_each_escaped() {
+        let input = "\x01\x02\x03";
+        assert_eq!(sanitize_for_display(input), "\\x01\\x02\\x03");
+    }
+
+    #[test]
+    fn control_character_alongside_non_ascii_text_only_escapes_the_control_byte() {
+        let input = "café\x07bar";
+        assert_eq!(sanitize_for_display(input), "café\\x07bar");
+    }
+
+    #[test]
+    fn escaping_preserves_character_boundaries_not_byte_boundaries() {
+        // A naive byte-for-byte escape pass (rather than iterating by
+        // char) risks slicing a multi-byte UTF-8 character in half. This
+        // input interleaves a 3-byte character with a control byte to
+        // make sure that can't happen.
+        let input = "日\x07本";
+        let result = sanitize_for_display(input);
+        assert_eq!(result, "日\\x07本");
+        assert!(
+            std::str::from_utf8(result.as_bytes()).is_ok(),
+            "result must always be valid UTF-8"
+        );
     }
 }

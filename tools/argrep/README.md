@@ -20,7 +20,7 @@ cargo build --release --bin argrep
 argrep [OPTIONS] QUERY [PATH]
 ```
 
-`QUERY` is required and is matched as a **regular expression** by default (Rust's [`regex`](https://docs.rs/regex) crate — a similar dialect to `grep -E`/PCRE, without backreferences or lookaround). Use `-F`/`--fixed-strings` to search for `QUERY` literally instead, e.g. when it contains characters like `.`, `*`, `(` that you don't want interpreted as regex syntax:
+`QUERY` is required and is matched as a **regular expression** by default (Rust's [`regex`](https://docs.rs/regex) crate — a similar dialect to `grep -E`/PCRE, without backreferences or lookaround). One exception: with `--files` (see below), `QUERY` is dropped entirely — `argrep --files [PATH]`, not `argrep --files QUERY [PATH]`. Use `-F`/`--fixed-strings` to search for `QUERY` literally instead, e.g. when it contains characters like `.`, `*`, `(` that you don't want interpreted as regex syntax:
 
 ```
 argrep -F 'foo.bar' .          # matches the literal text "foo.bar"
@@ -193,6 +193,29 @@ Elapsed:            142.31ms
 
 **`--stats` combined with `-q`/`--quiet` will undercount `Files discovered`/`Files searched`/`Files skipped`.** `-q` stops the entire search as soon as one match is found anywhere, so the counts reflect only however much of the tree was walked before that happened, not the full tree. For an accurate benchmark, leave `-q` off (or search for something with zero matches, where `-q`'s early-exit never triggers).
 
+Use `--files` to list the files a search would look at, without actually reading their content — a debugging view of the traversal engine itself. Every filter still applies exactly as it would for a real search:
+
+```
+argrep --files .
+argrep --files --hidden .
+argrep --files --no-ignore .
+argrep --files --type rust .
+argrep --files --exclude '*.generated.rs' .
+```
+
+QUERY isn't needed in `--files` mode: it's `argrep --files .`, not `argrep --files QUERY .`. If you give a single positional, it's treated as `PATH`, not `QUERY` — there's nothing for a query to do here, so there's no ambiguity to preserve. Giving two positionals together with `--files` is a usage error rather than a guess about which one you meant:
+
+```
+$ argrep --files foo .
+error: --files does not take a QUERY, only a PATH, but got two positional
+arguments: 'foo' and '.'. Use `argrep --files .` (or `argrep --files foo`,
+whichever was meant as the path).
+```
+
+`--files` conflicts with every flag that only makes sense once content is actually being searched: `-l`/`-L`/`-c`/`-v`/`-o`/`-n`/`-A`/`-B`/`-C`/`-m`/`-q`. `-i`/`-F`/`-w`/`-x` are accepted but have no effect, since they only configure how `QUERY` becomes a regex and `--files` never builds a real one.
+
+`--files` pairs naturally with `--stats`: `argrep --files --stats . > /dev/null` gives you the discovered/searched/skipped breakdown for a filter combination without printing a single filename, which is often exactly what you want when you're trying to understand *why* a file is or isn't being picked up.
+
 ## Options
 
 | Flag                    | Short | Default           | Description                                                                                                                                              |
@@ -221,6 +244,7 @@ Elapsed:            142.31ms
 | `--jobs N`              | `-j`  | CPU-aware         | Number of parallel worker threads (1–128; default is half the available cores, clamped to 1–16)                                                          |
 | `--debug`               | `-d`  | —                 | Print the --stats summary plus a line for every file/dir that failed to read, as it happens                                                              |
 | `--stats`               | —     | —                 | Print a clean search summary (files discovered/searched/skipped, directories, bytes read, workers, matches, elapsed) to stderr; independent of `--debug` |
+| `--files`               | —     | —                 | List files that would be searched, without reading them; QUERY not required; conflicts with content-search flags (see Usage above)                       |
 | `--quiet`               | `-q`  | —                 | No output; exit code alone reports match/no-match/error (see Exit codes below). Overrides -l/-c/-n if also set — nothing is printed either way.          |
 
 `-l`, `-L`, and `-c` cannot be combined with each other — they imply mutually incompatible output contracts (`filename` matched vs `filename` unmatched vs `filename: count`), so combining any two of them (`argrep foo . -c -l`, `argrep foo . -l -L`, etc.) is a CLI error rather than one silently overriding the other.
@@ -337,6 +361,10 @@ argrep "deprecated" /large/project -j 8 --include "*.py" -n
 # stops the whole search at the first match, which would undercount
 # the file totals below)
 argrep "TODO" /large/project --stats -l
+
+# Debug why a file isn't showing up in results: does the traversal
+# engine even see it?
+argrep --files --hidden --no-ignore . | grep 'suspect_file'
 ```
 
 ## Comparison with `grep`
@@ -362,11 +390,14 @@ argrep "TODO" /large/project --stats -l
 | Invert match           | `grep -rv "query" .`                           | `argrep -v "query" .`                         |
 | File type filter       | `grep -r --include="*.rs" "query" .`           | `argrep --include "*.rs" "query" .`           |
 | Named file type        | *(no equivalent — spell out the glob)*         | `argrep --type rust "query" .`                |
+| List files, no search  | `find . -type f` **                            | `argrep --files .`                            |
 | Skip binary files      | `grep -rI "query" .`                           | automatic                                     |
 | Skip node_modules      | `grep -r --exclude-dir=node_modules`           | automatic                                     |
 | Pipe from stdin        | `cmd \| grep "query"`                          | `cmd \| argrep "query"`                       |
 
 \* GNU `grep` never skips dotfiles on its own — `argrep` does, by default, so `--hidden` is the flag that makes it behave like plain `grep` in this one respect.
+
+\*\* `find . -type f` lists every file unconditionally — it doesn't know about `argrep`'s own filters (`.gitignore`, `--hidden`'s default skip, `--type`, etc.), so it's the closest single-command equivalent rather than a like-for-like match. `argrep --files` is really `ripgrep`'s `rg --files` under a different name.
 
 ## Key advantages over `grep`
 

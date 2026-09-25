@@ -64,6 +64,43 @@ fn type_name_parser(s: &str) -> Result<String, String> {
     }
 }
 
+/// Resolves the positional PATH argument for --files mode, given the raw
+/// values clap bound to the (still positionally-first) `query` slot and
+/// the (positionally-second) `path` slot. --files takes no QUERY, but
+/// clap has no way to know that while parsing positionals — it always
+/// binds the first bare positional to `query` — so this function is
+/// where the "a lone positional under --files means PATH, not QUERY"
+/// rule actually lives, kept separate from `main()` so it's directly
+/// unit-testable without going through full CLI parsing.
+///
+/// - Neither given -> no path was specified at all; caller defaults it.
+/// - Only the query slot filled -> that's the one positional the user
+///   gave (e.g. `argrep --files .`, where clap bound "." to `query`
+///   since it's positionally first) -> treated as PATH.
+/// - Only the path slot filled -> already unambiguous (can only happen
+///   if a future clap version changes how it fills positional slots, but
+///   handled here in case it does).
+/// - Both filled -> two positionals were given together with --files,
+///   which is never valid (--files has nothing for a QUERY to do) -> an
+///   error naming both values, rather than silently picking one and
+///   discarding the other.
+fn resolve_files_path(
+    query: Option<String>,
+    path: Option<String>,
+) -> Result<Option<String>, String> {
+    match (query, path) {
+        (None, None) => Ok(None),
+        (Some(p), None) => Ok(Some(p)),
+        (None, Some(p)) => Ok(Some(p)),
+        (Some(q), Some(p)) => Err(format!(
+            "--files does not take a QUERY, only a PATH, but got two \
+             positional arguments: '{q}' and '{p}'. Use \
+             `argrep --files {p}` (or `argrep --files {q}`, whichever \
+             was meant as the path)."
+        )),
+    }
+}
+
 /// CPU-aware default worker count, used as the -j/--jobs default.
 ///
 /// Half of available_parallelism(), clamped to [1, 16]: using every core by
@@ -127,9 +164,11 @@ const MAX_JOBS: u16 = 128;
     about = "Fast parallel text search utility (Rust version)"
 )]
 struct Args {
-    /// The text query/pattern to search for
-    #[arg(required = true)]
-    query: String,
+    /// The text query/pattern to search for. Not required with --files,
+    /// which doesn't search content at all — see --files's own doc
+    /// comment for how a lone positional is interpreted in that mode.
+    #[arg(required_unless_present = "files")]
+    query: Option<String>,
 
     /// Root directory or file to start the search
     #[arg()]
@@ -293,6 +332,39 @@ struct Args {
     /// `argrep --hidden --no-ignore pattern .`
     #[arg(long = "hidden")]
     hidden: bool,
+
+    /// List the files that would be searched, without searching their
+    /// content — every filter still runs (.gitignore/.ignore, --hidden,
+    /// --no-ignore, --include, --exclude, --type, --type-not,
+    /// --exclude-dir), so this doubles as a debugging view of the
+    /// traversal engine itself: `argrep --files --type rust .` shows
+    /// exactly which files `argrep 'pattern' --type rust .` would open.
+    /// QUERY is not needed in this mode: `argrep --files .` (not
+    /// `argrep --files QUERY .`). If a single positional is given, it's
+    /// treated as PATH rather than QUERY, since there's nothing for a
+    /// QUERY to do here — see the README for the full rule and why two
+    /// positionals together with --files is a usage error rather than a
+    /// guess. Conflicts with every flag that only makes sense once
+    /// content is actually being searched (-l/-L/-c/-v/-o/-n/-A/-B/-C/-m/
+    /// -q); -i/-F/-w/-x are harmlessly accepted but have no effect, since
+    /// they only configure how QUERY becomes a regex.
+    #[arg(
+        long = "files",
+        conflicts_with_all = [
+            "files_with_matches",
+            "files_without_match",
+            "count_per_file",
+            "invert",
+            "only_matching",
+            "quiet",
+            "line_number",
+            "before_context",
+            "after_context",
+            "context",
+            "max_count",
+        ]
+    )]
+    files: bool,
 }
 
 /// Splits `--exclude-dir`/`--ignore` entries (plus the built-in defaults,
@@ -348,27 +420,63 @@ fn compile_glob(pattern: &str, flag_name: &str, quiet: bool) -> Pattern {
 }
 
 fn main() {
-    let args = Args::parse();
+    let mut args = Args::parse();
 
-    let regex = match build_matcher(
-        &args.query,
-        MatchOptions {
-            fixed_strings: args.fixed_strings,
-            ignore_case: args.ignore_case,
-            whole_word: args.whole_word,
-            whole_line: args.whole_line,
-        },
-    ) {
-        Ok(re) => re,
-        Err(e) => {
-            eprintln!("{}", format!("error: {}", e).red());
-            // Under -q, exit codes are the whole interface (0=match,
-            // 1=no match, 2=error), matching grep's own convention — so a
-            // config error has to land on 2, not 1, which -q reserves for
-            // "ran fine, found nothing". Outside -q, this tool's own
-            // convention (documented in the README) uses 1 for config/IO
-            // errors, so that's untouched.
-            std::process::exit(if args.quiet { 2 } else { 1 });
+    if args.files {
+        // --files takes no QUERY — resolve_files_path decides whether the
+        // one positional clap bound to `query` (since it's positionally
+        // first) should actually be treated as PATH. See its doc comment
+        // for the exact rules.
+        match resolve_files_path(args.query.take(), args.path.take()) {
+            Ok(path) => args.path = path,
+            Err(msg) => {
+                eprintln!("{}", format!("error: {msg}").red());
+                std::process::exit(2);
+            }
+        }
+        if args.path.as_deref() == Some("-") {
+            eprintln!(
+                "{}",
+                "error: --files lists files in a directory tree; it can't \
+                 be combined with stdin input"
+                    .red()
+            );
+            std::process::exit(2);
+        }
+    }
+
+    // --files never actually searches content (grep_file is never
+    // called in that mode — see SearchConfig.files_only), so this regex
+    // is a placeholder that satisfies SearchConfig's required `regex`
+    // field without meaning anything; build_matcher only runs when
+    // there's a real QUERY to compile.
+    let regex = if args.files {
+        Regex::new("").expect("the empty pattern always compiles")
+    } else {
+        let query = args
+            .query
+            .as_deref()
+            .expect("clap's required_unless_present=\"files\" guarantees this outside --files");
+        match build_matcher(
+            query,
+            MatchOptions {
+                fixed_strings: args.fixed_strings,
+                ignore_case: args.ignore_case,
+                whole_word: args.whole_word,
+                whole_line: args.whole_line,
+            },
+        ) {
+            Ok(re) => re,
+            Err(e) => {
+                eprintln!("{}", format!("error: {}", e).red());
+                // Under -q, exit codes are the whole interface (0=match,
+                // 1=no match, 2=error), matching grep's own convention — so a
+                // config error has to land on 2, not 1, which -q reserves for
+                // "ran fine, found nothing". Outside -q, this tool's own
+                // convention (documented in the README) uses 1 for config/IO
+                // errors, so that's untouched.
+                std::process::exit(if args.quiet { 2 } else { 1 });
+            }
         }
     };
 
@@ -423,7 +531,7 @@ fn main() {
 
     let config = Arc::new(SearchConfig {
         regex,
-        query: args.query,
+        query: args.query.clone().unwrap_or_default(),
         ignore_case: args.ignore_case,
         line_number: args.line_number,
         ignore_dirs,
@@ -441,6 +549,7 @@ fn main() {
         after_context,
         respect_gitignore,
         hidden: args.hidden,
+        files_only: args.files,
         quiet: args.quiet,
         only_matching: args.only_matching,
         max_count: args.max_count.map(|v| v as usize),
@@ -449,10 +558,19 @@ fn main() {
     let stats = SearchStats::new();
     let start_time = Instant::now();
 
-    let use_stdin = match &args.path {
-        Some(p) if p == "-" => true,
-        Some(_) => false,
-        None => !io::stdin().is_terminal(),
+    let use_stdin = if args.files {
+        // --files always lists a directory tree — never falls back to
+        // reading stdin, even if stdin happens to be piped and no PATH
+        // was given (which would otherwise trigger the auto-detection
+        // below). The `path == "-"` case is already rejected earlier as
+        // a hard error, before this point.
+        false
+    } else {
+        match &args.path {
+            Some(p) if p == "-" => true,
+            Some(_) => false,
+            None => !io::stdin().is_terminal(),
+        }
     };
 
     if use_stdin {
@@ -465,6 +583,7 @@ fn main() {
         let regex = config.regex.clone();
         let files_with_matches = config.files_with_matches;
         let files_without_match = config.files_without_match;
+        let files_only = config.files_only;
         let count_per_file = config.count_per_file;
 
         parallel_grep(root_path, args.jobs, config, stats.clone(), move |result| {
@@ -472,6 +591,7 @@ fn main() {
                 &result,
                 files_with_matches,
                 files_without_match,
+                files_only,
                 count_per_file,
                 line_number,
                 &regex,
@@ -786,6 +906,7 @@ fn print_result(
     result: &argrep::MatchResult,
     files_with_matches: bool,
     files_without_match: bool,
+    files_only: bool,
     count_per_file: bool,
     line_number: bool,
     regex: &Regex,
@@ -795,11 +916,11 @@ fn print_result(
         return;
     }
 
-    if files_with_matches || files_without_match {
-        // -l and -L both emit a bare filename result (line_num: 0, no
-        // content) — the distinction between "has a match" and "has no
-        // match" is entirely in *which files ever produced a result at
-        // all* (see grep_file/grep_stdin), not in how that result prints.
+    if files_with_matches || files_without_match || files_only {
+        // -l, -L, and --files all emit the same bare filename result
+        // (line_num: 0, no content) — what distinguishes them is entirely
+        // *which files ever produced a result at all* (see grep_file/
+        // emit_file_listing/grep_stdin), not how that result prints.
         println!("{}", result.file_path.display().to_string().magenta());
     } else if count_per_file {
         println!(
@@ -834,7 +955,7 @@ fn print_result(
 
 #[cfg(test)]
 mod tests {
-    use super::{Args, TYPE_TABLE, build_ignore_dirs, default_jobs};
+    use super::{Args, TYPE_TABLE, build_ignore_dirs, default_jobs, resolve_files_path};
     use clap::Parser;
 
     // ── -j / --jobs boundary ─────────────────────────────────────────────────
@@ -1140,6 +1261,127 @@ mod tests {
                 );
             }
         }
+    }
+
+    // ── --files ───────────────────────────────────────────────────────────
+    // QUERY becomes optional, a lone positional under --files is PATH not
+    // QUERY, and --files conflicts with every flag that presupposes real
+    // content search. resolve_files_path is tested directly (it's a pure
+    // function) rather than only through full CLI parsing, since it's
+    // where the actual positional-reinterpretation logic lives.
+
+    #[test]
+    fn files_flag_defaults_to_false() {
+        let args = Args::try_parse_from(["argrep", "foo", "."]).unwrap();
+        assert!(!args.files);
+    }
+
+    #[test]
+    fn query_is_not_required_with_files() {
+        let args = Args::try_parse_from(["argrep", "--files"]).unwrap();
+        assert!(args.files);
+        assert!(args.query.is_none());
+    }
+
+    #[test]
+    fn query_is_still_required_without_files() {
+        let result = Args::try_parse_from(["argrep"]);
+        assert!(
+            result.is_err(),
+            "QUERY must still be required when --files is not given"
+        );
+    }
+
+    #[test]
+    fn files_conflicts_with_flags_that_need_real_content_search() {
+        for flag in ["-l", "-L", "-c", "-v", "-o", "-n", "-q"] {
+            let result = Args::try_parse_from(["argrep", "--files", flag, "."]);
+            assert!(
+                result.is_err(),
+                "--files combined with {flag} must be a CLI parse error"
+            );
+        }
+        for (flag, value) in [("-m", "1"), ("-A", "1"), ("-B", "1"), ("-C", "1")] {
+            let result = Args::try_parse_from(["argrep", "--files", flag, value, "."]);
+            assert!(
+                result.is_err(),
+                "--files combined with {flag} {value} must be a CLI parse error"
+            );
+        }
+    }
+
+    #[test]
+    fn files_accepts_filtering_flags() {
+        // --files is specifically meant to combine with every traversal
+        // filter — that's the whole point of the feature (a debugging
+        // view of the traversal engine).
+        let args = Args::try_parse_from([
+            "argrep",
+            "--files",
+            "--hidden",
+            "--no-ignore",
+            "--type",
+            "rust",
+            "--exclude",
+            "*.generated.rs",
+            ".",
+        ])
+        .unwrap();
+        assert!(args.files);
+        assert!(args.hidden);
+        assert!(args.no_ignore);
+        assert_eq!(args.r#type, vec!["rust".to_string()]);
+        assert_eq!(args.exclude, vec!["*.generated.rs".to_string()]);
+    }
+
+    #[test]
+    fn files_accepts_harmless_query_flags_with_no_effect() {
+        // -i/-F/-w/-x only configure how QUERY becomes a regex, and
+        // --files never builds a real one — accepted, not rejected,
+        // since there's nothing contradictory about them, just nothing
+        // for them to do.
+        let args = Args::try_parse_from(["argrep", "--files", "-i", "-F", "."]).unwrap();
+        assert!(args.files);
+        assert!(args.ignore_case);
+        assert!(args.fixed_strings);
+    }
+
+    #[test]
+    fn resolve_files_path_with_no_positionals_is_none() {
+        assert_eq!(resolve_files_path(None, None), Ok(None));
+    }
+
+    #[test]
+    fn resolve_files_path_treats_lone_query_slot_value_as_path() {
+        // This is the common case: `argrep --files .` — clap binds "."
+        // to the (positionally-first) query slot, and this function is
+        // what turns that into PATH instead.
+        assert_eq!(
+            resolve_files_path(Some(".".to_string()), None),
+            Ok(Some(".".to_string()))
+        );
+        assert_eq!(
+            resolve_files_path(Some("~".to_string()), None),
+            Ok(Some("~".to_string()))
+        );
+    }
+
+    #[test]
+    fn resolve_files_path_treats_lone_path_slot_value_as_path() {
+        assert_eq!(
+            resolve_files_path(None, Some("src".to_string())),
+            Ok(Some("src".to_string()))
+        );
+    }
+
+    #[test]
+    fn resolve_files_path_rejects_two_positionals() {
+        let result = resolve_files_path(Some("foo".to_string()), Some(".".to_string()));
+        assert!(
+            result.is_err(),
+            "two positionals together with --files must be a usage error, \
+             not a silent guess about which one was meant as the path"
+        );
     }
 
     // ── --stats ───────────────────────────────────────────────────────────

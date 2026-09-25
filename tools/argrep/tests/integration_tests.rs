@@ -58,6 +58,7 @@ fn default_config(query: &str, ignore_case: bool) -> std::sync::Arc<argrep::Sear
         after_context: 0,
         respect_gitignore: true,
         hidden: false,
+        files_only: false,
         quiet: false,
         only_matching: false,
         max_count: None,
@@ -487,6 +488,7 @@ fn hidden_config(query: &str, hidden: bool, no_ignore: bool) -> StdArc<SearchCon
         after_context: 0,
         respect_gitignore: !no_ignore,
         hidden,
+        files_only: false,
         quiet: false,
         only_matching: false,
         max_count: None,
@@ -647,6 +649,7 @@ fn type_config(
         after_context: 0,
         respect_gitignore: true,
         hidden: false,
+        files_only: false,
         quiet: false,
         only_matching: false,
         max_count: None,
@@ -799,6 +802,7 @@ fn custom_ignore_dir_is_excluded() {
         after_context: 0,
         respect_gitignore: true,
         hidden: false,
+        files_only: false,
         quiet: false,
         only_matching: false,
         max_count: None,
@@ -861,6 +865,7 @@ fn stats_counts_are_accurate() {
         after_context: 0,
         respect_gitignore: true,
         hidden: false,
+        files_only: false,
         quiet: false,
         only_matching: false,
         max_count: None,
@@ -899,6 +904,7 @@ fn stats_config(query: &str, exclude: &[&str]) -> StdArc<SearchConfig> {
         after_context: 0,
         respect_gitignore: true,
         hidden: false,
+        files_only: false,
         quiet: false,
         only_matching: false,
         max_count: None,
@@ -1008,6 +1014,158 @@ fn bytes_read_is_nonzero_after_reading_file_content() {
     );
 }
 
+// ── --files (files_only) ────────────────────────────────────────────────────
+//
+// --files lists the files the traversal engine would search, without
+// ever opening them — every filter (hidden, gitignore, --exclude,
+// --include, --type/--type-not) still applies exactly as it would for a
+// real search. These tests exercise that at the library level
+// (SearchConfig.files_only), independent of the CLI-level QUERY/PATH
+// handling covered in main.rs's own tests.
+
+fn files_only_config(
+    hidden: bool,
+    no_ignore: bool,
+    exclude: &[&str],
+    type_globs: &[&str],
+) -> StdArc<SearchConfig> {
+    StdArc::new(SearchConfig {
+        // The query/regex are never used in files_only mode (grep_file is
+        // never called) — an always-matches placeholder is fine here,
+        // same as main.rs uses Regex::new("") for the same reason.
+        regex: build_matcher("", MatchOptions::default()).unwrap(),
+        query: String::new(),
+        ignore_case: false,
+        line_number: false,
+        ignore_dirs: if no_ignore {
+            HashSet::new()
+        } else {
+            DEFAULT_IGNORES.iter().map(|s| s.to_string()).collect()
+        },
+        ignore_dir_patterns: Vec::new(),
+        debug: false,
+        invert: false,
+        files_with_matches: false,
+        files_without_match: false,
+        count_per_file: false,
+        include_pattern: None,
+        exclude_patterns: exclude.iter().map(|g| Pattern::new(g).unwrap()).collect(),
+        type_patterns: type_globs
+            .iter()
+            .map(|g| Pattern::new(g).unwrap())
+            .collect(),
+        type_not_patterns: Vec::new(),
+        before_context: 0,
+        after_context: 0,
+        respect_gitignore: !no_ignore,
+        hidden,
+        files_only: true,
+        quiet: false,
+        only_matching: false,
+        max_count: None,
+    })
+}
+
+#[test]
+fn files_lists_files_that_pass_every_filter() {
+    let (_dir, root) = make_tree(&[
+        ("a.rs", "content\n"),
+        ("b.py", "content\n"),
+        ("sub/c.rs", "content\n"),
+    ]);
+    let names = run(root, files_only_config(false, false, &[], &[]));
+    assert_eq!(names, vec!["a.rs", "b.py", "c.rs"]);
+}
+
+#[test]
+fn files_never_reads_file_content() {
+    let (_dir, root) = make_tree(&[("a.txt", "some content that would otherwise be read\n")]);
+    let config = files_only_config(false, false, &[], &[]);
+    let stats = SearchStats::new();
+    let names_count = Arc::new(Mutex::new(0usize));
+    let n = Arc::clone(&names_count);
+    parallel_grep(root, 2, config, stats.clone(), move |_| {
+        *n.lock().unwrap() += 1;
+    });
+
+    assert_eq!(
+        *names_count.lock().unwrap(),
+        1,
+        "the file must still be listed"
+    );
+    assert_eq!(
+        stats.bytes_read.load(Ordering::Relaxed),
+        0,
+        "--files must never open/read file content — bytes_read must stay \
+         at zero"
+    );
+    assert_eq!(
+        stats.matched_lines.load(Ordering::Relaxed),
+        0,
+        "nothing is ever matched in --files mode, since content is never \
+         read"
+    );
+}
+
+#[test]
+fn files_respects_hidden_flag() {
+    let (_dir, root) = make_tree(&[(".secret", "x\n"), ("visible.txt", "x\n")]);
+    let without_hidden = run(root.clone(), files_only_config(false, false, &[], &[]));
+    assert_eq!(without_hidden, vec!["visible.txt"]);
+
+    let with_hidden = run(root, files_only_config(true, false, &[], &[]));
+    assert_eq!(with_hidden, vec![".secret", "visible.txt"]);
+}
+
+#[test]
+fn files_respects_no_ignore_flag() {
+    let (_dir, root) = make_tree(&[(".git/config", "x\n"), ("visible.txt", "x\n")]);
+    let without_no_ignore = run(root.clone(), files_only_config(true, false, &[], &[]));
+    assert_eq!(
+        without_no_ignore,
+        vec!["visible.txt"],
+        "--hidden alone must not reveal .git — that's --no-ignore's job, \
+         same independence rule as a real search"
+    );
+
+    let with_both = run(root, files_only_config(true, true, &[], &[]));
+    assert_eq!(with_both, vec!["config", "visible.txt"]);
+}
+
+#[test]
+fn files_respects_type_filter() {
+    let (_dir, root) = make_tree(&[("a.rs", "x\n"), ("b.py", "x\n"), ("c.rs", "x\n")]);
+    let names = run(root, files_only_config(false, false, &[], &["*.rs"]));
+    assert_eq!(names, vec!["a.rs", "c.rs"]);
+}
+
+#[test]
+fn files_respects_exclude_filter() {
+    let (_dir, root) = make_tree(&[("keep.rs", "x\n"), ("skip.generated.rs", "x\n")]);
+    let names = run(
+        root,
+        files_only_config(false, false, &["*.generated.rs"], &[]),
+    );
+    assert_eq!(names, vec!["keep.rs"]);
+}
+
+#[test]
+fn files_updates_discovered_and_skipped_stats_consistently() {
+    // The files_discovered/files_skipped accounting identity documented
+    // on SearchStats holds in --files mode too — filtering runs exactly
+    // the same way, only the content-reading step is skipped.
+    let (_dir, root) = make_tree(&[("a.rs", "x\n"), ("b.generated.rs", "x\n"), ("c.py", "x\n")]);
+    let config = files_only_config(false, false, &["*.generated.rs"], &["*.rs"]);
+    let stats = SearchStats::new();
+    parallel_grep(root, 2, config, stats.clone(), |_| {});
+
+    assert_eq!(stats.files_discovered.load(Ordering::Relaxed), 3);
+    // a.rs passes; b.generated.rs is excluded; c.py fails the --type
+    // rust filter — so total_files ("searched"/listed) is 1, skipped is 2.
+    assert_eq!(stats.total_files.load(Ordering::Relaxed), 1);
+    assert_eq!(stats.files_skipped.load(Ordering::Relaxed), 2);
+}
+
 // ── Terminal-safety: control characters in matched content ─────────────────────
 //
 // A file that passes the binary sniff (no NUL in the first 1024 bytes) can
@@ -1063,6 +1221,7 @@ fn only_matching_output_escapes_control_characters_in_matched_text() {
         after_context: 0,
         respect_gitignore: true,
         hidden: false,
+        files_only: false,
         quiet: false,
         only_matching: true,
         max_count: None,
@@ -1106,6 +1265,7 @@ fn context_lines_with_control_characters_are_also_escaped() {
         after_context: 1,
         respect_gitignore: true,
         hidden: false,
+        files_only: false,
         quiet: false,
         only_matching: false,
         max_count: None,
@@ -1169,6 +1329,7 @@ fn control_characters_do_not_affect_whether_a_line_matches() {
             after_context: 0,
             respect_gitignore: true,
             hidden: false,
+            files_only: false,
             quiet: false,
             only_matching: false,
             max_count: None,
@@ -1247,6 +1408,7 @@ fn multiple_workers_find_same_matches_as_single_worker() {
             after_context: 0,
             respect_gitignore: true,
             hidden: false,
+            files_only: false,
             quiet: false,
             only_matching: false,
             max_count: None,
@@ -1331,6 +1493,7 @@ fn invert_returns_non_matching_lines() {
         after_context: 0,
         respect_gitignore: true,
         hidden: false,
+        files_only: false,
         quiet: false,
         only_matching: false,
         max_count: None,
@@ -1380,6 +1543,7 @@ fn invert_with_no_matches_returns_all_lines() {
         after_context: 0,
         respect_gitignore: true,
         hidden: false,
+        files_only: false,
         quiet: false,
         only_matching: false,
         max_count: None,
@@ -1435,6 +1599,7 @@ fn files_with_matches_returns_only_filenames() {
         after_context: 0,
         respect_gitignore: true,
         hidden: false,
+        files_only: false,
         quiet: false,
         only_matching: false,
         max_count: None,
@@ -1489,6 +1654,7 @@ fn files_with_matches_emits_each_file_once() {
         after_context: 0,
         respect_gitignore: true,
         hidden: false,
+        files_only: false,
         quiet: false,
         only_matching: false,
         max_count: None,
@@ -1558,6 +1724,7 @@ fn files_without_match_returns_only_unmatched_filenames() {
         after_context: 0,
         respect_gitignore: true,
         hidden: false,
+        files_only: false,
         quiet: false,
         only_matching: false,
         max_count: None,
@@ -1616,6 +1783,7 @@ fn files_without_match_emits_nothing_when_every_file_matches() {
         after_context: 0,
         respect_gitignore: true,
         hidden: false,
+        files_only: false,
         quiet: false,
         only_matching: false,
         max_count: None,
@@ -1677,6 +1845,7 @@ fn files_without_match_with_invert_reports_files_where_every_line_matches() {
         after_context: 0,
         respect_gitignore: true,
         hidden: false,
+        files_only: false,
         quiet: false,
         only_matching: false,
         max_count: None,
@@ -1731,6 +1900,7 @@ fn files_without_match_stops_reading_after_first_match() {
         after_context: 0,
         respect_gitignore: true,
         hidden: false,
+        files_only: false,
         quiet: false,
         only_matching: false,
         max_count: None,
@@ -1803,6 +1973,7 @@ fn files_without_match_excludes_unreadable_files() {
         after_context: 0,
         respect_gitignore: true,
         hidden: false,
+        files_only: false,
         quiet: false,
         only_matching: false,
         max_count: None,
@@ -1866,6 +2037,7 @@ fn files_without_match_quiet_produces_no_output() {
         after_context: 0,
         respect_gitignore: true,
         hidden: false,
+        files_only: false,
         quiet: true,
         only_matching: false,
         max_count: None,
@@ -1931,6 +2103,7 @@ fn count_per_file_returns_correct_counts() {
         after_context: 0,
         respect_gitignore: true,
         hidden: false,
+        files_only: false,
         quiet: false,
         only_matching: false,
         max_count: None,
@@ -1994,6 +2167,7 @@ fn count_per_file_emits_result_for_every_file() {
         after_context: 0,
         respect_gitignore: true,
         hidden: false,
+        files_only: false,
         quiet: false,
         only_matching: false,
         max_count: None,
@@ -2059,6 +2233,7 @@ fn invert_with_count_counts_non_matching_lines() {
         after_context: 0,
         respect_gitignore: true,
         hidden: false,
+        files_only: false,
         quiet: false,
         only_matching: false,
         max_count: None,
@@ -2126,6 +2301,7 @@ fn invert_with_files_with_matches_returns_files_with_a_non_matching_line() {
         after_context: 0,
         respect_gitignore: true,
         hidden: false,
+        files_only: false,
         quiet: false,
         only_matching: false,
         max_count: None,
@@ -2191,6 +2367,7 @@ fn invert_with_context_builds_context_around_inverted_matches() {
         after_context: 1,
         respect_gitignore: true,
         hidden: false,
+        files_only: false,
         quiet: false,
         only_matching: false,
         max_count: None,
@@ -2263,6 +2440,7 @@ fn include_pattern_searches_only_matching_files() {
         after_context: 0,
         respect_gitignore: true,
         hidden: false,
+        files_only: false,
         quiet: false,
         only_matching: false,
         max_count: None,
@@ -2314,6 +2492,7 @@ fn include_pattern_no_files_match_returns_empty() {
         after_context: 0,
         respect_gitignore: true,
         hidden: false,
+        files_only: false,
         quiet: false,
         only_matching: false,
         max_count: None,
@@ -2361,6 +2540,7 @@ fn include_wildcard_matches_all_files() {
         after_context: 0,
         respect_gitignore: true,
         hidden: false,
+        files_only: false,
         quiet: false,
         only_matching: false,
         max_count: None,
@@ -2393,6 +2573,7 @@ fn include_wildcard_matches_all_files() {
         after_context: 0,
         respect_gitignore: true,
         hidden: false,
+        files_only: false,
         quiet: false,
         only_matching: false,
         max_count: None,
@@ -2457,6 +2638,7 @@ fn before_context_includes_leading_lines() {
         after_context: 0,
         respect_gitignore: true,
         hidden: false,
+        files_only: false,
         quiet: false,
         only_matching: false,
         max_count: None,
@@ -2518,6 +2700,7 @@ fn after_context_includes_trailing_lines() {
         after_context: 2,
         respect_gitignore: true,
         hidden: false,
+        files_only: false,
         quiet: false,
         only_matching: false,
         max_count: None,
@@ -2582,6 +2765,7 @@ fn context_both_and_group_separator() {
         after_context: 1,
         respect_gitignore: true,
         hidden: false,
+        files_only: false,
         quiet: false,
         only_matching: false,
         max_count: None,
@@ -2652,6 +2836,7 @@ fn query_is_a_regex_by_default() {
         after_context: 0,
         respect_gitignore: true,
         hidden: false,
+        files_only: false,
         quiet: false,
         only_matching: false,
         max_count: None,
@@ -2706,6 +2891,7 @@ fn fixed_strings_mode_matches_literally() {
         after_context: 0,
         respect_gitignore: true,
         hidden: false,
+        files_only: false,
         quiet: false,
         only_matching: false,
         max_count: None,
@@ -2772,6 +2958,7 @@ fn whole_word_matches_only_word_boundaries() {
         after_context: 0,
         respect_gitignore: true,
         hidden: false,
+        files_only: false,
         quiet: false,
         only_matching: false,
         max_count: None,
@@ -2828,6 +3015,7 @@ fn whole_line_matches_only_exact_line() {
         after_context: 0,
         respect_gitignore: true,
         hidden: false,
+        files_only: false,
         quiet: false,
         only_matching: false,
         max_count: None,
@@ -2879,6 +3067,7 @@ fn quiet_mode_produces_no_output() {
         after_context: 0,
         respect_gitignore: true,
         hidden: false,
+        files_only: false,
         quiet: true,
         only_matching: false,
         max_count: None,
@@ -2929,6 +3118,7 @@ fn quiet_mode_with_no_matches_reports_zero() {
         after_context: 0,
         respect_gitignore: true,
         hidden: false,
+        files_only: false,
         quiet: true,
         only_matching: false,
         max_count: None,
@@ -2972,6 +3162,7 @@ fn only_matching_emits_one_row_per_occurrence() {
         after_context: 0,
         respect_gitignore: true,
         hidden: false,
+        files_only: false,
         quiet: false,
         only_matching: true,
         max_count: None,
@@ -3022,6 +3213,7 @@ fn count_per_file_takes_priority_over_only_matching() {
         after_context: 0,
         respect_gitignore: true,
         hidden: false,
+        files_only: false,
         quiet: false,
         only_matching: true,
         max_count: None,
@@ -3066,6 +3258,7 @@ fn max_count_stops_after_n_matching_lines() {
         after_context: 0,
         respect_gitignore: true,
         hidden: false,
+        files_only: false,
         quiet: false,
         only_matching: false,
         max_count: Some(2),
@@ -3109,6 +3302,7 @@ fn max_count_caps_the_count_per_file_total() {
         after_context: 0,
         respect_gitignore: true,
         hidden: false,
+        files_only: false,
         quiet: false,
         only_matching: false,
         max_count: Some(2),
@@ -3155,6 +3349,7 @@ fn max_count_with_only_matching_counts_lines_not_occurrences() {
         after_context: 0,
         respect_gitignore: true,
         hidden: false,
+        files_only: false,
         quiet: false,
         only_matching: true,
         max_count: Some(1),
@@ -3199,6 +3394,7 @@ fn max_count_still_flushes_trailing_context() {
         after_context: 1,
         respect_gitignore: true,
         hidden: false,
+        files_only: false,
         quiet: false,
         only_matching: false,
         max_count: Some(1),
@@ -3248,6 +3444,7 @@ fn exclude_skips_matching_files() {
         after_context: 0,
         respect_gitignore: true,
         hidden: false,
+        files_only: false,
         quiet: false,
         only_matching: false,
         max_count: None,
@@ -3297,6 +3494,7 @@ fn exclude_wins_over_include_on_overlap() {
         after_context: 0,
         respect_gitignore: true,
         hidden: false,
+        files_only: false,
         quiet: false,
         only_matching: false,
         max_count: None,
@@ -3341,6 +3539,7 @@ fn exclude_dir_glob_skips_matching_directories() {
         after_context: 0,
         respect_gitignore: true,
         hidden: false,
+        files_only: false,
         quiet: false,
         only_matching: false,
         max_count: None,

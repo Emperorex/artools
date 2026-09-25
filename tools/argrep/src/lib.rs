@@ -150,6 +150,18 @@ pub struct SearchConfig {
     /// search root is always searched regardless of this flag, since it
     /// never goes through the per-entry hidden check in scan_and_grep.
     pub hidden: bool,
+    /// --files: list files that would be searched, without ever opening
+    /// or reading them. Every filter still runs exactly as it would for a
+    /// real search (hidden, gitignore, --include/--exclude, --type/
+    /// --type-not, --exclude-dir) — only the actual content read is
+    /// skipped, at the two call sites in scan_and_grep that would
+    /// otherwise call grep_file. `total_files`/`files_discovered`/
+    /// `files_skipped` are still tracked (a file is still "searched" in
+    /// the sense of "listed"); `bytes_read`/`matched_lines` stay at zero,
+    /// since nothing is ever opened. See main.rs's Args::files doc
+    /// comment for the CLI-level rules (QUERY becomes optional, a lone
+    /// positional is treated as PATH).
+    pub files_only: bool,
     /// -q: suppress all output; only the exit code matters. Search stops
     /// as soon as one match is found (see grep_file/scan_and_grep/the
     /// worker loop in parallel_grep for the early-exit checkpoints).
@@ -463,7 +475,11 @@ pub fn scan_and_grep(
         // doc for why this must stay in sync with the entries-loop below.
         stats.files_discovered.fetch_add(1, Ordering::Relaxed);
         stats.total_files.fetch_add(1, Ordering::Relaxed);
-        grep_file(dir_path, config, output_tx, stats);
+        if config.files_only {
+            emit_file_listing(dir_path, output_tx);
+        } else {
+            grep_file(dir_path, config, output_tx, stats);
+        }
         return;
     }
 
@@ -604,9 +620,30 @@ pub fn scan_and_grep(
             }
 
             stats.total_files.fetch_add(1, Ordering::Relaxed);
-            grep_file(&entry_path, config, output_tx, stats);
+            if config.files_only {
+                emit_file_listing(&entry_path, output_tx);
+            } else {
+                grep_file(&entry_path, config, output_tx, stats);
+            }
         }
     }
+}
+
+/// --files: emits a bare-filename result for `file_path` without ever
+/// opening it — the content-free counterpart to grep_file, used at both
+/// of scan_and_grep's call sites when `config.files_only` is set. Same
+/// output shape as -l's own bare-filename MatchResult (line_num 0, no
+/// content), which is what lets print_result in main.rs reuse that exact
+/// print branch for --files too.
+fn emit_file_listing(file_path: &Path, output_tx: &crossbeam_channel::Sender<MatchResult>) {
+    let _ = output_tx.send(MatchResult {
+        file_path: file_path.to_path_buf(),
+        line_num: 0,
+        line_content: String::new(),
+        count: None,
+        is_context: false,
+        is_separator: false,
+    });
 }
 
 pub fn grep_file(

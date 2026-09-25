@@ -216,6 +216,19 @@ whichever was meant as the path).
 
 `--files` pairs naturally with `--stats`: `argrep --files --stats . > /dev/null` gives you the discovered/searched/skipped breakdown for a filter combination without printing a single filename, which is often exactly what you want when you're trying to understand *why* a file is or isn't being picked up.
 
+Use `-z`/`--search-compressed` to search inside gzip-compressed files (by extension: `.gz`) without decompressing them yourself first:
+
+```
+argrep -z 'ERROR' /var/log/
+argrep -z 'OutOfMemory' app-*.log.gz
+```
+
+This is aimed squarely at rotated logs — `logrotate` compresses old logs as gzip by default, so `app.log.1.gz`, `app.log.2.gz`, etc. are exactly what `-z` is for. Without `-z`, a `.gz` file is just opaque compressed bytes as far as `argrep` is concerned, and gets skipped by the ordinary [binary-file detection](#binary-file-handling) like any other binary file — `-z` is what tells `argrep` to decompress first, search the result, and still apply that same binary check to the *decompressed* content (so a gzip-compressed binary file is still correctly skipped, not suddenly "searchable" just because it decompresses).
+
+**Currently gzip (`.gz`) is the only supported compression format.** `.xz`, `.bz2`, and `.zst` aren't decompressed yet: unlike gzip (which this project vendors a pure-Rust decoder for, for zero extra build dependencies), decompressing those formats well typically means linking a system C library (`liblzma`, `libbz2`, `libzstd` respectively), which isn't something to take on without a clear need. If you rely on one of those formats for logs, we'd like to hear about it — for now, the `zcat`/`xzcat`/`bzcat`/`zstdcat | argrep` pipeline still works fine for anything `-z` doesn't cover yet. `.tar.gz`/`.tgz` archives are also out of scope: those bundle multiple files together, and `-z` decompresses a single stream, so it would search the raw tar layout rather than the files inside it — a different, larger feature (archive member iteration) that `ripgrep`'s own `-z` doesn't attempt either.
+
+`-z` has no effect combined with `--files`, since content — compressed or not — is never read in that mode either way.
+
 ## Options
 
 | Flag                    | Short | Default           | Description                                                                                                                                              |
@@ -245,6 +258,7 @@ whichever was meant as the path).
 | `--debug`               | `-d`  | —                 | Print the --stats summary plus a line for every file/dir that failed to read, as it happens                                                              |
 | `--stats`               | —     | —                 | Print a clean search summary (files discovered/searched/skipped, directories, bytes read, workers, matches, elapsed) to stderr; independent of `--debug` |
 | `--files`               | —     | —                 | List files that would be searched, without reading them; QUERY not required; conflicts with content-search flags (see Usage above)                       |
+| `--search-compressed`   | `-z`  | —                 | Decompress gzip (`.gz`) files before searching; no effect combined with `--files`                                                                        |
 | `--quiet`               | `-q`  | —                 | No output; exit code alone reports match/no-match/error (see Exit codes below). Overrides -l/-c/-n if also set — nothing is printed either way.          |
 
 `-l`, `-L`, and `-c` cannot be combined with each other — they imply mutually incompatible output contracts (`filename` matched vs `filename` unmatched vs `filename: count`), so combining any two of them (`argrep foo . -c -l`, `argrep foo . -l -L`, etc.) is a CLI error rather than one silently overriding the other.
@@ -265,6 +279,8 @@ Hidden files and directories (names starting with `.`) are also skipped by defau
 `argrep` automatically skips binary files by checking the first 1024 bytes for null bytes. No flag needed — compiled binaries, images, and media files are silently ignored.
 
 Text files with invalid UTF-8 (a stray byte from a legacy encoding, a corrupted line, etc.) are still searched in full: an invalid sequence becomes `U+FFFD` in that one line rather than ending the scan partway through the file. This matches how tools like `ripgrep` treat non-UTF-8 text by default.
+
+With `-z`/`--search-compressed` (see Usage above), the binary sniff runs on the *decompressed* content, not the raw compressed bytes on disk — a gzip-compressed binary file is still correctly skipped, the same as an uncompressed one would be. Sniffing a decompressed (or otherwise non-seekable) stream works a little differently under the hood than sniffing a plain file: since it generally can't be rewound, the sniffed bytes are held onto and replayed ahead of the rest of the stream instead of seeking back to the start. This has one small side benefit worth calling out: it also means a FIFO/named pipe can now be searched at all, where it previously failed outright (rewinding after the sniff read isn't possible on a pipe either).
 
 The null-byte sniff only catches files that are binary *in that specific way* — plenty of non-NUL content still isn't meant to be printed as text (cache files, compiled artifacts without embedded NULs, etc.), and a search run with `--hidden --no-ignore` deliberately walks into exactly that kind of content. So as a second, independent layer of protection: any control character in a matched or context line — bell, escape, carriage return, and the rest of the C0 control range plus DEL — is escaped as visible `\xHH` text before printing, rather than being sent to the terminal raw. Without this, a match landing inside such a file could ring the terminal bell, overwrite the current line, or in principle inject arbitrary ANSI sequences into your terminal. This only affects what gets *printed*: the query still matches against the original, unescaped content, so a pattern that's meant to match a real control byte still works exactly as before.
 
@@ -365,6 +381,9 @@ argrep "TODO" /large/project --stats -l
 # Debug why a file isn't showing up in results: does the traversal
 # engine even see it?
 argrep --files --hidden --no-ignore . | grep 'suspect_file'
+
+# Search rotated logs without decompressing them by hand
+argrep -z 'OutOfMemoryError' /var/log/app/*.log.gz
 ```
 
 ## Comparison with `grep`
@@ -391,6 +410,7 @@ argrep --files --hidden --no-ignore . | grep 'suspect_file'
 | File type filter       | `grep -r --include="*.rs" "query" .`           | `argrep --include "*.rs" "query" .`           |
 | Named file type        | *(no equivalent — spell out the glob)*         | `argrep --type rust "query" .`                |
 | List files, no search  | `find . -type f` **                            | `argrep --files .`                            |
+| Search gzip files      | `zgrep "query" file.log.gz`                    | `argrep -z "query" file.log.gz`               |
 | Skip binary files      | `grep -rI "query" .`                           | automatic                                     |
 | Skip node_modules      | `grep -r --exclude-dir=node_modules`           | automatic                                     |
 | Pipe from stdin        | `cmd \| grep "query"`                          | `cmd \| argrep "query"`                       |

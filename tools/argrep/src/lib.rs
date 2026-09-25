@@ -1,5 +1,6 @@
 use colored::Colorize;
 use crossbeam_channel::unbounded;
+use flate2::read::GzDecoder;
 use glob::Pattern;
 use ignore::{
     Match,
@@ -10,7 +11,7 @@ use std::{
     borrow::Cow,
     collections::{HashSet, VecDeque},
     fs::{self, File},
-    io::{BufRead, BufReader, Read, Seek, SeekFrom},
+    io::{BufRead, BufReader, Cursor, Read},
     path::{Path, PathBuf},
     sync::{
         Arc,
@@ -72,6 +73,28 @@ pub fn sanitize_for_display(s: &str) -> Cow<'_, str> {
         }
     }
     Cow::Owned(out)
+}
+
+/// Returns true if `path`'s extension marks it as gzip-compressed, the
+/// only format -z/--search-compressed currently decompresses. `.tar.gz`/
+/// `.tgz` are deliberately excluded: those are archives (multiple files
+/// bundled together), not a single compressed stream, and reading one
+/// with a plain gzip decompressor would search the raw, uninterpreted
+/// tar format bytes rather than the files inside it — a different,
+/// larger feature (archive member iteration) that ripgrep's own -z
+/// doesn't attempt either, for the same reason.
+///
+/// xz (.xz), bzip2 (.bz2), and zstd (.zst) are intentionally not
+/// supported yet: unlike gzip, decompressing them well typically means
+/// depending on a crate that links a system C library (liblzma, libbz2,
+/// libzstd), which this project doesn't want to take on sight-unseen.
+/// Gzip covers the motivating case (rotated logs, which overwhelmingly
+/// use gzip by default via `logrotate`) without that risk. Extending
+/// this function — and the two call sites in grep_file that use it — is
+/// the natural next step if one of those formats turns out to matter in
+/// practice.
+pub fn is_gzip_target(path: &Path) -> bool {
+    path.extension().and_then(|e| e.to_str()) == Some("gz")
 }
 
 /// Task sent to workers representing a directory or file to scan
@@ -162,6 +185,15 @@ pub struct SearchConfig {
     /// comment for the CLI-level rules (QUERY becomes optional, a lone
     /// positional is treated as PATH).
     pub files_only: bool,
+    /// -z/--search-compressed: decompress gzip-compressed files (by
+    /// extension: `.gz`) on the fly before searching their content.
+    /// Currently the only supported compression format — see
+    /// `is_gzip_target`'s doc comment for why xz/bz2/zst aren't included
+    /// yet. Has no effect combined with `--files`, since content is never
+    /// read in that mode either way; not rejected as a conflict, same as
+    /// -i/-F/-w/-x under --files, since there's nothing contradictory
+    /// about it, just nothing for it to do.
+    pub search_compressed: bool,
     /// -q: suppress all output; only the exit code matters. Search stops
     /// as soon as one match is found (see grep_file/scan_and_grep/the
     /// worker loop in parallel_grep for the early-exit checkpoints).
@@ -663,28 +695,42 @@ pub fn grep_file(
         }
     };
 
-    let mut reader = BufReader::new(file);
+    // -z/--search-compressed: transparently decompress gzip files. The
+    // resulting content stream is boxed so the rest of this function
+    // doesn't need to know or care which case it's in.
+    let content: Box<dyn Read> = if config.search_compressed && is_gzip_target(file_path) {
+        Box::new(GzDecoder::new(file))
+    } else {
+        Box::new(file)
+    };
+    let mut buffered = BufReader::new(content);
 
-    // Fast binary file sniffing: check the first 1024 bytes for a null byte
+    // Fast binary file sniffing: check the first 1024 bytes for a null
+    // byte. A decompressed stream generally isn't seekable (GzDecoder
+    // doesn't implement Seek), so rather than rewinding back to the start
+    // after sniffing — which also happens to make this handle pipes/FIFOs
+    // that were never seekable to begin with — the sniffed bytes are held
+    // onto and replayed via Read::chain ahead of the rest of the stream.
+    // This works identically for a plain file, a decompressed one, or a
+    // FIFO, so there's exactly one code path below instead of two nearly
+    // identical ones.
     let mut sniffer_buffer = [0u8; 1024];
-    if let Ok(sniffed) = reader.read(&mut sniffer_buffer) {
-        stats.bytes_read.fetch_add(sniffed, Ordering::Relaxed);
-        if sniffer_buffer[..sniffed].contains(&0u8) {
-            return; // Skip compiled binaries or media files
-        }
-        if let Err(err) = reader.seek(SeekFrom::Start(0)) {
-            // Rewinding after the sniff read failed — an actual I/O error,
-            // not something the loop below gets a chance to see, since we
-            // return before it runs. Per the #106 contract (I/O errors →
-            // nonzero exit), this must be counted the same as any other
-            // unreadable file, not silently skipped.
+    let sniffed = match buffered.read(&mut sniffer_buffer) {
+        Ok(n) => n,
+        Err(err) => {
             stats.io_errors.fetch_add(1, Ordering::Relaxed);
             if config.debug {
                 eprintln!("{}: {}: {}", "argrep".red(), file_path.display(), err);
             }
             return;
         }
+    };
+    stats.bytes_read.fetch_add(sniffed, Ordering::Relaxed);
+    if sniffer_buffer[..sniffed].contains(&0u8) {
+        return; // Skip compiled binaries or media files (post-decompression, for -z)
     }
+
+    let mut reader = Cursor::new(sniffer_buffer[..sniffed].to_vec()).chain(buffered);
 
     // Process file line by line, reusing a single heap allocation.
     //

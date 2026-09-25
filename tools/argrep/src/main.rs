@@ -333,6 +333,16 @@ struct Args {
     #[arg(long = "hidden")]
     hidden: bool,
 
+    /// Search inside gzip-compressed files (by extension: `.gz`) as if
+    /// they were decompressed first — no separate `zcat`/`gunzip` step
+    /// needed. The main motivating case is rotated logs (`app.log.gz`),
+    /// which `logrotate` compresses as gzip by default. Currently the
+    /// only supported compression format; see the README for why xz/
+    /// bz2/zst aren't included yet. Has no effect combined with --files,
+    /// since content is never read in that mode either way.
+    #[arg(short = 'z', long = "search-compressed")]
+    search_compressed: bool,
+
     /// List the files that would be searched, without searching their
     /// content — every filter still runs (.gitignore/.ignore, --hidden,
     /// --no-ignore, --include, --exclude, --type, --type-not,
@@ -550,6 +560,7 @@ fn main() {
         respect_gitignore,
         hidden: args.hidden,
         files_only: args.files,
+        search_compressed: args.search_compressed,
         quiet: args.quiet,
         only_matching: args.only_matching,
         max_count: args.max_count.map(|v| v as usize),
@@ -1183,6 +1194,36 @@ mod tests {
             "--hidden alone must not also set --no-ignore — they're \
              separate filtering layers"
         );
+    }
+
+    // ── -z / --search-compressed ─────────────────────────────────────────────
+
+    #[test]
+    fn search_compressed_flag_defaults_to_false() {
+        let args = Args::try_parse_from(["argrep", "foo", "."]).unwrap();
+        assert!(!args.search_compressed);
+    }
+
+    #[test]
+    fn search_compressed_short_flag_is_parsed() {
+        let args = Args::try_parse_from(["argrep", "foo", ".", "-z"]).unwrap();
+        assert!(args.search_compressed);
+    }
+
+    #[test]
+    fn search_compressed_long_flag_is_parsed() {
+        let args = Args::try_parse_from(["argrep", "foo", ".", "--search-compressed"]).unwrap();
+        assert!(args.search_compressed);
+    }
+
+    #[test]
+    fn search_compressed_is_accepted_with_files() {
+        // Harmless no-op combined with --files (content, compressed or
+        // not, is never read in that mode) — accepted, not rejected, same
+        // as -i/-F/-w/-x under --files.
+        let args = Args::try_parse_from(["argrep", "--files", "-z", "."]).unwrap();
+        assert!(args.files);
+        assert!(args.search_compressed);
     }
 
     // ── --type / --type-not ────────────────────────────────────────────────

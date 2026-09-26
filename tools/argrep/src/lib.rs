@@ -251,11 +251,16 @@ pub struct SearchStats {
     /// (that's `io_errors`, a different failure category from "skipped by
     /// our own filtering rules"). Displayed as "Files skipped".
     pub files_skipped: Arc<AtomicUsize>,
-    /// Total bytes read from file contents during scanning (the sniff
-    /// read plus every read_until call in grep_file; approximated for
-    /// stdin as line length + 1 per line, since BufRead::lines() strips
-    /// the newline it actually consumed). Displayed as "Bytes read" —
-    /// mainly useful for benchmarking throughput.
+    /// Total bytes read from file contents during scanning. Counted
+    /// entirely via each read_until call in grep_file's main loop — the
+    /// binary-sniff's own initial read is deliberately NOT counted
+    /// separately, since those same bytes are replayed through the main
+    /// loop via a Cursor and would otherwise be counted twice (a real bug
+    /// caught in review; see the comment at the sniff site in grep_file).
+    /// Approximated for stdin as line length + 1 per line, since
+    /// BufRead::lines() strips the newline it actually consumed.
+    /// Displayed as "Bytes read" — mainly useful for benchmarking
+    /// throughput.
     pub bytes_read: Arc<AtomicUsize>,
 }
 
@@ -725,7 +730,16 @@ pub fn grep_file(
             return;
         }
     };
-    stats.bytes_read.fetch_add(sniffed, Ordering::Relaxed);
+    // Deliberately NOT counted into stats.bytes_read here: these bytes are
+    // about to be replayed through the Cursor below and will pass through
+    // the main read loop's own read_until calls just like the rest of the
+    // stream, each of which already adds its byte count to bytes_read (see
+    // the `Ok(n) => stats.bytes_read.fetch_add(n, ...)` arm further down).
+    // Counting them here too would double-count the first `sniffed` bytes
+    // of every file searched — caught in review before merge, see
+    // bytes_read_exactly_matches_decompressed_content_length_for_gzip and
+    // its plain-file sibling in integration_tests.rs for the regression
+    // tests this depends on.
     if sniffer_buffer[..sniffed].contains(&0u8) {
         return; // Skip compiled binaries or media files (post-decompression, for -z)
     }

@@ -336,7 +336,40 @@ fn invalid_gzip_file_is_an_io_error_not_a_panic() {
 }
 
 #[test]
-fn bytes_read_reflects_decompressed_content_for_gzip() {
+fn bytes_read_exactly_matches_plain_file_content_length_not_double_counted() {
+    // The general form of the regression this guards against: the sniff
+    // step reads up to the first 1024 bytes to check for binary content,
+    // and those same bytes are then replayed through the main read loop
+    // via a Cursor (see grep_file) rather than re-read from disk. If the
+    // sniff's own read were *also* added to bytes_read (it was, briefly,
+    // during review of the -z change below), every file's count would be
+    // inflated by up to 1024 bytes — not a compression-specific bug, but
+    // one the -z refactor's shared sniff/chain code path introduced for
+    // every file, gzip or not. A loose ">=" assertion wouldn't catch
+    // this (double-counting only makes the number bigger, which such an
+    // assertion would wave through) — exact equality is the point here.
+    let content = "needle and some surrounding text\nsecond line\n";
+    let (_dir, root) = make_tree(&[("plain.txt", content)]);
+
+    let config = compressed_config("needle", false); // -z not relevant here
+    let stats = SearchStats::new();
+    let (output_tx, _output_rx) = crossbeam_channel::unbounded();
+    grep_file(&root.join("plain.txt"), &config, &output_tx, &stats);
+
+    assert_eq!(
+        stats.bytes_read.load(Ordering::Relaxed),
+        content.len(),
+        "bytes_read must exactly equal the file's content length — not \
+         more (double-counted), not less (truncated)"
+    );
+}
+
+#[test]
+fn bytes_read_exactly_matches_decompressed_content_length_for_gzip() {
+    // Same regression, specifically for the -z path this bug was found
+    // in review of: the sniffed prefix must be counted exactly once as
+    // it's replayed through the main loop, not once at the sniff site
+    // AND again when the Cursor replays it into read_until.
     let dir = TempDir::new().unwrap();
     let root = fs::canonicalize(dir.path()).unwrap();
     let plaintext = "needle and quite a lot of surrounding text so the \
@@ -351,14 +384,64 @@ fn bytes_read_reflects_decompressed_content_for_gzip() {
     let (output_tx, _output_rx) = crossbeam_channel::unbounded();
     grep_file(&root.join("app.log.gz"), &config, &output_tx, &stats);
 
-    let read = stats.bytes_read.load(Ordering::Relaxed);
-    assert!(
-        read >= plaintext.len(),
-        "bytes_read ({read}) must reflect the decompressed content size \
-         ({}), not the (smaller) compressed size on disk ({})",
+    assert_eq!(
+        stats.bytes_read.load(Ordering::Relaxed),
+        plaintext.len(),
+        "bytes_read must exactly equal the *decompressed* content length \
+         ({} bytes) — neither the smaller compressed size on disk ({} \
+         bytes) nor an inflated, double-counted figure",
         plaintext.len(),
         compressed.len()
     );
+}
+
+/// The core end-to-end contract of -z, stated as directly as possible:
+/// identical content, once plain and once gzip-compressed, searched both
+/// with and without -z. This is the test the CLI-parsing unit tests
+/// (search_compressed_flag_defaults_to_false and friends) don't cover on
+/// their own — they prove -z reaches SearchConfig, not that it actually
+/// changes search behavior.
+#[test]
+fn dash_z_end_to_end_plain_vs_gzip_with_and_without_the_flag() {
+    let content = "hello\nERROR something\n";
+    let (_dir, root) = make_tree(&[("plain.log", content)]);
+    let gz_path = root.join("compressed.log.gz");
+    fs::write(&gz_path, gzip_bytes(content.as_bytes())).unwrap();
+
+    // Plain file: always searchable, -z irrelevant to it either way.
+    for search_compressed in [false, true] {
+        let config = compressed_config("ERROR", search_compressed);
+        let stats = SearchStats::new();
+        let (output_tx, output_rx) = crossbeam_channel::unbounded();
+        grep_file(&root.join("plain.log"), &config, &output_tx, &stats);
+        assert!(
+            output_rx.try_recv().is_ok(),
+            "the plain file must match regardless of -z (search_compressed={search_compressed})"
+        );
+    }
+
+    // Gzip file without -z: opaque compressed bytes, skipped as binary.
+    let config = compressed_config("ERROR", false);
+    let stats = SearchStats::new();
+    let (output_tx, output_rx) = crossbeam_channel::unbounded();
+    grep_file(&gz_path, &config, &output_tx, &stats);
+    assert!(
+        output_rx.try_recv().is_err(),
+        "without -z, a .gz file must NOT match — it's opaque compressed \
+         bytes to grep_file, not searchable text"
+    );
+    assert_eq!(stats.matched_lines.load(Ordering::Relaxed), 0);
+
+    // Gzip file with -z: decompressed and searched, same as the plain file.
+    let config = compressed_config("ERROR", true);
+    let stats = SearchStats::new();
+    let (output_tx, output_rx) = crossbeam_channel::unbounded();
+    grep_file(&gz_path, &config, &output_tx, &stats);
+    let result = output_rx
+        .try_recv()
+        .expect("with -z, the .gz file must match, same as the plain file does");
+    assert_eq!(result.line_content, "ERROR something");
+    assert_eq!(stats.matched_lines.load(Ordering::Relaxed), 1);
 }
 
 // A line with invalid UTF-8 bytes has no NUL byte, so the binary sniffer

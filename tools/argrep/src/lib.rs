@@ -1,5 +1,6 @@
 use colored::Colorize;
 use crossbeam_channel::unbounded;
+use flate2::read::GzDecoder;
 use glob::Pattern;
 use ignore::{
     Match,
@@ -10,7 +11,7 @@ use std::{
     borrow::Cow,
     collections::{HashSet, VecDeque},
     fs::{self, File},
-    io::{BufRead, BufReader, Read, Seek, SeekFrom},
+    io::{BufRead, BufReader, Cursor, Read},
     path::{Path, PathBuf},
     sync::{
         Arc,
@@ -72,6 +73,42 @@ pub fn sanitize_for_display(s: &str) -> Cow<'_, str> {
         }
     }
     Cow::Owned(out)
+}
+
+/// Returns true if `path`'s extension marks it as gzip-compressed, the
+/// only format -z/--search-compressed currently decompresses: a bare
+/// `.gz` extension only (matching on the extension is a filename
+/// heuristic, not content sniffing, same as ripgrep's own -z).
+///
+/// `.tar.gz` matches this too, and that's deliberate, not an oversight:
+/// this function only identifies a gzip *stream*, and a tar archive
+/// happens to be one once compressed — there's no reliable way to tell
+/// "a tar archive that was gzipped" from "some other gzipped content"
+/// from the extension alone without hardcoding archive-format knowledge
+/// this function otherwise has no business knowing. What that means in
+/// practice: `-z` decompresses the gzip layer, but does not unpack tar
+/// members — the search runs over the raw tar byte stream (headers,
+/// padding, and all), not over the individual files a tar tool would
+/// extract. That's a real, honest limitation, not a bug: full archive
+/// support (iterating tar members as separate searchable files) is a
+/// different, larger feature this project isn't taking on here. `.tgz`
+/// (a common alternate spelling of the same thing) is NOT matched by
+/// this function, simply because its extension isn't literally `.gz` —
+/// an arbitrary-feeling asymmetry worth knowing about, not a considered
+/// design choice; treating `.tgz` the same as `.tar.gz`/`.gz` would be a
+/// reasonable, low-risk follow-up if it turns out to matter in practice.
+///
+/// xz (.xz), bzip2 (.bz2), and zstd (.zst) are intentionally not
+/// supported yet: unlike gzip, decompressing them well typically means
+/// depending on a crate that links a system C library (liblzma, libbz2,
+/// libzstd), which this project doesn't want to take on sight-unseen.
+/// Gzip covers the motivating case (rotated logs, which overwhelmingly
+/// use gzip by default via `logrotate`) without that risk. Extending
+/// this function — and the two call sites in grep_file that use it — is
+/// the natural next step if one of those formats turns out to matter in
+/// practice.
+pub fn is_gzip_target(path: &Path) -> bool {
+    path.extension().and_then(|e| e.to_str()) == Some("gz")
 }
 
 /// Task sent to workers representing a directory or file to scan
@@ -162,6 +199,15 @@ pub struct SearchConfig {
     /// comment for the CLI-level rules (QUERY becomes optional, a lone
     /// positional is treated as PATH).
     pub files_only: bool,
+    /// -z/--search-compressed: decompress gzip-compressed files (by
+    /// extension: `.gz`) on the fly before searching their content.
+    /// Currently the only supported compression format — see
+    /// `is_gzip_target`'s doc comment for why xz/bz2/zst aren't included
+    /// yet. Has no effect combined with `--files`, since content is never
+    /// read in that mode either way; not rejected as a conflict, same as
+    /// -i/-F/-w/-x under --files, since there's nothing contradictory
+    /// about it, just nothing for it to do.
+    pub search_compressed: bool,
     /// -q: suppress all output; only the exit code matters. Search stops
     /// as soon as one match is found (see grep_file/scan_and_grep/the
     /// worker loop in parallel_grep for the early-exit checkpoints).
@@ -219,11 +265,16 @@ pub struct SearchStats {
     /// (that's `io_errors`, a different failure category from "skipped by
     /// our own filtering rules"). Displayed as "Files skipped".
     pub files_skipped: Arc<AtomicUsize>,
-    /// Total bytes read from file contents during scanning (the sniff
-    /// read plus every read_until call in grep_file; approximated for
-    /// stdin as line length + 1 per line, since BufRead::lines() strips
-    /// the newline it actually consumed). Displayed as "Bytes read" —
-    /// mainly useful for benchmarking throughput.
+    /// Total bytes read from file contents during scanning. Counted
+    /// entirely via each read_until call in grep_file's main loop — the
+    /// binary-sniff's own initial read is deliberately NOT counted
+    /// separately, since those same bytes are replayed through the main
+    /// loop via a Cursor and would otherwise be counted twice (a real bug
+    /// caught in review; see the comment at the sniff site in grep_file).
+    /// Approximated for stdin as line length + 1 per line, since
+    /// BufRead::lines() strips the newline it actually consumed.
+    /// Displayed as "Bytes read" — mainly useful for benchmarking
+    /// throughput.
     pub bytes_read: Arc<AtomicUsize>,
 }
 
@@ -663,28 +714,51 @@ pub fn grep_file(
         }
     };
 
-    let mut reader = BufReader::new(file);
+    // -z/--search-compressed: transparently decompress gzip files. The
+    // resulting content stream is boxed so the rest of this function
+    // doesn't need to know or care which case it's in.
+    let content: Box<dyn Read> = if config.search_compressed && is_gzip_target(file_path) {
+        Box::new(GzDecoder::new(file))
+    } else {
+        Box::new(file)
+    };
+    let mut buffered = BufReader::new(content);
 
-    // Fast binary file sniffing: check the first 1024 bytes for a null byte
+    // Fast binary file sniffing: check the first 1024 bytes for a null
+    // byte. A decompressed stream generally isn't seekable (GzDecoder
+    // doesn't implement Seek), so rather than rewinding back to the start
+    // after sniffing — which also happens to make this handle pipes/FIFOs
+    // that were never seekable to begin with — the sniffed bytes are held
+    // onto and replayed via Read::chain ahead of the rest of the stream.
+    // This works identically for a plain file, a decompressed one, or a
+    // FIFO, so there's exactly one code path below instead of two nearly
+    // identical ones.
     let mut sniffer_buffer = [0u8; 1024];
-    if let Ok(sniffed) = reader.read(&mut sniffer_buffer) {
-        stats.bytes_read.fetch_add(sniffed, Ordering::Relaxed);
-        if sniffer_buffer[..sniffed].contains(&0u8) {
-            return; // Skip compiled binaries or media files
-        }
-        if let Err(err) = reader.seek(SeekFrom::Start(0)) {
-            // Rewinding after the sniff read failed — an actual I/O error,
-            // not something the loop below gets a chance to see, since we
-            // return before it runs. Per the #106 contract (I/O errors →
-            // nonzero exit), this must be counted the same as any other
-            // unreadable file, not silently skipped.
+    let sniffed = match buffered.read(&mut sniffer_buffer) {
+        Ok(n) => n,
+        Err(err) => {
             stats.io_errors.fetch_add(1, Ordering::Relaxed);
             if config.debug {
                 eprintln!("{}: {}: {}", "argrep".red(), file_path.display(), err);
             }
             return;
         }
+    };
+    // Deliberately NOT counted into stats.bytes_read here: these bytes are
+    // about to be replayed through the Cursor below and will pass through
+    // the main read loop's own read_until calls just like the rest of the
+    // stream, each of which already adds its byte count to bytes_read (see
+    // the `Ok(n) => stats.bytes_read.fetch_add(n, ...)` arm further down).
+    // Counting them here too would double-count the first `sniffed` bytes
+    // of every file searched — caught in review before merge, see
+    // bytes_read_exactly_matches_decompressed_content_length_for_gzip and
+    // its plain-file sibling in integration_tests.rs for the regression
+    // tests this depends on.
+    if sniffer_buffer[..sniffed].contains(&0u8) {
+        return; // Skip compiled binaries or media files (post-decompression, for -z)
     }
+
+    let mut reader = Cursor::new(sniffer_buffer[..sniffed].to_vec()).chain(buffered);
 
     // Process file line by line, reusing a single heap allocation.
     //
@@ -1126,5 +1200,47 @@ mod sanitize_tests {
             std::str::from_utf8(result.as_bytes()).is_ok(),
             "result must always be valid UTF-8"
         );
+    }
+}
+
+#[cfg(test)]
+mod is_gzip_target_tests {
+    // Locks in is_gzip_target's actual, documented behavior directly, so
+    // the doc comment and the implementation can't silently drift apart
+    // again — this is exactly the kind of contradiction a reviewer
+    // caught between the README and the code before this test existed:
+    // the doc comment claimed .tar.gz was "deliberately excluded" while
+    // the implementation (extension == "gz") always matched it anyway.
+
+    use super::is_gzip_target;
+    use std::path::Path;
+
+    #[test]
+    fn plain_gz_extension_matches() {
+        assert!(is_gzip_target(Path::new("app.log.gz")));
+        assert!(is_gzip_target(Path::new("data.gz")));
+    }
+
+    #[test]
+    fn tar_gz_matches_too_deliberately() {
+        // Documented, not a bug: -z decompresses the gzip layer of a
+        // .tar.gz, it just doesn't unpack the tar members underneath.
+        assert!(is_gzip_target(Path::new("archive.tar.gz")));
+    }
+
+    #[test]
+    fn tgz_does_not_match() {
+        // A real, documented asymmetry: .tgz means the same thing as
+        // .tar.gz in practice, but its extension literally isn't "gz",
+        // so it's not recognized — not a considered exclusion, just
+        // where the simple extension check currently draws the line.
+        assert!(!is_gzip_target(Path::new("archive.tgz")));
+    }
+
+    #[test]
+    fn unrelated_extensions_do_not_match() {
+        assert!(!is_gzip_target(Path::new("plain.txt")));
+        assert!(!is_gzip_target(Path::new("archive.zip")));
+        assert!(!is_gzip_target(Path::new("no_extension_at_all")));
     }
 }

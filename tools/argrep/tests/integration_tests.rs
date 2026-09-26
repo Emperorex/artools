@@ -2,11 +2,13 @@ use argrep::{
     DEFAULT_IGNORES, MatchOptions, SearchConfig, SearchStats, build_matcher, grep_file,
     parallel_grep,
 };
+use flate2::{Compression, write::GzEncoder};
 use glob::Pattern;
 use std::sync::Arc as StdArc;
 use std::{
     collections::HashSet,
     fs::{self, File},
+    io::Write as _,
     path::PathBuf,
     sync::{Arc, Mutex, atomic::AtomicUsize, atomic::Ordering},
 };
@@ -26,6 +28,13 @@ fn make_tree(files: &[(&str, &str)]) -> (TempDir, PathBuf) {
     }
     let root = fs::canonicalize(dir.path()).unwrap();
     (dir, root)
+}
+
+/// Gzip-compresses `content` for -z/--search-compressed test fixtures.
+fn gzip_bytes(content: &[u8]) -> Vec<u8> {
+    let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+    encoder.write_all(content).unwrap();
+    encoder.finish().unwrap()
 }
 
 fn default_config(query: &str, ignore_case: bool) -> std::sync::Arc<argrep::SearchConfig> {
@@ -59,6 +68,7 @@ fn default_config(query: &str, ignore_case: bool) -> std::sync::Arc<argrep::Sear
         respect_gitignore: true,
         hidden: false,
         files_only: false,
+        search_compressed: false,
         quiet: false,
         only_matching: false,
         max_count: None,
@@ -185,6 +195,255 @@ fn text_file_without_null_bytes_is_searched() {
     assert_eq!(names, vec!["text.txt"]);
 }
 
+// ── -z / --search-compressed ────────────────────────────────────────────────
+//
+// Gzip decompression on the fly, by .gz extension. Covers: content is
+// found when search_compressed is set, .gz files are treated as binary
+// (skipped) by default when it's not, binary detection still applies to
+// the *decompressed* bytes, a corrupted/non-gzip .gz file is an io_error
+// rather than a panic, and bytes_read reflects decompressed content.
+
+fn compressed_config(query: &str, search_compressed: bool) -> StdArc<SearchConfig> {
+    StdArc::new(SearchConfig {
+        regex: build_matcher(query, MatchOptions::default()).unwrap(),
+        query: query.to_string(),
+        ignore_case: false,
+        line_number: false,
+        ignore_dirs: DEFAULT_IGNORES.iter().map(|s| s.to_string()).collect(),
+        ignore_dir_patterns: Vec::new(),
+        debug: false,
+        invert: false,
+        files_with_matches: false,
+        files_without_match: false,
+        count_per_file: false,
+        include_pattern: None,
+        exclude_patterns: Vec::new(),
+        type_patterns: Vec::new(),
+        type_not_patterns: Vec::new(),
+        before_context: 0,
+        after_context: 0,
+        respect_gitignore: true,
+        hidden: false,
+        files_only: false,
+        search_compressed,
+        quiet: false,
+        only_matching: false,
+        max_count: None,
+    })
+}
+
+#[test]
+fn gzip_content_is_searched_when_search_compressed_is_set() {
+    let dir = TempDir::new().unwrap();
+    let root = fs::canonicalize(dir.path()).unwrap();
+    let plaintext = "line one\nneedle is here\nline three\n";
+    fs::write(root.join("app.log.gz"), gzip_bytes(plaintext.as_bytes())).unwrap();
+
+    let config = compressed_config("needle", true);
+    let stats = SearchStats::new();
+    let (output_tx, output_rx) = crossbeam_channel::unbounded();
+    grep_file(&root.join("app.log.gz"), &config, &output_tx, &stats);
+
+    let result = output_rx.try_recv().expect("the match must be found");
+    assert_eq!(result.line_content, "needle is here");
+    assert_eq!(
+        result.line_num, 2,
+        "line numbers must count decompressed lines, not compressed bytes"
+    );
+}
+
+#[test]
+fn gzip_files_are_treated_as_binary_by_default() {
+    // Without -z, a .gz file is just opaque compressed bytes to grep_file
+    // — it must be skipped by the ordinary binary sniff, exactly like any
+    // other binary file, not silently searched as raw compressed garbage.
+    let dir = TempDir::new().unwrap();
+    let root = fs::canonicalize(dir.path()).unwrap();
+    let plaintext = "needle is here, but compressed\n".repeat(20); // long enough that the sniff window (1024 bytes) is well within the compressed stream
+    let compressed = gzip_bytes(plaintext.as_bytes());
+    assert!(
+        compressed[..compressed.len().min(1024)].contains(&0u8),
+        "test precondition: this fixture's compressed bytes must contain \
+         a null byte within the first 1024 bytes, or this test isn't \
+         actually exercising the binary sniff"
+    );
+    fs::write(root.join("app.log.gz"), &compressed).unwrap();
+
+    let config = compressed_config("needle", false); // -z NOT set
+    let stats = SearchStats::new();
+    let (output_tx, output_rx) = crossbeam_channel::unbounded();
+    grep_file(&root.join("app.log.gz"), &config, &output_tx, &stats);
+
+    assert!(
+        output_rx.try_recv().is_err(),
+        "a .gz file must be skipped as binary when -z isn't set, not \
+         searched as raw compressed bytes"
+    );
+}
+
+#[test]
+fn binary_content_inside_a_gzip_file_is_still_skipped() {
+    // -z decompresses, but the result is still subject to the same
+    // binary sniff as anything else — a gzip-compressed binary file must
+    // not suddenly become "searchable" just because it decompresses.
+    let dir = TempDir::new().unwrap();
+    let root = fs::canonicalize(dir.path()).unwrap();
+    let binary_plaintext = b"some text\x00binary data\nneedle\n";
+    fs::write(root.join("data.bin.gz"), gzip_bytes(binary_plaintext)).unwrap();
+
+    let config = compressed_config("needle", true);
+    let stats = SearchStats::new();
+    let (output_tx, output_rx) = crossbeam_channel::unbounded();
+    grep_file(&root.join("data.bin.gz"), &config, &output_tx, &stats);
+
+    assert!(
+        output_rx.try_recv().is_err(),
+        "decompressed content with a null byte must still be skipped as \
+         binary, the same as an uncompressed file would be"
+    );
+}
+
+#[test]
+fn invalid_gzip_file_is_an_io_error_not_a_panic() {
+    let dir = TempDir::new().unwrap();
+    let root = fs::canonicalize(dir.path()).unwrap();
+    // A .gz-named file that isn't actually gzip-compressed data.
+    fs::write(
+        root.join("not_really_gzip.gz"),
+        b"just plain text, no gzip header\n",
+    )
+    .unwrap();
+
+    let config = compressed_config("text", true);
+    let stats = SearchStats::new();
+    let (output_tx, output_rx) = crossbeam_channel::unbounded();
+    grep_file(
+        &root.join("not_really_gzip.gz"),
+        &config,
+        &output_tx,
+        &stats,
+    );
+
+    assert!(
+        output_rx.try_recv().is_err(),
+        "an invalid gzip file must never be reported as a match"
+    );
+    assert!(
+        stats.io_errors.load(Ordering::Relaxed) > 0,
+        "an invalid gzip file must be counted as an io error, not \
+         silently skipped or (worse) treated as literal searchable text"
+    );
+}
+
+#[test]
+fn bytes_read_exactly_matches_plain_file_content_length_not_double_counted() {
+    // The general form of the regression this guards against: the sniff
+    // step reads up to the first 1024 bytes to check for binary content,
+    // and those same bytes are then replayed through the main read loop
+    // via a Cursor (see grep_file) rather than re-read from disk. If the
+    // sniff's own read were *also* added to bytes_read (it was, briefly,
+    // during review of the -z change below), every file's count would be
+    // inflated by up to 1024 bytes — not a compression-specific bug, but
+    // one the -z refactor's shared sniff/chain code path introduced for
+    // every file, gzip or not. A loose ">=" assertion wouldn't catch
+    // this (double-counting only makes the number bigger, which such an
+    // assertion would wave through) — exact equality is the point here.
+    let content = "needle and some surrounding text\nsecond line\n";
+    let (_dir, root) = make_tree(&[("plain.txt", content)]);
+
+    let config = compressed_config("needle", false); // -z not relevant here
+    let stats = SearchStats::new();
+    let (output_tx, _output_rx) = crossbeam_channel::unbounded();
+    grep_file(&root.join("plain.txt"), &config, &output_tx, &stats);
+
+    assert_eq!(
+        stats.bytes_read.load(Ordering::Relaxed),
+        content.len(),
+        "bytes_read must exactly equal the file's content length — not \
+         more (double-counted), not less (truncated)"
+    );
+}
+
+#[test]
+fn bytes_read_exactly_matches_decompressed_content_length_for_gzip() {
+    // Same regression, specifically for the -z path this bug was found
+    // in review of: the sniffed prefix must be counted exactly once as
+    // it's replayed through the main loop, not once at the sniff site
+    // AND again when the Cursor replays it into read_until.
+    let dir = TempDir::new().unwrap();
+    let root = fs::canonicalize(dir.path()).unwrap();
+    let plaintext = "needle and quite a lot of surrounding text so the \
+                      decompressed size is clearly larger than the \
+                      compressed size\n"
+        .repeat(5);
+    let compressed = gzip_bytes(plaintext.as_bytes());
+    fs::write(root.join("app.log.gz"), &compressed).unwrap();
+
+    let config = compressed_config("needle", true);
+    let stats = SearchStats::new();
+    let (output_tx, _output_rx) = crossbeam_channel::unbounded();
+    grep_file(&root.join("app.log.gz"), &config, &output_tx, &stats);
+
+    assert_eq!(
+        stats.bytes_read.load(Ordering::Relaxed),
+        plaintext.len(),
+        "bytes_read must exactly equal the *decompressed* content length \
+         ({} bytes) — neither the smaller compressed size on disk ({} \
+         bytes) nor an inflated, double-counted figure",
+        plaintext.len(),
+        compressed.len()
+    );
+}
+
+/// The core end-to-end contract of -z, stated as directly as possible:
+/// identical content, once plain and once gzip-compressed, searched both
+/// with and without -z. This is the test the CLI-parsing unit tests
+/// (search_compressed_flag_defaults_to_false and friends) don't cover on
+/// their own — they prove -z reaches SearchConfig, not that it actually
+/// changes search behavior.
+#[test]
+fn dash_z_end_to_end_plain_vs_gzip_with_and_without_the_flag() {
+    let content = "hello\nERROR something\n";
+    let (_dir, root) = make_tree(&[("plain.log", content)]);
+    let gz_path = root.join("compressed.log.gz");
+    fs::write(&gz_path, gzip_bytes(content.as_bytes())).unwrap();
+
+    // Plain file: always searchable, -z irrelevant to it either way.
+    for search_compressed in [false, true] {
+        let config = compressed_config("ERROR", search_compressed);
+        let stats = SearchStats::new();
+        let (output_tx, output_rx) = crossbeam_channel::unbounded();
+        grep_file(&root.join("plain.log"), &config, &output_tx, &stats);
+        assert!(
+            output_rx.try_recv().is_ok(),
+            "the plain file must match regardless of -z (search_compressed={search_compressed})"
+        );
+    }
+
+    // Gzip file without -z: opaque compressed bytes, skipped as binary.
+    let config = compressed_config("ERROR", false);
+    let stats = SearchStats::new();
+    let (output_tx, output_rx) = crossbeam_channel::unbounded();
+    grep_file(&gz_path, &config, &output_tx, &stats);
+    assert!(
+        output_rx.try_recv().is_err(),
+        "without -z, a .gz file must NOT match — it's opaque compressed \
+         bytes to grep_file, not searchable text"
+    );
+    assert_eq!(stats.matched_lines.load(Ordering::Relaxed), 0);
+
+    // Gzip file with -z: decompressed and searched, same as the plain file.
+    let config = compressed_config("ERROR", true);
+    let stats = SearchStats::new();
+    let (output_tx, output_rx) = crossbeam_channel::unbounded();
+    grep_file(&gz_path, &config, &output_tx, &stats);
+    let result = output_rx
+        .try_recv()
+        .expect("with -z, the .gz file must match, same as the plain file does");
+    assert_eq!(result.line_content, "ERROR something");
+    assert_eq!(stats.matched_lines.load(Ordering::Relaxed), 1);
+}
+
 // A line with invalid UTF-8 bytes has no NUL byte, so the binary sniffer
 // (first 1024 bytes, NUL check only) waves it through as "text" — it must
 // not then silently truncate the scan. grep_file used to read lines with
@@ -289,15 +548,19 @@ fn unreadable_file_is_skipped_but_other_matches_are_still_found() {
     );
 }
 
-// A FIFO is readable but not seekable: after the binary-sniff read
-// succeeds, rewinding with seek(SeekFrom::Start(0)) fails with ESPIPE.
-// That failure must be counted the same as any other unreadable file per
-// the #106 exit-code contract, not returned from silently. A plain
-// BufReader<File> over a regular file essentially never fails seek(), so
-// a FIFO is the reliable way to actually exercise this path.
+// grep_file used to rewind with seek(SeekFrom::Start(0)) after the
+// binary-sniff read, which meant a FIFO — readable, but not seekable —
+// would fail with ESPIPE and get counted as an io_error, never actually
+// searched. That was replaced (to support -z's non-seekable decompressed
+// streams) with a chain-based sniff that never seeks at all, which fixes
+// FIFOs as a side effect: this test now confirms they're fully readable,
+// where it previously confirmed the opposite (that seeking on one failed
+// and was handled gracefully). A plain BufReader<File> over a regular
+// file was never affected either way — a FIFO is just the reliable way
+// to exercise a non-seekable Read source at all.
 #[cfg(unix)]
 #[test]
-fn seek_failure_after_binary_sniff_is_counted_as_io_error() {
+fn fifo_content_is_searched_without_a_seek_error() {
     let dir = TempDir::new().unwrap();
     let root = fs::canonicalize(dir.path()).unwrap();
     let fifo_path = root.join("pipe");
@@ -317,25 +580,28 @@ fn seek_failure_after_binary_sniff_is_counted_as_io_error() {
             .write(true)
             .open(&writer_path)
             .unwrap();
-        f.write_all(b"some content, no null bytes here\n").unwrap();
+        f.write_all(b"needle in a pipe, no null bytes here\n")
+            .unwrap();
         // Drop here closes the write end once the bytes are flushed to the
-        // pipe buffer, which is fine: the reader only needs those bytes
-        // for the sniff read, not a still-open writer.
+        // pipe buffer, which is fine: the reader only needs those bytes.
     });
 
-    let config = default_config("anything", false);
+    let config = default_config("needle", false);
     let stats = SearchStats::new();
-    let (output_tx, _output_rx) = crossbeam_channel::unbounded();
+    let (output_tx, output_rx) = crossbeam_channel::unbounded();
 
     grep_file(&fifo_path, &config, &output_tx, &stats);
 
     writer.join().unwrap();
 
-    assert!(
-        stats.io_errors.load(Ordering::Relaxed) > 0,
-        "a failed seek() after the binary sniff must be counted as an io \
-         error, not silently skipped"
+    assert_eq!(
+        stats.io_errors.load(Ordering::Relaxed),
+        0,
+        "reading a FIFO must not produce an io_error now that grep_file \
+         doesn't seek at all"
     );
+    let result = output_rx.try_recv().expect("the match must be found");
+    assert_eq!(result.line_content, "needle in a pipe, no null bytes here");
 }
 
 // ── Symlinks ─────────────────────────────────────────────────────────────────
@@ -489,6 +755,7 @@ fn hidden_config(query: &str, hidden: bool, no_ignore: bool) -> StdArc<SearchCon
         respect_gitignore: !no_ignore,
         hidden,
         files_only: false,
+        search_compressed: false,
         quiet: false,
         only_matching: false,
         max_count: None,
@@ -650,6 +917,7 @@ fn type_config(
         respect_gitignore: true,
         hidden: false,
         files_only: false,
+        search_compressed: false,
         quiet: false,
         only_matching: false,
         max_count: None,
@@ -803,6 +1071,7 @@ fn custom_ignore_dir_is_excluded() {
         respect_gitignore: true,
         hidden: false,
         files_only: false,
+        search_compressed: false,
         quiet: false,
         only_matching: false,
         max_count: None,
@@ -866,6 +1135,7 @@ fn stats_counts_are_accurate() {
         respect_gitignore: true,
         hidden: false,
         files_only: false,
+        search_compressed: false,
         quiet: false,
         only_matching: false,
         max_count: None,
@@ -905,6 +1175,7 @@ fn stats_config(query: &str, exclude: &[&str]) -> StdArc<SearchConfig> {
         respect_gitignore: true,
         hidden: false,
         files_only: false,
+        search_compressed: false,
         quiet: false,
         only_matching: false,
         max_count: None,
@@ -1060,6 +1331,7 @@ fn files_only_config(
         respect_gitignore: !no_ignore,
         hidden,
         files_only: true,
+        search_compressed: false,
         quiet: false,
         only_matching: false,
         max_count: None,
@@ -1222,6 +1494,7 @@ fn only_matching_output_escapes_control_characters_in_matched_text() {
         respect_gitignore: true,
         hidden: false,
         files_only: false,
+        search_compressed: false,
         quiet: false,
         only_matching: true,
         max_count: None,
@@ -1266,6 +1539,7 @@ fn context_lines_with_control_characters_are_also_escaped() {
         respect_gitignore: true,
         hidden: false,
         files_only: false,
+        search_compressed: false,
         quiet: false,
         only_matching: false,
         max_count: None,
@@ -1330,6 +1604,7 @@ fn control_characters_do_not_affect_whether_a_line_matches() {
             respect_gitignore: true,
             hidden: false,
             files_only: false,
+            search_compressed: false,
             quiet: false,
             only_matching: false,
             max_count: None,
@@ -1409,6 +1684,7 @@ fn multiple_workers_find_same_matches_as_single_worker() {
             respect_gitignore: true,
             hidden: false,
             files_only: false,
+            search_compressed: false,
             quiet: false,
             only_matching: false,
             max_count: None,
@@ -1494,6 +1770,7 @@ fn invert_returns_non_matching_lines() {
         respect_gitignore: true,
         hidden: false,
         files_only: false,
+        search_compressed: false,
         quiet: false,
         only_matching: false,
         max_count: None,
@@ -1544,6 +1821,7 @@ fn invert_with_no_matches_returns_all_lines() {
         respect_gitignore: true,
         hidden: false,
         files_only: false,
+        search_compressed: false,
         quiet: false,
         only_matching: false,
         max_count: None,
@@ -1600,6 +1878,7 @@ fn files_with_matches_returns_only_filenames() {
         respect_gitignore: true,
         hidden: false,
         files_only: false,
+        search_compressed: false,
         quiet: false,
         only_matching: false,
         max_count: None,
@@ -1655,6 +1934,7 @@ fn files_with_matches_emits_each_file_once() {
         respect_gitignore: true,
         hidden: false,
         files_only: false,
+        search_compressed: false,
         quiet: false,
         only_matching: false,
         max_count: None,
@@ -1725,6 +2005,7 @@ fn files_without_match_returns_only_unmatched_filenames() {
         respect_gitignore: true,
         hidden: false,
         files_only: false,
+        search_compressed: false,
         quiet: false,
         only_matching: false,
         max_count: None,
@@ -1784,6 +2065,7 @@ fn files_without_match_emits_nothing_when_every_file_matches() {
         respect_gitignore: true,
         hidden: false,
         files_only: false,
+        search_compressed: false,
         quiet: false,
         only_matching: false,
         max_count: None,
@@ -1846,6 +2128,7 @@ fn files_without_match_with_invert_reports_files_where_every_line_matches() {
         respect_gitignore: true,
         hidden: false,
         files_only: false,
+        search_compressed: false,
         quiet: false,
         only_matching: false,
         max_count: None,
@@ -1901,6 +2184,7 @@ fn files_without_match_stops_reading_after_first_match() {
         respect_gitignore: true,
         hidden: false,
         files_only: false,
+        search_compressed: false,
         quiet: false,
         only_matching: false,
         max_count: None,
@@ -1974,6 +2258,7 @@ fn files_without_match_excludes_unreadable_files() {
         respect_gitignore: true,
         hidden: false,
         files_only: false,
+        search_compressed: false,
         quiet: false,
         only_matching: false,
         max_count: None,
@@ -2038,6 +2323,7 @@ fn files_without_match_quiet_produces_no_output() {
         respect_gitignore: true,
         hidden: false,
         files_only: false,
+        search_compressed: false,
         quiet: true,
         only_matching: false,
         max_count: None,
@@ -2104,6 +2390,7 @@ fn count_per_file_returns_correct_counts() {
         respect_gitignore: true,
         hidden: false,
         files_only: false,
+        search_compressed: false,
         quiet: false,
         only_matching: false,
         max_count: None,
@@ -2168,6 +2455,7 @@ fn count_per_file_emits_result_for_every_file() {
         respect_gitignore: true,
         hidden: false,
         files_only: false,
+        search_compressed: false,
         quiet: false,
         only_matching: false,
         max_count: None,
@@ -2234,6 +2522,7 @@ fn invert_with_count_counts_non_matching_lines() {
         respect_gitignore: true,
         hidden: false,
         files_only: false,
+        search_compressed: false,
         quiet: false,
         only_matching: false,
         max_count: None,
@@ -2302,6 +2591,7 @@ fn invert_with_files_with_matches_returns_files_with_a_non_matching_line() {
         respect_gitignore: true,
         hidden: false,
         files_only: false,
+        search_compressed: false,
         quiet: false,
         only_matching: false,
         max_count: None,
@@ -2368,6 +2658,7 @@ fn invert_with_context_builds_context_around_inverted_matches() {
         respect_gitignore: true,
         hidden: false,
         files_only: false,
+        search_compressed: false,
         quiet: false,
         only_matching: false,
         max_count: None,
@@ -2441,6 +2732,7 @@ fn include_pattern_searches_only_matching_files() {
         respect_gitignore: true,
         hidden: false,
         files_only: false,
+        search_compressed: false,
         quiet: false,
         only_matching: false,
         max_count: None,
@@ -2493,6 +2785,7 @@ fn include_pattern_no_files_match_returns_empty() {
         respect_gitignore: true,
         hidden: false,
         files_only: false,
+        search_compressed: false,
         quiet: false,
         only_matching: false,
         max_count: None,
@@ -2541,6 +2834,7 @@ fn include_wildcard_matches_all_files() {
         respect_gitignore: true,
         hidden: false,
         files_only: false,
+        search_compressed: false,
         quiet: false,
         only_matching: false,
         max_count: None,
@@ -2574,6 +2868,7 @@ fn include_wildcard_matches_all_files() {
         respect_gitignore: true,
         hidden: false,
         files_only: false,
+        search_compressed: false,
         quiet: false,
         only_matching: false,
         max_count: None,
@@ -2639,6 +2934,7 @@ fn before_context_includes_leading_lines() {
         respect_gitignore: true,
         hidden: false,
         files_only: false,
+        search_compressed: false,
         quiet: false,
         only_matching: false,
         max_count: None,
@@ -2701,6 +2997,7 @@ fn after_context_includes_trailing_lines() {
         respect_gitignore: true,
         hidden: false,
         files_only: false,
+        search_compressed: false,
         quiet: false,
         only_matching: false,
         max_count: None,
@@ -2766,6 +3063,7 @@ fn context_both_and_group_separator() {
         respect_gitignore: true,
         hidden: false,
         files_only: false,
+        search_compressed: false,
         quiet: false,
         only_matching: false,
         max_count: None,
@@ -2837,6 +3135,7 @@ fn query_is_a_regex_by_default() {
         respect_gitignore: true,
         hidden: false,
         files_only: false,
+        search_compressed: false,
         quiet: false,
         only_matching: false,
         max_count: None,
@@ -2892,6 +3191,7 @@ fn fixed_strings_mode_matches_literally() {
         respect_gitignore: true,
         hidden: false,
         files_only: false,
+        search_compressed: false,
         quiet: false,
         only_matching: false,
         max_count: None,
@@ -2959,6 +3259,7 @@ fn whole_word_matches_only_word_boundaries() {
         respect_gitignore: true,
         hidden: false,
         files_only: false,
+        search_compressed: false,
         quiet: false,
         only_matching: false,
         max_count: None,
@@ -3016,6 +3317,7 @@ fn whole_line_matches_only_exact_line() {
         respect_gitignore: true,
         hidden: false,
         files_only: false,
+        search_compressed: false,
         quiet: false,
         only_matching: false,
         max_count: None,
@@ -3068,6 +3370,7 @@ fn quiet_mode_produces_no_output() {
         respect_gitignore: true,
         hidden: false,
         files_only: false,
+        search_compressed: false,
         quiet: true,
         only_matching: false,
         max_count: None,
@@ -3119,6 +3422,7 @@ fn quiet_mode_with_no_matches_reports_zero() {
         respect_gitignore: true,
         hidden: false,
         files_only: false,
+        search_compressed: false,
         quiet: true,
         only_matching: false,
         max_count: None,
@@ -3163,6 +3467,7 @@ fn only_matching_emits_one_row_per_occurrence() {
         respect_gitignore: true,
         hidden: false,
         files_only: false,
+        search_compressed: false,
         quiet: false,
         only_matching: true,
         max_count: None,
@@ -3214,6 +3519,7 @@ fn count_per_file_takes_priority_over_only_matching() {
         respect_gitignore: true,
         hidden: false,
         files_only: false,
+        search_compressed: false,
         quiet: false,
         only_matching: true,
         max_count: None,
@@ -3259,6 +3565,7 @@ fn max_count_stops_after_n_matching_lines() {
         respect_gitignore: true,
         hidden: false,
         files_only: false,
+        search_compressed: false,
         quiet: false,
         only_matching: false,
         max_count: Some(2),
@@ -3303,6 +3610,7 @@ fn max_count_caps_the_count_per_file_total() {
         respect_gitignore: true,
         hidden: false,
         files_only: false,
+        search_compressed: false,
         quiet: false,
         only_matching: false,
         max_count: Some(2),
@@ -3350,6 +3658,7 @@ fn max_count_with_only_matching_counts_lines_not_occurrences() {
         respect_gitignore: true,
         hidden: false,
         files_only: false,
+        search_compressed: false,
         quiet: false,
         only_matching: true,
         max_count: Some(1),
@@ -3395,6 +3704,7 @@ fn max_count_still_flushes_trailing_context() {
         respect_gitignore: true,
         hidden: false,
         files_only: false,
+        search_compressed: false,
         quiet: false,
         only_matching: false,
         max_count: Some(1),
@@ -3445,6 +3755,7 @@ fn exclude_skips_matching_files() {
         respect_gitignore: true,
         hidden: false,
         files_only: false,
+        search_compressed: false,
         quiet: false,
         only_matching: false,
         max_count: None,
@@ -3495,6 +3806,7 @@ fn exclude_wins_over_include_on_overlap() {
         respect_gitignore: true,
         hidden: false,
         files_only: false,
+        search_compressed: false,
         quiet: false,
         only_matching: false,
         max_count: None,
@@ -3540,6 +3852,7 @@ fn exclude_dir_glob_skips_matching_directories() {
         respect_gitignore: true,
         hidden: false,
         files_only: false,
+        search_compressed: false,
         quiet: false,
         only_matching: false,
         max_count: None,

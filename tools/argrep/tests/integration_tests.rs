@@ -444,6 +444,39 @@ fn dash_z_end_to_end_plain_vs_gzip_with_and_without_the_flag() {
     assert_eq!(stats.matched_lines.load(Ordering::Relaxed), 1);
 }
 
+#[test]
+fn dash_z_also_decompresses_tgz_files() {
+    // .tgz is a common alternate spelling of .tar.gz — is_gzip_target
+    // treats it the same as a plain .gz extension (see its doc comment),
+    // so -z must decompress it identically to a .gz file.
+    let content = "hello\nOutOfMemoryError: heap space\n";
+    let dir = TempDir::new().unwrap();
+    let root = fs::canonicalize(dir.path()).unwrap();
+    let tgz_path = root.join("archive.tgz");
+    fs::write(&tgz_path, gzip_bytes(content.as_bytes())).unwrap();
+
+    // Without -z: opaque compressed bytes, skipped as binary, same as .gz.
+    let config = compressed_config("OutOfMemoryError", false);
+    let stats = SearchStats::new();
+    let (output_tx, output_rx) = crossbeam_channel::unbounded();
+    grep_file(&tgz_path, &config, &output_tx, &stats);
+    assert!(
+        output_rx.try_recv().is_err(),
+        "without -z, a .tgz file must NOT match, same as an unflagged \
+         .gz file"
+    );
+
+    // With -z: decompressed and searched.
+    let config = compressed_config("OutOfMemoryError", true);
+    let stats = SearchStats::new();
+    let (output_tx, output_rx) = crossbeam_channel::unbounded();
+    grep_file(&tgz_path, &config, &output_tx, &stats);
+    let result = output_rx
+        .try_recv()
+        .expect("with -z, a .tgz file must match, same as a .gz file does");
+    assert_eq!(result.line_content, "OutOfMemoryError: heap space");
+}
+
 // A line with invalid UTF-8 bytes has no NUL byte, so the binary sniffer
 // (first 1024 bytes, NUL check only) waves it through as "text" — it must
 // not then silently truncate the scan. grep_file used to read lines with

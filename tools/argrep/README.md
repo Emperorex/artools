@@ -118,6 +118,16 @@ Built-in types (deliberately a small, hand-picked starter set rather than `ripgr
 | `toml`       | `*.toml`                          |
 | `markdown`   | `*.md`                            |
 | `shell`      | `*.sh`, `*.bash`, `*.zsh`         |
+| `go`         | `*.go`                            |
+| `java`       | `*.java`                          |
+| `c`          | `*.c`, `*.h`                      |
+| `cpp`        | `*.cpp`, `*.cc`, `*.cxx`, `*.hpp` |
+| `html`       | `*.html`, `*.htm`                 |
+| `css`        | `*.css`                           |
+| `sql`        | `*.sql`                           |
+| `xml`        | `*.xml`                           |
+
+`*.h` is under `c` only, not `cpp` — a bare `.h` file is far more commonly plain C in practice (C++ headers more often use `.hpp`/`.hh`/`.hxx`). If a codebase mixes both, `--type c --type cpp` together covers it.
 
 `--type` and `--type-not` are both repeatable:
 
@@ -216,7 +226,7 @@ whichever was meant as the path).
 
 `--files` pairs naturally with `--stats`: `argrep --files --stats . > /dev/null` gives you the discovered/searched/skipped breakdown for a filter combination without printing a single filename, which is often exactly what you want when you're trying to understand *why* a file is or isn't being picked up.
 
-Use `-z`/`--search-compressed` to search inside gzip-compressed files (by extension: `.gz`) without decompressing them yourself first:
+Use `-z`/`--search-compressed` to search inside gzip-compressed files (by extension: `.gz` or `.tgz`) without decompressing them yourself first:
 
 ```
 argrep -z 'ERROR' /var/log/
@@ -227,7 +237,7 @@ This is aimed squarely at rotated logs — `logrotate` compresses old logs as gz
 
 **Currently gzip (`.gz`) is the only supported compression format.** `.xz`, `.bz2`, and `.zst` aren't decompressed yet: unlike gzip (which this project vendors a pure-Rust decoder for, for zero extra build dependencies), decompressing those formats well typically means linking a system C library (`liblzma`, `libbz2`, `libzstd` respectively), which isn't something to take on without a clear need. If you rely on one of those formats for logs, we'd like to hear about it — for now, the `zcat`/`xzcat`/`bzcat`/`zstdcat | argrep` pipeline still works fine for anything `-z` doesn't cover yet.
 
-**`.tar.gz` files are not treated as archives.** `-z` matches on the `.gz` extension and only decompresses the gzip layer — it does not unpack tar members. `argrep -z 'foo' archive.tar.gz` decompresses the gzip stream and searches the raw tar bytes underneath (headers, padding, and all), the same way it would search any other gzip-compressed content; it does not iterate the files a `tar` tool would extract. Full archive support (searching each member of a `.tar.gz`/`.zip`/etc. as its own file) is a different, larger feature this project isn't taking on here. `.tgz` — a common alternate spelling for the same thing — currently isn't matched by `-z` at all, purely because its extension literally isn't `.gz`; that's an asymmetry worth knowing about rather than a considered design choice.
+**`.tar.gz`/`.tgz` files are not treated as archives.** `-z` matches on the `.gz` or `.tgz` extension and only decompresses the gzip layer — it does not unpack tar members. `argrep -z 'foo' archive.tar.gz` (or `archive.tgz`) decompresses the gzip stream and searches the raw tar bytes underneath (headers, padding, and all), the same way it would search any other gzip-compressed content; it does not iterate the files a `tar` tool would extract. Full archive support (searching each member of a `.tar.gz`/`.zip`/etc. as its own file) is a different, larger feature this project isn't taking on here.
 
 `-z` has no effect combined with `--files`, since content — compressed or not — is never read in that mode either way.
 
@@ -260,7 +270,7 @@ This is aimed squarely at rotated logs — `logrotate` compresses old logs as gz
 | `--debug`               | `-d`  | —                 | Print the --stats summary plus a line for every file/dir that failed to read, as it happens                                                              |
 | `--stats`               | —     | —                 | Print a clean search summary (files discovered/searched/skipped, directories, bytes read, workers, matches, elapsed) to stderr; independent of `--debug` |
 | `--files`               | —     | —                 | List files that would be searched, without reading them; QUERY not required; conflicts with content-search flags (see Usage above)                       |
-| `--search-compressed`   | `-z`  | —                 | Decompress gzip (`.gz`) files before searching; no effect combined with `--files`                                                                        |
+| `--search-compressed`   | `-z`  | —                 | Decompress gzip (`.gz`/`.tgz`) files before searching; no effect combined with `--files`                                                                 |
 | `--quiet`               | `-q`  | —                 | No output; exit code alone reports match/no-match/error (see Exit codes below). Overrides -l/-c/-n if also set — nothing is printed either way.          |
 
 `-l`, `-L`, and `-c` cannot be combined with each other — they imply mutually incompatible output contracts (`filename` matched vs `filename` unmatched vs `filename: count`), so combining any two of them (`argrep foo . -c -l`, `argrep foo . -l -L`, etc.) is a CLI error rather than one silently overriding the other.

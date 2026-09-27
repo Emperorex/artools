@@ -31,6 +31,21 @@ const TYPE_TABLE: &[(&str, &[&str])] = &[
     ("toml", &["*.toml"]),
     ("markdown", &["*.md"]),
     ("shell", &["*.sh", "*.bash", "*.zsh"]),
+    ("go", &["*.go"]),
+    ("java", &["*.java"]),
+    ("c", &["*.c", "*.h"]),
+    // "h" is deliberately only under "c", not also under "cpp": a bare
+    // .h file is far more commonly plain C than C++ in practice (C++
+    // headers more often use .hpp/.hh/.hxx), so this is a judgment call
+    // about the common case, not a technical restriction — nothing stops
+    // a future change from adding "*.h" to "cpp" too if that turns out
+    // to be the wrong call. `--type c --type cpp` together covers both
+    // if a codebase mixes them.
+    ("cpp", &["*.cpp", "*.cc", "*.cxx", "*.hpp"]),
+    ("html", &["*.html", "*.htm"]),
+    ("css", &["*.css"]),
+    ("sql", &["*.sql"]),
+    ("xml", &["*.xml"]),
 ];
 
 fn type_globs(name: &str) -> Option<&'static [&'static str]> {
@@ -333,13 +348,13 @@ struct Args {
     #[arg(long = "hidden")]
     hidden: bool,
 
-    /// Search inside gzip-compressed files (by extension: `.gz`) as if
-    /// they were decompressed first — no separate `zcat`/`gunzip` step
-    /// needed. The main motivating case is rotated logs (`app.log.gz`),
-    /// which `logrotate` compresses as gzip by default. Currently the
-    /// only supported compression format; see the README for why xz/
-    /// bz2/zst aren't included yet. Has no effect combined with --files,
-    /// since content is never read in that mode either way.
+    /// Search inside gzip-compressed files (by extension: `.gz`/`.tgz`)
+    /// as if they were decompressed first — no separate `zcat`/`gunzip`
+    /// step needed. The main motivating case is rotated logs
+    /// (`app.log.gz`), which `logrotate` compresses as gzip by default.
+    /// Currently the only supported compression format; see the README
+    /// for why xz/bz2/zst aren't included yet. Has no effect combined
+    /// with --files, since content is never read in that mode either way.
     #[arg(short = 'z', long = "search-compressed")]
     search_compressed: bool,
 
@@ -966,7 +981,9 @@ fn print_result(
 
 #[cfg(test)]
 mod tests {
-    use super::{Args, TYPE_TABLE, build_ignore_dirs, default_jobs, resolve_files_path};
+    use super::{
+        Args, TYPE_TABLE, build_ignore_dirs, default_jobs, resolve_files_path, type_globs,
+    };
     use clap::Parser;
 
     // ── -j / --jobs boundary ─────────────────────────────────────────────────
@@ -1242,6 +1259,38 @@ mod tests {
     fn type_accepts_a_known_name() {
         let args = Args::try_parse_from(["argrep", "foo", ".", "--type", "rust"]).unwrap();
         assert_eq!(args.r#type, vec!["rust".to_string()]);
+    }
+
+    #[test]
+    fn newly_added_type_names_are_accepted() {
+        for name in ["go", "java", "c", "cpp", "html", "css", "sql", "xml"] {
+            let args = Args::try_parse_from(["argrep", "foo", ".", "--type", name]).unwrap();
+            assert_eq!(
+                args.r#type,
+                vec![name.to_string()],
+                "--type {name} must parse successfully"
+            );
+        }
+    }
+
+    #[test]
+    fn c_and_cpp_types_have_the_expected_globs_and_dont_overlap_on_h() {
+        // Locks in a specific judgment call from review: a bare .h file
+        // is far more commonly plain C in practice, so "*.h" belongs
+        // only to "c", not also to "cpp" (whose headers more often use
+        // .hpp/.hh/.hxx). Written directly against TYPE_TABLE, since
+        // that's where the actual decision lives — an integration test
+        // using an arbitrary glob list wouldn't exercise this table
+        // entry at all.
+        assert_eq!(type_globs("c"), Some(["*.c", "*.h"].as_slice()));
+        assert_eq!(
+            type_globs("cpp"),
+            Some(["*.cpp", "*.cc", "*.cxx", "*.hpp"].as_slice())
+        );
+        assert!(
+            !type_globs("cpp").unwrap().contains(&"*.h"),
+            "*.h must not also be listed under cpp"
+        );
     }
 
     #[test]

@@ -76,27 +76,22 @@ pub fn sanitize_for_display(s: &str) -> Cow<'_, str> {
 }
 
 /// Returns true if `path`'s extension marks it as gzip-compressed, the
-/// only format -z/--search-compressed currently decompresses: a bare
-/// `.gz` extension only (matching on the extension is a filename
-/// heuristic, not content sniffing, same as ripgrep's own -z).
+/// only format -z/--search-compressed currently decompresses: `.gz` or
+/// `.tgz` (matching on the extension is a filename heuristic, not
+/// content sniffing, same as ripgrep's own -z).
 ///
-/// `.tar.gz` matches this too, and that's deliberate, not an oversight:
-/// this function only identifies a gzip *stream*, and a tar archive
-/// happens to be one once compressed — there's no reliable way to tell
-/// "a tar archive that was gzipped" from "some other gzipped content"
-/// from the extension alone without hardcoding archive-format knowledge
-/// this function otherwise has no business knowing. What that means in
-/// practice: `-z` decompresses the gzip layer, but does not unpack tar
-/// members — the search runs over the raw tar byte stream (headers,
-/// padding, and all), not over the individual files a tar tool would
-/// extract. That's a real, honest limitation, not a bug: full archive
-/// support (iterating tar members as separate searchable files) is a
-/// different, larger feature this project isn't taking on here. `.tgz`
-/// (a common alternate spelling of the same thing) is NOT matched by
-/// this function, simply because its extension isn't literally `.gz` —
-/// an arbitrary-feeling asymmetry worth knowing about, not a considered
-/// design choice; treating `.tgz` the same as `.tar.gz`/`.gz` would be a
-/// reasonable, low-risk follow-up if it turns out to matter in practice.
+/// `.tar.gz`/`.tgz` match this too, and that's deliberate, not an
+/// oversight: this function only identifies a gzip *stream*, and a tar
+/// archive happens to be one once compressed — there's no reliable way
+/// to tell "a tar archive that was gzipped" from "some other gzipped
+/// content" from the extension alone without hardcoding archive-format
+/// knowledge this function otherwise has no business knowing. What that
+/// means in practice: `-z` decompresses the gzip layer, but does not
+/// unpack tar members — the search runs over the raw tar byte stream
+/// (headers, padding, and all), not over the individual files a tar tool
+/// would extract. That's a real, honest limitation, not a bug: full
+/// archive support (iterating tar members as separate searchable files)
+/// is a different, larger feature this project isn't taking on here.
 ///
 /// xz (.xz), bzip2 (.bz2), and zstd (.zst) are intentionally not
 /// supported yet: unlike gzip, decompressing them well typically means
@@ -108,7 +103,10 @@ pub fn sanitize_for_display(s: &str) -> Cow<'_, str> {
 /// the natural next step if one of those formats turns out to matter in
 /// practice.
 pub fn is_gzip_target(path: &Path) -> bool {
-    path.extension().and_then(|e| e.to_str()) == Some("gz")
+    matches!(
+        path.extension().and_then(|e| e.to_str()),
+        Some("gz") | Some("tgz")
+    )
 }
 
 /// Task sent to workers representing a directory or file to scan
@@ -1229,12 +1227,9 @@ mod is_gzip_target_tests {
     }
 
     #[test]
-    fn tgz_does_not_match() {
-        // A real, documented asymmetry: .tgz means the same thing as
-        // .tar.gz in practice, but its extension literally isn't "gz",
-        // so it's not recognized — not a considered exclusion, just
-        // where the simple extension check currently draws the line.
-        assert!(!is_gzip_target(Path::new("archive.tgz")));
+    fn tgz_matches_as_an_alternate_spelling_of_tar_gz() {
+        assert!(is_gzip_target(Path::new("archive.tgz")));
+        assert!(is_gzip_target(Path::new("backup.tgz")));
     }
 
     #[test]

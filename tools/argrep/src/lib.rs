@@ -382,6 +382,60 @@ pub fn build_matcher(query: &str, opts: MatchOptions) -> Result<Regex, String> {
         .map_err(|err| format!("Invalid pattern '{}': {}", query, err))
 }
 
+/// Builds a single combined regex from multiple patterns (-e/--regexp)
+/// — a line matches if it matches ANY of them, same semantics as grep/
+/// ripgrep's multiple -e (patterns are combined via alternation, not
+/// ANDed together). Each pattern is escaped individually (if
+/// fixed_strings) and wrapped in its own non-capturing group before
+/// being joined with `|`, so a stray anchor or quantifier in one
+/// pattern can't spill into another. -w/-x wrap the WHOLE joined
+/// alternation once, not each pattern separately: `\b(?:(?:p1)|(?:p2))\b`
+/// requires a word boundary at the edges of whichever alternative
+/// actually matched, which is the same semantics GNU grep's own -w
+/// gives when combined with multiple -e.
+///
+/// Deliberately a separate function from build_matcher (rather than
+/// build_matcher delegating to this one for the single-pattern case) so
+/// the plain single-QUERY code path — and every existing test written
+/// against build_matcher's exact behavior — is completely untouched by
+/// this function's addition.
+pub fn build_matcher_multi(patterns: &[String], opts: MatchOptions) -> Result<Regex, String> {
+    if patterns.is_empty() {
+        // Unreachable via the CLI in practice (QUERY is required unless
+        // --files or -e is given, and -e "being given" implies at least
+        // one pattern was collected into this slice) — but an explicit
+        // error beats an empty-alternation regex silently compiling into
+        // something that matches nothing.
+        return Err("at least one pattern is required".to_string());
+    }
+
+    let joined = patterns
+        .iter()
+        .map(|p| {
+            let escaped = if opts.fixed_strings {
+                regex::escape(p)
+            } else {
+                p.clone()
+            };
+            format!("(?:{escaped})")
+        })
+        .collect::<Vec<_>>()
+        .join("|");
+
+    let mut pattern = joined;
+    if opts.whole_word {
+        pattern = format!(r"\b(?:{})\b", pattern);
+    }
+    if opts.whole_line {
+        pattern = format!(r"^(?:{})$", pattern);
+    }
+
+    RegexBuilder::new(&pattern)
+        .case_insensitive(opts.ignore_case)
+        .build()
+        .map_err(|err| format!("Invalid pattern(s) '{}': {}", patterns.join("', '"), err))
+}
+
 /// Runs a parallel grep across all text files under `root`,
 /// calling `on_match` for every matched line.
 pub fn parallel_grep(
@@ -1237,5 +1291,154 @@ mod is_gzip_target_tests {
         assert!(!is_gzip_target(Path::new("plain.txt")));
         assert!(!is_gzip_target(Path::new("archive.zip")));
         assert!(!is_gzip_target(Path::new("no_extension_at_all")));
+    }
+}
+
+#[cfg(test)]
+mod build_matcher_multi_tests {
+    // -e/--regexp: a line matches if it matches ANY of several patterns
+    // (alternation, not AND). These tests exercise build_matcher_multi
+    // directly rather than only through grep_file/parallel_grep, since
+    // the interesting part — how patterns combine, how fixed_strings/
+    // whole_word/whole_line apply across all of them at once — is fully
+    // determined by the regex this function builds.
+
+    use super::{MatchOptions, build_matcher_multi};
+
+    #[test]
+    fn empty_pattern_list_is_an_error() {
+        assert!(build_matcher_multi(&[], MatchOptions::default()).is_err());
+    }
+
+    #[test]
+    fn single_pattern_behaves_like_a_plain_search() {
+        let re = build_matcher_multi(&["needle".to_string()], MatchOptions::default()).unwrap();
+        assert!(re.is_match("a needle in a haystack"));
+        assert!(!re.is_match("nothing here"));
+    }
+
+    #[test]
+    fn multiple_patterns_match_if_any_one_matches() {
+        let re = build_matcher_multi(
+            &["TODO".to_string(), "FIXME".to_string(), "HACK".to_string()],
+            MatchOptions::default(),
+        )
+        .unwrap();
+        assert!(re.is_match("// TODO: clean this up"));
+        assert!(re.is_match("// FIXME later"));
+        assert!(re.is_match("// HACK around the bug"));
+        assert!(!re.is_match("// nothing notable here"));
+    }
+
+    #[test]
+    fn one_pattern_matching_does_not_require_all_to_match() {
+        // The core "OR, not AND" contract: a line containing only ONE of
+        // several -e patterns must still match, not be rejected for
+        // lacking the others.
+        let re = build_matcher_multi(
+            &["error".to_string(), "panic".to_string()],
+            MatchOptions::default(),
+        )
+        .unwrap();
+        assert!(
+            re.is_match("a panic occurred"),
+            "should match on 'panic' alone"
+        );
+        assert!(
+            re.is_match("an error occurred"),
+            "should match on 'error' alone"
+        );
+    }
+
+    #[test]
+    fn fixed_strings_escapes_each_pattern_individually() {
+        // Each pattern must be escaped on its own, before joining — if
+        // the patterns were joined first and escaped as one blob, the
+        // "|" this function inserts as a separator would itself get
+        // escaped into a literal pipe character, breaking the OR.
+        let re = build_matcher_multi(
+            &["a.b".to_string(), "c(d)".to_string()],
+            MatchOptions {
+                fixed_strings: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert!(re.is_match("literal a.b text"));
+        assert!(
+            !re.is_match("aXb"),
+            "'.' must be literal, not \"any char\", under fixed_strings"
+        );
+        assert!(re.is_match("literal c(d) text"));
+        assert!(
+            !re.is_match("cXd"),
+            "parens must be literal, not a capture group"
+        );
+    }
+
+    #[test]
+    fn whole_word_wraps_the_entire_alternation_once() {
+        let re = build_matcher_multi(
+            &["cat".to_string(), "dog".to_string()],
+            MatchOptions {
+                whole_word: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert!(re.is_match("the cat sat"));
+        assert!(re.is_match("the dog ran"));
+        assert!(
+            !re.is_match("category"),
+            "-w must still require a word boundary, even with multiple -e patterns"
+        );
+    }
+
+    #[test]
+    fn whole_line_wraps_the_entire_alternation_once() {
+        let re = build_matcher_multi(
+            &["cat".to_string(), "dog".to_string()],
+            MatchOptions {
+                whole_line: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert!(re.is_match("cat"));
+        assert!(re.is_match("dog"));
+        assert!(
+            !re.is_match("the cat sat"),
+            "-x must still require the whole line to match"
+        );
+    }
+
+    #[test]
+    fn an_anchor_in_one_pattern_does_not_spill_into_another() {
+        // Each pattern is wrapped in its own (?:...) before joining, so
+        // "^foo" only anchors "foo", not "foo|bar" as a whole — without
+        // that grouping, "^foo|bar" would parse as "(^foo)|(bar)" in
+        // standard regex precedence anyway, but this test pins down that
+        // build_matcher_multi actually produces that grouping rather
+        // than accidentally relying on it.
+        let re = build_matcher_multi(
+            &["^foo".to_string(), "bar".to_string()],
+            MatchOptions::default(),
+        )
+        .unwrap();
+        assert!(re.is_match("foo at the start"));
+        assert!(
+            re.is_match("something bar anywhere"),
+            "'bar' must match anywhere, unanchored"
+        );
+        assert!(!re.is_match("something foo not at start"));
+    }
+
+    #[test]
+    fn invalid_pattern_among_several_is_reported_as_an_error() {
+        let result = build_matcher_multi(
+            &["fine".to_string(), "[unclosed".to_string()],
+            MatchOptions::default(),
+        );
+        assert!(result.is_err());
     }
 }

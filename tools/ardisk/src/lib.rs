@@ -43,6 +43,9 @@ pub struct ScanConfig {
     pub apparent_size: bool,
     /// Do not respect .gitignore / .ignore files (scan everything)
     pub respect_gitignore: bool,
+    /// User-supplied `--exclude` patterns, compiled with gitignore semantics
+    /// and rooted at the scan root. See [`build_exclude_matcher`].
+    pub exclude: Option<Gitignore>,
 }
 
 /// Builds a `ScanConfig` from the given parameters.
@@ -53,13 +56,73 @@ pub fn build_config(
     apparent_size: bool,
     respect_gitignore: bool,
 ) -> Arc<ScanConfig> {
+    build_config_with_exclude(
+        ignore_dirs,
+        include_pattern,
+        debug,
+        apparent_size,
+        respect_gitignore,
+        None,
+    )
+}
+
+/// Like [`build_config`], but also installs an `--exclude` matcher
+/// (see [`build_exclude_matcher`]).
+pub fn build_config_with_exclude(
+    ignore_dirs: HashSet<String>,
+    include_pattern: Option<Pattern>,
+    debug: bool,
+    apparent_size: bool,
+    respect_gitignore: bool,
+    exclude: Option<Gitignore>,
+) -> Arc<ScanConfig> {
     Arc::new(ScanConfig {
         ignore_dirs,
         include_pattern,
         debug,
         apparent_size,
         respect_gitignore,
+        exclude,
     })
+}
+
+/// Compiles `--exclude` patterns into a single matcher rooted at `root`.
+///
+/// Patterns use gitignore syntax and semantics:
+///
+/// * no `/` in the pattern (`*.log`, `target`) -> matches the name at any depth
+/// * a `/` at the start or in the middle (`/foo`, `src/gen`, `target/**`)
+///   -> anchored to `root`
+/// * a trailing `/` (`build/`) -> directories only
+/// * `X/**` -> everything *inside* `X`, but not `X` itself
+/// * `!pattern` -> re-include (cannot rescue entries under an excluded dir)
+///
+/// Each entry is matched on its own path only (never "path or any parent"),
+/// because the scanner applies the matcher at every level. That is what keeps
+/// a contents-only pattern such as `target/**` or `src/**/*.rs` from
+/// accidentally blocking traversal of the directory that holds the contents.
+///
+/// Returns `Ok(None)` for an empty pattern list.
+pub fn build_exclude_matcher(
+    root: &Path,
+    patterns: &[String],
+) -> Result<Option<Gitignore>, String> {
+    if patterns.is_empty() {
+        return Ok(None);
+    }
+    let mut builder = GitignoreBuilder::new(root);
+    for pattern in patterns {
+        if pattern.trim().is_empty() {
+            return Err("--exclude pattern must not be empty".to_string());
+        }
+        builder
+            .add_line(None, pattern)
+            .map_err(|e| format!("Invalid --exclude pattern '{}': {}", pattern, e))?;
+    }
+    builder
+        .build()
+        .map(Some)
+        .map_err(|e| format!("Invalid --exclude patterns: {}", e))
 }
 
 /// Runs a parallel scan rooted at `root` and returns two maps of raw
@@ -289,6 +352,17 @@ pub fn scan_directory(
         let file_name = os_file_name.to_string_lossy();
         let entry_path = entry.path();
         let is_dir = file_type.is_dir();
+
+        // --exclude is independent of .gitignore handling: it applies even
+        // with --no-ignore, and a `!pattern` in a .gitignore can't undo it.
+        // The entry is matched on its own path only; a directory that is
+        // merely the parent of excluded content (e.g. `target` for
+        // `target/**`) is still traversed.
+        if let Some(exclude) = &config.exclude
+            && exclude.matched(&entry_path, is_dir).is_ignore()
+        {
+            continue;
+        }
 
         if config.respect_gitignore && is_path_ignored(&ignore_stack, &entry_path, is_dir) {
             continue;

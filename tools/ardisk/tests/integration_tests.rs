@@ -1,4 +1,7 @@
-use ardisk::{DEFAULT_IGNORES, aggregate_sizes, build_config, format_size, parallel_scan};
+use ardisk::{
+    DEFAULT_IGNORES, aggregate_sizes, build_config, build_config_with_exclude,
+    build_exclude_matcher, format_size, parallel_scan,
+};
 use glob::Pattern;
 use std::{collections::HashSet, fs, path::PathBuf};
 use tempfile::TempDir;
@@ -690,4 +693,135 @@ fn apparent_size_produces_smaller_or_equal_size_than_blocks() {
         agg_apparent[&root] <= agg_blocks[&root],
         "apparent size should be <= block allocation"
     );
+}
+
+// ── --exclude ─────────────────────────────────────────────────────────────────
+
+/// Scans `root` with the default ignores plus the given `--exclude` patterns
+/// and returns the aggregated sizes.
+fn run_with_exclude(root: &PathBuf, patterns: &[&str]) -> std::collections::HashMap<PathBuf, u64> {
+    let ignore_dirs: HashSet<String> = DEFAULT_IGNORES.iter().map(|s| s.to_string()).collect();
+    let patterns: Vec<String> = patterns.iter().map(|s| s.to_string()).collect();
+    let exclude = build_exclude_matcher(root, &patterns).unwrap();
+    let config = build_config_with_exclude(ignore_dirs, None, false, true, true, exclude);
+    let (raw, _content) = parallel_scan(root.clone(), 4, config);
+    aggregate_sizes(&raw, root)
+}
+
+#[test]
+fn exclude_basename_glob_matches_at_any_depth() {
+    let (_d, root) = make_tree(&["a.log", "a.rs", "sub/b.log", "sub/b.rs"]);
+    let with = run_with_exclude(&root, &["*.log"]);
+    let without = run_with_exclude(&root, &[]);
+    // Two 5-byte .log files disappear from the total (apparent size).
+    assert_eq!(without[&root] - with[&root], 10);
+    assert_eq!(without[&root.join("sub")] - with[&root.join("sub")], 5);
+}
+
+#[test]
+fn exclude_contents_pattern_keeps_the_directory_but_drops_its_contents() {
+    let (_d, root) = make_tree(&["target/debug/app", "target/note.txt", "src/main.rs"]);
+    let with = run_with_exclude(&root, &["target/**"]);
+    let without = run_with_exclude(&root, &[]);
+
+    // `target` itself is still reported (only its own inode cost remains)...
+    let target = root.join("target");
+    assert!(with.contains_key(&target));
+    assert_eq!(with[&target], dir_self_apparent_size(&target));
+    // ...its subdirectory is pruned entirely...
+    assert!(!with.contains_key(&target.join("debug")));
+    // ...and unrelated trees are untouched.
+    assert_eq!(with[&root.join("src")], without[&root.join("src")]);
+}
+
+#[test]
+fn exclude_contents_pattern_is_anchored_to_the_scan_root() {
+    let (_d, root) = make_tree(&["target/x", "sub/target/y"]);
+    let with = run_with_exclude(&root, &["target/**"]);
+    let without = run_with_exclude(&root, &[]);
+    // Root-level target contents excluded, nested sub/target untouched.
+    assert_eq!(
+        without[&root.join("target")] - with[&root.join("target")],
+        5
+    );
+    assert_eq!(with[&root.join("sub")], without[&root.join("sub")]);
+}
+
+#[test]
+fn exclude_nested_glob_does_not_block_traversal_of_parents() {
+    // `src/**/*.rs` is a contents pattern: src and src/a must still be walked
+    // so that the non-.rs files below them are counted.
+    let (_d, root) = make_tree(&["src/a/lib.rs", "src/a/data.bin", "src/top.rs"]);
+    let with = run_with_exclude(&root, &["src/**/*.rs"]);
+    let without = run_with_exclude(&root, &[]);
+    assert!(with.contains_key(&root.join("src")));
+    assert!(with.contains_key(&root.join("src/a")));
+    // Only data.bin (5 bytes) remains as file content under src/a.
+    assert_eq!(
+        with[&root.join("src/a")],
+        dir_self_apparent_size(&root.join("src/a")) + 5
+    );
+    assert_eq!(without[&root.join("src/a")] - with[&root.join("src/a")], 5);
+}
+
+#[test]
+fn exclude_trailing_slash_prunes_directories_only() {
+    // `cache/` removes the directory (any depth); a *file* named cache stays.
+    let (_d, root) = make_tree(&["cache/x", "sub/cache/y", "other/cache"]);
+    let with = run_with_exclude(&root, &["cache/"]);
+    assert!(!with.contains_key(&root.join("cache")));
+    assert!(!with.contains_key(&root.join("sub/cache")));
+    let without = run_with_exclude(&root, &[]);
+    assert_eq!(with[&root.join("other")], without[&root.join("other")]);
+}
+
+#[test]
+fn exclude_negation_reincludes_a_file() {
+    let (_d, root) = make_tree(&["a.log", "keep.log"]);
+    let with = run_with_exclude(&root, &["*.log", "!keep.log"]);
+    let without = run_with_exclude(&root, &[]);
+    assert_eq!(without[&root] - with[&root], 5); // only a.log removed
+}
+
+#[test]
+fn exclude_applies_even_with_gitignore_handling_disabled() {
+    let (_d, root) = make_tree(&["a.log", "b.rs"]);
+    let ignore_dirs: HashSet<String> = HashSet::new();
+    let patterns = vec!["*.log".to_string()];
+    let exclude = build_exclude_matcher(&root, &patterns).unwrap();
+    let config = build_config_with_exclude(ignore_dirs, None, false, true, false, exclude);
+    let (raw, _c) = parallel_scan(root.clone(), 2, config);
+    let sizes = aggregate_sizes(&raw, &root);
+    assert_eq!(sizes[&root], dir_self_apparent_size(&root) + 5);
+}
+
+#[test]
+fn exclude_wins_over_include() {
+    let (_d, root) = make_tree(&["a.log", "b.log", "c.rs"]);
+    let patterns = vec!["a.log".to_string()];
+    let exclude = build_exclude_matcher(&root, &patterns).unwrap();
+    let ignore_dirs: HashSet<String> = HashSet::new();
+    let config = build_config_with_exclude(
+        ignore_dirs,
+        Some(Pattern::new("*.log").unwrap()),
+        false,
+        true,
+        true,
+        exclude,
+    );
+    let (_raw, content) = parallel_scan(root.clone(), 2, config);
+    assert_eq!(content[&root], 5); // only b.log
+}
+
+#[test]
+fn exclude_empty_pattern_is_rejected() {
+    let (_d, root) = make_tree(&["a"]);
+    assert!(build_exclude_matcher(&root, &["".to_string()]).is_err());
+    assert!(build_exclude_matcher(&root, &["   ".to_string()]).is_err());
+}
+
+#[test]
+fn exclude_without_patterns_builds_no_matcher() {
+    let (_d, root) = make_tree(&["a"]);
+    assert!(build_exclude_matcher(&root, &[]).unwrap().is_none());
 }

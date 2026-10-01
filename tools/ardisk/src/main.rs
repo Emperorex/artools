@@ -1,4 +1,7 @@
-use ardisk::{DEFAULT_IGNORES, aggregate_sizes, build_config, format_size, parallel_scan};
+use ardisk::{
+    DEFAULT_IGNORES, aggregate_sizes, build_config_with_exclude, build_exclude_matcher,
+    format_size, parallel_scan,
+};
 use clap::Parser;
 use clap::builder::TypedValueParser as _;
 use colored::Colorize;
@@ -137,6 +140,15 @@ struct Args {
     #[arg(long)]
     ignore: Vec<String>,
 
+    /// Exclude files and directories matching a gitignore-style glob
+    /// (repeatable), e.g. --exclude '*.log' --exclude 'target/**'.
+    /// A pattern without '/' matches at any depth; with '/' it is anchored
+    /// to PATH; a trailing '/' matches directories only; 'dir/**' excludes
+    /// the contents of dir but not dir itself. Quote patterns to keep the
+    /// shell from expanding them.
+    #[arg(long, value_name = "GLOB")]
+    exclude: Vec<String>,
+
     /// Do not respect .gitignore / .ignore files (scan everything)
     #[arg(long = "no-ignore")]
     no_ignore: bool,
@@ -177,12 +189,21 @@ fn main() {
         None => None,
     };
 
-    let config = build_config(
+    let exclude = match build_exclude_matcher(&target_path, &args.exclude) {
+        Ok(m) => m,
+        Err(e) => {
+            eprintln!("{}", format!("error: {}", e).red());
+            std::process::exit(1);
+        }
+    };
+
+    let config = build_config_with_exclude(
         ignore_dirs,
         include_pattern,
         args.debug,
         args.apparent_size,
         !args.no_ignore,
+        exclude,
     );
 
     let start_time = Instant::now();
@@ -313,6 +334,28 @@ mod tests {
              of how many cores the machine reports: got {}",
             args.jobs
         );
+    }
+
+    // ── --exclude ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn exclude_is_repeatable() {
+        let args = Args::try_parse_from([
+            "ardisk",
+            ".",
+            "--exclude",
+            "*.log",
+            "--exclude",
+            "target/**",
+        ])
+        .unwrap();
+        assert_eq!(args.exclude, vec!["*.log", "target/**"]);
+    }
+
+    #[test]
+    fn exclude_defaults_to_empty() {
+        let args = Args::try_parse_from(["ardisk", "."]).unwrap();
+        assert!(args.exclude.is_empty());
     }
 
     // ── Valid inputs ──────────────────────────────────────────────────────────

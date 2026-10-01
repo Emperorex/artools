@@ -1,6 +1,6 @@
 use argrep::{
-    DEFAULT_IGNORES, MatchOptions, SearchConfig, SearchStats, build_matcher, grep_file,
-    parallel_grep,
+    DEFAULT_IGNORES, MatchOptions, SearchConfig, SearchStats, build_matcher, build_matcher_multi,
+    grep_file, parallel_grep,
 };
 use flate2::{Compression, write::GzEncoder};
 use glob::Pattern;
@@ -475,6 +475,105 @@ fn dash_z_also_decompresses_tgz_files() {
         .try_recv()
         .expect("with -z, a .tgz file must match, same as a .gz file does");
     assert_eq!(result.line_content, "OutOfMemoryError: heap space");
+}
+
+// ── -e / --regexp and -S / --smart-case, end to end ─────────────────────────
+//
+// build_matcher_multi and smart_case_ignore_case each have their own
+// direct unit tests (in lib.rs and main.rs respectively) covering how
+// they build a regex / decide case sensitivity. These confirm the
+// combination actually works through the real search pipeline —
+// SearchConfig, grep_file, parallel_grep — not just at the regex-object
+// level.
+
+fn multi_pattern_config(patterns: &[&str], ignore_case: bool) -> StdArc<SearchConfig> {
+    let owned: Vec<String> = patterns.iter().map(|p| p.to_string()).collect();
+    StdArc::new(SearchConfig {
+        regex: build_matcher_multi(
+            &owned,
+            MatchOptions {
+                fixed_strings: false,
+                ignore_case,
+                whole_word: false,
+                whole_line: false,
+            },
+        )
+        .unwrap(),
+        query: owned.join(", "),
+        ignore_case,
+        line_number: false,
+        ignore_dirs: DEFAULT_IGNORES.iter().map(|s| s.to_string()).collect(),
+        ignore_dir_patterns: Vec::new(),
+        debug: false,
+        invert: false,
+        files_with_matches: false,
+        files_without_match: false,
+        count_per_file: false,
+        include_pattern: None,
+        exclude_patterns: Vec::new(),
+        type_patterns: Vec::new(),
+        type_not_patterns: Vec::new(),
+        before_context: 0,
+        after_context: 0,
+        respect_gitignore: true,
+        hidden: false,
+        files_only: false,
+        search_compressed: false,
+        quiet: false,
+        only_matching: false,
+        max_count: None,
+    })
+}
+
+#[test]
+fn e_end_to_end_matches_a_file_containing_any_one_pattern() {
+    let (_dir, root) = make_tree(&[
+        ("a.txt", "nothing interesting\n"),
+        ("b.txt", "a TODO item\n"),
+        ("c.txt", "a FIXME item\n"),
+        ("d.txt", "a HACK item\n"),
+    ]);
+    let names = run(
+        root,
+        multi_pattern_config(&["TODO", "FIXME", "HACK"], false),
+    );
+    assert_eq!(names, vec!["b.txt", "c.txt", "d.txt"]);
+}
+
+#[test]
+fn smart_case_end_to_end_lowercase_pattern_matches_case_insensitively() {
+    // Mirrors what main() would compute: smart_case_ignore_case(&["error"])
+    // is true (all lowercase), so this config is built the way -S would
+    // build it for the query "error".
+    let (_dir, root) = make_tree(&[
+        ("a.txt", "an ERROR occurred\n"),
+        ("b.txt", "an error occurred\n"),
+        ("c.txt", "nothing relevant\n"),
+    ]);
+    let names = run(root, multi_pattern_config(&["error"], true));
+    assert_eq!(
+        names,
+        vec!["a.txt", "b.txt"],
+        "an all-lowercase pattern under smart-case must match both \
+         'ERROR' and 'error'"
+    );
+}
+
+#[test]
+fn smart_case_end_to_end_pattern_with_uppercase_matches_case_sensitively() {
+    // Mirrors smart_case_ignore_case(&["Error"]) being false.
+    let (_dir, root) = make_tree(&[
+        ("a.txt", "an ERROR occurred\n"),
+        ("b.txt", "an Error occurred\n"),
+        ("c.txt", "an error occurred\n"),
+    ]);
+    let names = run(root, multi_pattern_config(&["Error"], false));
+    assert_eq!(
+        names,
+        vec!["b.txt"],
+        "a pattern with an uppercase letter under smart-case must match \
+         only that exact casing, not 'ERROR' or 'error'"
+    );
 }
 
 // A line with invalid UTF-8 bytes has no NUL byte, so the binary sniffer

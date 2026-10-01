@@ -1,6 +1,6 @@
 use argrep::{
-    DEFAULT_IGNORES, MatchOptions, SearchConfig, SearchStats, build_matcher, parallel_grep,
-    sanitize_for_display,
+    DEFAULT_IGNORES, MatchOptions, SearchConfig, SearchStats, build_matcher, build_matcher_multi,
+    parallel_grep, sanitize_for_display,
 };
 use clap::Parser;
 use clap::builder::TypedValueParser as _;
@@ -116,6 +116,42 @@ fn resolve_files_path(
     }
 }
 
+/// Same idea as resolve_files_path, for -e/--regexp: once -e is given,
+/// QUERY isn't treated as an additional pattern (matching GNU grep's own
+/// -e/-f rule), so a lone positional clap bound to the query slot is
+/// reinterpreted as PATH instead. Kept as a separate function rather
+/// than generalizing resolve_files_path to cover both cases, so neither
+/// function's existing tests or call sites need to change to support
+/// the other's error message.
+fn resolve_e_path(query: Option<String>, path: Option<String>) -> Result<Option<String>, String> {
+    match (query, path) {
+        (None, None) => Ok(None),
+        (Some(p), None) => Ok(Some(p)),
+        (None, Some(p)) => Ok(Some(p)),
+        (Some(q), Some(p)) => Err(format!(
+            "-e/--regexp does not treat QUERY as an additional pattern, \
+             only PATH, but got two positional arguments: '{q}' and \
+             '{p}'. Use `argrep -e '...' {p}` (or `argrep -e '...' {q}`, \
+             whichever was meant as the path — and add another -e if \
+             '{q}' was meant as a pattern instead)."
+        )),
+    }
+}
+
+/// -S/--smart-case's actual decision: case-insensitive only if every
+/// given pattern is entirely lowercase (no uppercase letter anywhere in
+/// any of them); case-sensitive as soon as any one pattern has an
+/// uppercase letter anywhere. A separate, directly-testable function
+/// rather than an inline expression in main(), so this rule — including
+/// how it generalizes across multiple -e patterns, which the review
+/// requesting -S didn't explicitly specify — can be pinned down with its
+/// own tests instead of only being exercised indirectly through the CLI.
+fn smart_case_ignore_case(patterns: &[String]) -> bool {
+    patterns
+        .iter()
+        .all(|p| !p.chars().any(|c| c.is_uppercase()))
+}
+
 /// CPU-aware default worker count, used as the -j/--jobs default.
 ///
 /// Half of available_parallelism(), clamped to [1, 16]: using every core by
@@ -179,15 +215,41 @@ const MAX_JOBS: u16 = 128;
     about = "Fast parallel text search utility (Rust version)"
 )]
 struct Args {
-    /// The text query/pattern to search for. Not required with --files,
-    /// which doesn't search content at all — see --files's own doc
-    /// comment for how a lone positional is interpreted in that mode.
-    #[arg(required_unless_present = "files")]
+    /// The text query/pattern to search for. Not required with --files
+    /// (which doesn't search content at all) or with -e/--regexp (which
+    /// supplies patterns instead) — see those flags' own doc comments
+    /// for how a lone positional is interpreted in either mode.
+    #[arg(required_unless_present_any = ["files", "patterns"])]
     query: Option<String>,
 
     /// Root directory or file to start the search
     #[arg()]
     path: Option<String>,
+
+    /// An additional pattern to search for. Repeatable: a line matches
+    /// if it matches ANY given pattern (combined via alternation, not
+    /// ANDed together) — same semantics as grep/ripgrep's multiple -e.
+    /// When -e is given at all, QUERY stops being treated as an
+    /// additional pattern (the same "-e overrides the positional
+    /// pattern" rule GNU grep follows); a lone leftover positional is
+    /// reinterpreted as PATH instead, same idea as --files (see
+    /// resolve_e_path).
+    #[arg(short = 'e', long = "regexp")]
+    patterns: Vec<String>,
+
+    /// Case-insensitive search only if every given pattern (QUERY, or
+    /// all of -e's patterns) is entirely lowercase; case-sensitive if
+    /// any pattern contains an uppercase letter. With multiple -e
+    /// patterns, this looks at all of them together — a single
+    /// uppercase letter in any one pattern makes the whole search
+    /// case-sensitive, since the final compiled regex has one
+    /// case-sensitivity setting, not a separate one per pattern.
+    /// Conflicts with -i/--ignore-case, rather than following ripgrep's
+    /// "last flag on the command line wins" rule, to avoid the added
+    /// complexity of order-sensitive flag resolution for what's
+    /// otherwise a simple boolean choice.
+    #[arg(short = 'S', long = "smart-case", conflicts_with = "ignore_case")]
+    smart_case: bool,
 
     /// Case-insensitive search
     #[arg(short = 'i', long)]
@@ -468,29 +530,72 @@ fn main() {
             );
             std::process::exit(2);
         }
+    } else if !args.patterns.is_empty() {
+        // -e was given: QUERY is not an additional pattern (same rule as
+        // GNU grep's -e/-f), so a lone leftover positional is PATH.
+        match resolve_e_path(args.query.take(), args.path.take()) {
+            Ok(path) => args.path = path,
+            Err(msg) => {
+                eprintln!("{}", format!("error: {msg}").red());
+                std::process::exit(2);
+            }
+        }
     }
+
+    // The actual set of patterns to search for: -e's list if any were
+    // given, otherwise the single positional QUERY — which clap's
+    // required_unless_present_any=["files","patterns"] guarantees is
+    // present here whenever neither --files nor -e applies. Empty only
+    // in --files mode, where it's never used for matching anyway.
+    let patterns: Vec<String> = if !args.patterns.is_empty() {
+        args.patterns.clone()
+    } else if let Some(q) = &args.query {
+        vec![q.clone()]
+    } else {
+        Vec::new()
+    };
+
+    // -S/--smart-case: case-insensitive only if EVERY pattern is
+    // entirely lowercase; a single uppercase letter in any one of them
+    // makes the whole search case-sensitive, since the final compiled
+    // regex has one case-sensitivity setting shared across all patterns,
+    // not a separate one per pattern. -S conflicts with -i at the CLI
+    // level, so args.ignore_case is always false here when smart_case is
+    // set, but the branch is written to stand on its own regardless.
+    let ignore_case = if args.smart_case {
+        smart_case_ignore_case(&patterns)
+    } else {
+        args.ignore_case
+    };
 
     // --files never actually searches content (grep_file is never
     // called in that mode — see SearchConfig.files_only), so this regex
     // is a placeholder that satisfies SearchConfig's required `regex`
-    // field without meaning anything; build_matcher only runs when
-    // there's a real QUERY to compile.
+    // field without meaning anything; build_matcher/build_matcher_multi
+    // only run when there's a real pattern set to compile.
     let regex = if args.files {
         Regex::new("").expect("the empty pattern always compiles")
     } else {
-        let query = args
-            .query
-            .as_deref()
-            .expect("clap's required_unless_present=\"files\" guarantees this outside --files");
-        match build_matcher(
-            query,
-            MatchOptions {
-                fixed_strings: args.fixed_strings,
-                ignore_case: args.ignore_case,
-                whole_word: args.whole_word,
-                whole_line: args.whole_line,
-            },
-        ) {
+        let match_options = MatchOptions {
+            fixed_strings: args.fixed_strings,
+            ignore_case,
+            whole_word: args.whole_word,
+            whole_line: args.whole_line,
+        };
+        // build_matcher (not build_matcher_multi) is used for the plain
+        // single-QUERY case specifically so that path's regex
+        // construction — and every existing test against it — is
+        // untouched by -e's addition; build_matcher_multi is a separate
+        // function, not something build_matcher delegates to.
+        let result = if args.patterns.is_empty() {
+            let query = args.query.as_deref().expect(
+                "clap's required_unless_present_any=[\"files\", \"patterns\"] guarantees this",
+            );
+            build_matcher(query, match_options)
+        } else {
+            build_matcher_multi(&patterns, match_options)
+        };
+        match result {
             Ok(re) => re,
             Err(e) => {
                 eprintln!("{}", format!("error: {}", e).red());
@@ -556,7 +661,15 @@ fn main() {
 
     let config = Arc::new(SearchConfig {
         regex,
-        query: args.query.clone().unwrap_or_default(),
+        // Cosmetic/informational only (not used for matching — that's
+        // config.regex): joins multiple -e patterns for display so
+        // there's still something sensible here in that mode, rather
+        // than just the first pattern or an empty string.
+        query: if patterns.is_empty() {
+            String::new()
+        } else {
+            patterns.join(", ")
+        },
         ignore_case: args.ignore_case,
         line_number: args.line_number,
         ignore_dirs,
@@ -982,7 +1095,8 @@ fn print_result(
 #[cfg(test)]
 mod tests {
     use super::{
-        Args, TYPE_TABLE, build_ignore_dirs, default_jobs, resolve_files_path, type_globs,
+        Args, TYPE_TABLE, build_ignore_dirs, default_jobs, resolve_e_path, resolve_files_path,
+        smart_case_ignore_case, type_globs,
     };
     use clap::Parser;
 
@@ -1472,6 +1586,154 @@ mod tests {
             "two positionals together with --files must be a usage error, \
              not a silent guess about which one was meant as the path"
         );
+    }
+
+    // ── -e / --regexp ─────────────────────────────────────────────────────
+
+    #[test]
+    fn patterns_defaults_to_empty() {
+        let args = Args::try_parse_from(["argrep", "foo", "."]).unwrap();
+        assert!(args.patterns.is_empty());
+    }
+
+    #[test]
+    fn query_is_not_required_with_e() {
+        let args = Args::try_parse_from(["argrep", "-e", "TODO"]).unwrap();
+        assert!(args.query.is_none());
+        assert_eq!(args.patterns, vec!["TODO".to_string()]);
+    }
+
+    #[test]
+    fn e_can_be_given_multiple_times() {
+        let args = Args::try_parse_from(["argrep", "-e", "TODO", "-e", "FIXME", "-e", "HACK", "."])
+            .unwrap();
+        assert_eq!(
+            args.patterns,
+            vec!["TODO".to_string(), "FIXME".to_string(), "HACK".to_string()]
+        );
+    }
+
+    #[test]
+    fn resolve_e_path_with_no_positionals_is_none() {
+        assert_eq!(resolve_e_path(None, None), Ok(None));
+    }
+
+    #[test]
+    fn resolve_e_path_treats_lone_query_slot_value_as_path() {
+        // `argrep -e TODO .` — clap binds "." to the (positionally-first)
+        // query slot regardless of -e, and this function is what turns
+        // that into PATH instead of treating it as another pattern.
+        assert_eq!(
+            resolve_e_path(Some(".".to_string()), None),
+            Ok(Some(".".to_string()))
+        );
+    }
+
+    #[test]
+    fn resolve_e_path_rejects_two_positionals() {
+        let result = resolve_e_path(Some("foo".to_string()), Some(".".to_string()));
+        assert!(
+            result.is_err(),
+            "two positionals together with -e must be a usage error — \
+             QUERY is never treated as an additional pattern once -e is \
+             given, so there's no reasonable default interpretation"
+        );
+    }
+
+    #[test]
+    fn e_accepted_alongside_a_path_positional() {
+        let args = Args::try_parse_from(["argrep", "-e", "TODO", "src"]).unwrap();
+        assert_eq!(args.patterns, vec!["TODO".to_string()]);
+        // Parsing alone can't distinguish "src" as path vs. leftover
+        // query slot — that's resolve_e_path's job in main(), covered
+        // above. This test only confirms clap accepts the combination.
+    }
+
+    // ── -S / --smart-case ────────────────────────────────────────────────
+
+    #[test]
+    fn smart_case_flag_defaults_to_false() {
+        let args = Args::try_parse_from(["argrep", "foo", "."]).unwrap();
+        assert!(!args.smart_case);
+    }
+
+    #[test]
+    fn smart_case_short_and_long_flags_are_parsed() {
+        let args = Args::try_parse_from(["argrep", "foo", ".", "-S"]).unwrap();
+        assert!(args.smart_case);
+        let args = Args::try_parse_from(["argrep", "foo", ".", "--smart-case"]).unwrap();
+        assert!(args.smart_case);
+    }
+
+    #[test]
+    fn smart_case_conflicts_with_ignore_case() {
+        let result = Args::try_parse_from(["argrep", "foo", ".", "-S", "-i"]);
+        assert!(
+            result.is_err(),
+            "-S and -i together must be a CLI parse error — this project \
+             doesn't implement ripgrep's order-sensitive \"last flag \
+             wins\" rule"
+        );
+    }
+
+    #[test]
+    fn smart_case_accepted_with_e_and_fixed_strings() {
+        let args = Args::try_parse_from(["argrep", "-e", "error", "-S", "-F", "."]).unwrap();
+        assert!(args.smart_case);
+        assert!(args.fixed_strings);
+        assert_eq!(args.patterns, vec!["error".to_string()]);
+    }
+
+    #[test]
+    fn smart_case_ignore_case_true_for_all_lowercase_pattern() {
+        assert!(smart_case_ignore_case(&["error".to_string()]));
+    }
+
+    #[test]
+    fn smart_case_ignore_case_false_for_any_uppercase_letter() {
+        assert!(!smart_case_ignore_case(&["Error".to_string()]));
+        assert!(
+            !smart_case_ignore_case(&["errOr".to_string()]),
+            "an uppercase letter anywhere in the pattern, not just at \
+             the start, must trigger case-sensitivity"
+        );
+    }
+
+    #[test]
+    fn smart_case_ignore_case_considers_all_patterns_together() {
+        // The multi-pattern generalization: one uppercase letter in ANY
+        // pattern makes the whole (combined) search case-sensitive, even
+        // if every other pattern is entirely lowercase — there's no
+        // per-pattern case sensitivity in the final regex.
+        assert!(
+            !smart_case_ignore_case(&["error".to_string(), "Panic".to_string()]),
+            "any single pattern with an uppercase letter must make the \
+             whole set case-sensitive"
+        );
+        assert!(smart_case_ignore_case(&[
+            "error".to_string(),
+            "panic".to_string(),
+            "fatal".to_string()
+        ]));
+    }
+
+    #[test]
+    fn smart_case_ignore_case_true_for_digits_and_punctuation_only() {
+        // No letters at all (of either case) counts as "entirely
+        // lowercase" for this purpose — there's no uppercase letter to
+        // object to.
+        assert!(smart_case_ignore_case(&["4042".to_string()]));
+        assert!(smart_case_ignore_case(&["error_code-500".to_string()]));
+    }
+
+    #[test]
+    fn smart_case_ignore_case_of_empty_pattern_list_is_true() {
+        // Vacuously true ("every pattern is lowercase" holds trivially
+        // over zero patterns) — not a case this should ever actually
+        // reach in practice (--files mode never calls this), but the
+        // function should still have a sane, unsurprising answer rather
+        // than panicking on an empty slice.
+        assert!(smart_case_ignore_case(&[]));
     }
 
     // ── --stats ───────────────────────────────────────────────────────────

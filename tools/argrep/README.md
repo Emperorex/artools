@@ -20,19 +20,47 @@ cargo build --release --bin argrep
 argrep [OPTIONS] QUERY [PATH]
 ```
 
-`QUERY` is required and is matched as a **regular expression** by default (Rust's [`regex`](https://docs.rs/regex) crate — a similar dialect to `grep -E`/PCRE, without backreferences or lookaround). One exception: with `--files` (see below), `QUERY` is dropped entirely — `argrep --files [PATH]`, not `argrep --files QUERY [PATH]`. Use `-F`/`--fixed-strings` to search for `QUERY` literally instead, e.g. when it contains characters like `.`, `*`, `(` that you don't want interpreted as regex syntax:
+`QUERY` is required and is matched as a **regular expression** by default (Rust's [`regex`](https://docs.rs/regex) crate — a similar dialect to `grep -E`/PCRE, without backreferences or lookaround). Two exceptions: with `--files` (see below), `QUERY` is dropped entirely — `argrep --files [PATH]`, not `argrep --files QUERY [PATH]` — and with `-e`/`--regexp` (see below), patterns are supplied via repeated `-e` flags instead of the positional `QUERY`.
+
+Use `-e`/`--regexp` to search for more than one pattern at once — a line matches if it matches **any** of them (combined via alternation, not required to match all), same semantics as `grep`/`ripgrep`'s multiple `-e`:
+
+```
+argrep -e 'TODO' -e 'FIXME' -e 'HACK' .
+argrep -e 'error' -e 'panic' src/
+```
+
+`-e` is repeatable, and once it's given at all, the positional `QUERY` is **not** treated as an additional pattern — the same rule GNU grep follows once `-e`/`-f` is used. This means `QUERY` becomes optional with `-e`, exactly like it does with `--files`: `argrep -e 'TODO' .`, not `argrep -e 'TODO' QUERY .`. If a single positional value is given anyway, it's treated as `PATH`, not as another pattern — clap always binds the first bare positional to the `QUERY` slot regardless of `-e`, so this reinterpretation happens the same way it does for `--files`. Giving two positionals together with `-e` is a usage error rather than a guess about which one was meant as a path and which as a forgotten pattern:
+
+```
+$ argrep -e 'TODO' foo .
+error: -e/--regexp does not treat QUERY as an additional pattern, only PATH,
+but got two positional arguments: 'foo' and '.'. Use `argrep -e '...' .` (or
+`argrep -e '...' foo`, whichever was meant as the path — and add another -e
+if 'foo' was meant as a pattern instead).
+```
+
+Use `-F`/`--fixed-strings` to search for `QUERY` literally instead, e.g. when it contains characters like `.`, `*`, `(` that you don't want interpreted as regex syntax:
 
 ```
 argrep -F 'foo.bar' .          # matches the literal text "foo.bar"
 argrep -F 'connection refused' /var/log
 ```
 
-Use `-w`/`--word-regexp` to only match whole words (the pattern is wrapped in `\b(?:...)\b`), and `-x`/`--line-regexp` to only match whole lines (wrapped in `^(?:...)$`) — same semantics as `grep -w`/`grep -x`:
+Use `-w`/`--word-regexp` to only match whole words (the pattern is wrapped in `\b(?:...)\b`), and `-x`/`--line-regexp` to only match whole lines (wrapped in `^(?:...)$`) — same semantics as `grep -w`/`grep -x`. With multiple `-e` patterns, the whole combined alternation is wrapped once (`\b(?:(?:p1)|(?:p2))\b`), not each pattern separately — same as GNU grep's own `-w`/`-x` combined with multiple `-e`:
 
 ```
 argrep -w cat .                # matches "cat" and "the cat sat", not "category"
 argrep -x ERROR .              # matches a line that is exactly "ERROR", not "ERROR: disk full"
 ```
+
+Use `-S`/`--smart-case` to pick case sensitivity automatically from how `QUERY` (or, with `-e`, all of your patterns together) is written: entirely lowercase searches case-insensitively, and a pattern with even one uppercase letter searches case-sensitively — the classic `ripgrep` behavior:
+
+```
+argrep -S 'error' .     # behaves like -i (all lowercase)
+argrep -S 'Error' .     # case-sensitive (has an uppercase letter)
+```
+
+With multiple `-e` patterns, `-S` looks at **all of them together**, not each one independently: a single uppercase letter in any one pattern makes the whole search case-sensitive, since the final compiled regex has one shared case-sensitivity setting, not a separate one per pattern. `-S` conflicts with `-i`/`--ignore-case` rather than following `ripgrep`'s "last flag on the command line wins" rule — a deliberate simplification: order-sensitive flag resolution adds real complexity for what's otherwise a simple boolean choice, and it's easy enough to just not pass both.
 
 Use `-q`/`--quiet` to suppress all output and rely on the exit code alone — the search stops as soon as one match is found instead of scanning the rest of the tree, and (unlike the tool's default exit-code contract below) follows grep's own convention: `0` = at least one match, `1` = no match, `2` = a CLI/config error occurred:
 
@@ -222,7 +250,7 @@ arguments: 'foo' and '.'. Use `argrep --files .` (or `argrep --files foo`,
 whichever was meant as the path).
 ```
 
-`--files` conflicts with every flag that only makes sense once content is actually being searched: `-l`/`-L`/`-c`/`-v`/`-o`/`-n`/`-A`/`-B`/`-C`/`-m`/`-q`. `-i`/`-F`/`-w`/`-x` are accepted but have no effect, since they only configure how `QUERY` becomes a regex and `--files` never builds a real one.
+`--files` conflicts with every flag that only makes sense once content is actually being searched: `-l`/`-L`/`-c`/`-v`/`-o`/`-n`/`-A`/`-B`/`-C`/`-m`/`-q`. `-i`/`-F`/`-w`/`-x`/`-S`/`-e` are accepted but have no effect, since they only configure how `QUERY`/`-e`'s patterns become a regex and `--files` never builds a real one.
 
 `--files` pairs naturally with `--stats`: `argrep --files --stats . > /dev/null` gives you the discovered/searched/skipped breakdown for a filter combination without printing a single filename, which is often exactly what you want when you're trying to understand *why* a file is or isn't being picked up.
 
@@ -246,6 +274,8 @@ This is aimed squarely at rotated logs — `logrotate` compresses old logs as gz
 | Flag                    | Short | Default           | Description                                                                                                                                              |
 |-------------------------|-------|-------------------|----------------------------------------------------------------------------------------------------------------------------------------------------------|
 | `--ignore-case`         | `-i`  | —                 | Case-insensitive matching                                                                                                                                |
+| `--smart-case`          | `-S`  | —                 | Case-insensitive only if every pattern is entirely lowercase; conflicts with `-i`                                                                        |
+| `--regexp PATTERN`      | `-e`  | —                 | An additional pattern to search for (OR'd with others); repeatable; QUERY not required or used as a pattern once given                                   |
 | `--fixed-strings`       | `-F`  | —                 | Treat QUERY as a literal string instead of a regex                                                                                                       |
 | `--word-regexp`         | `-w`  | —                 | Match only whole words (wraps QUERY in `\b(?:...)\b`)                                                                                                    |
 | `--line-regexp`         | `-x`  | —                 | Match only whole lines (wraps QUERY in `^(?:...)$`)                                                                                                      |
@@ -309,6 +339,15 @@ argrep "error" /var/log -n
 
 # Case-insensitive search
 argrep "todo" ./src -i -n
+
+# Smart-case: insensitive because it's all lowercase
+argrep -S "todo" ./src -n
+
+# Smart-case: sensitive because of the capital T
+argrep -S "Todo" ./src -n
+
+# Multiple patterns — matches TODO, FIXME, or HACK
+argrep -e "TODO" -e "FIXME" -e "HACK" ./src
 ```
 
 ### Filtering
@@ -404,6 +443,8 @@ argrep -z 'OutOfMemoryError' /var/log/app/*.log.gz
 |------------------------|------------------------------------------------|-----------------------------------------------|
 | Recursive search       | `grep -r "query" .`                            | `argrep "query" .`                            |
 | Case-insensitive       | `grep -ri "query" .`                           | `argrep -i "query" .`                         |
+| Smart case             | *(no equivalent — always explicit)*            | `argrep -S "query" .`                         |
+| Multiple patterns      | `grep -e "p1" -e "p2" .`                       | `argrep -e "p1" -e "p2" .`                    |
 | Fixed string           | `grep -rF "query" .`                           | `argrep -F "query" .`                         |
 | Whole word             | `grep -rw "query" .`                           | `argrep -w "query" .`                         |
 | Whole line             | `grep -rx "query" .`                           | `argrep -x "query" .`                         |

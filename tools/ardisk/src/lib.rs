@@ -111,6 +111,25 @@ pub struct Task {
     pub ignore_stack: Arc<Vec<Arc<Gitignore>>>,
 }
 
+/// Mutable state shared by all worker threads for the duration of one scan.
+///
+/// Grouped into one struct so `scan_directory` stays within clippy's
+/// argument-count limit and new shared state doesn't change its signature.
+pub struct ScanShared {
+    /// Queue of directories still to scan.
+    pub task_tx: crossbeam_channel::Sender<Task>,
+    /// Directories queued or in progress; the scan is done when this hits 0.
+    pub active_tasks: AtomicUsize,
+    /// Per-directory total cost: file bytes + directory inode cost.
+    pub raw_sizes: Mutex<HashMap<PathBuf, u64>>,
+    /// Per-directory file bytes only (filtered by `--include`), no inode.
+    pub content_sizes: Mutex<HashMap<PathBuf, u64>>,
+    /// Global (dev, ino) dedup set so hard-linked files are only counted once
+    /// per invocation, mirroring GNU `du`'s behavior. Shared across all worker
+    /// threads for the entire traversal, not just per-directory.
+    pub seen_inodes: Mutex<HashSet<(u64, u64)>>,
+}
+
 /// Configuration shared across worker threads
 pub struct ScanConfig {
     pub ignore_dirs: HashSet<String>,
@@ -234,15 +253,16 @@ pub fn parallel_scan_with_files(
     largest_files: usize,
 ) -> (HashMap<PathBuf, u64>, HashMap<PathBuf, u64>, Vec<FileEntry>) {
     let (task_tx, task_rx) = unbounded::<Task>();
-    let active_tasks = Arc::new(AtomicUsize::new(1));
-    let raw_sizes = Arc::new(Mutex::new(HashMap::<PathBuf, u64>::new()));
-    let content_sizes = Arc::new(Mutex::new(HashMap::<PathBuf, u64>::new()));
-    // Global (dev, ino) dedup set so hard-linked files are only counted once
-    // per invocation, mirroring GNU `du`'s behavior. Shared across all worker
-    // threads for the entire traversal, not just per-directory.
-    let seen_inodes = Arc::new(Mutex::new(HashSet::<(u64, u64)>::new()));
+    let shared = Arc::new(ScanShared {
+        task_tx,
+        active_tasks: AtomicUsize::new(1),
+        raw_sizes: Mutex::new(HashMap::new()),
+        content_sizes: Mutex::new(HashMap::new()),
+        seen_inodes: Mutex::new(HashSet::new()),
+    });
 
-    task_tx
+    shared
+        .task_tx
         .send(Task {
             path: root,
             ignore_stack: Arc::new(Vec::new()),
@@ -253,12 +273,8 @@ pub fn parallel_scan_with_files(
 
     for _ in 0..workers {
         let task_rx = task_rx.clone();
-        let task_tx = task_tx.clone();
         let config = Arc::clone(&config);
-        let raw_sizes = Arc::clone(&raw_sizes);
-        let content_sizes = Arc::clone(&content_sizes);
-        let active_tasks = Arc::clone(&active_tasks);
-        let seen_inodes = Arc::clone(&seen_inodes);
+        let shared = Arc::clone(&shared);
 
         let handle = thread::spawn(move || {
             let mut top_files = TopFiles::new(largest_files);
@@ -269,7 +285,7 @@ pub fn parallel_scan_with_files(
                         Err(_) => break,
                     },
                     default => {
-                        if active_tasks.load(Ordering::SeqCst) == 0 {
+                        if shared.active_tasks.load(Ordering::SeqCst) == 0 {
                             break;
                         }
                         thread::yield_now();
@@ -280,14 +296,10 @@ pub fn parallel_scan_with_files(
                 scan_directory(
                     task,
                     &config,
-                    &task_tx,
-                    &active_tasks,
-                    &raw_sizes,
-                    &content_sizes,
-                    &seen_inodes,
+                    &shared,
                     (largest_files > 0).then_some(&mut top_files),
                 );
-                active_tasks.fetch_sub(1, Ordering::SeqCst);
+                shared.active_tasks.fetch_sub(1, Ordering::SeqCst);
             }
             top_files
         });
@@ -295,18 +307,17 @@ pub fn parallel_scan_with_files(
         handles.push(handle);
     }
 
-    drop(task_tx);
-
     let mut top_files = TopFiles::new(largest_files);
     for handle in handles {
         top_files.merge(handle.join().unwrap());
     }
 
-    let raw = Arc::try_unwrap(raw_sizes).unwrap().into_inner().unwrap();
-    let content = Arc::try_unwrap(content_sizes)
-        .unwrap()
-        .into_inner()
-        .unwrap();
+    // All workers have finished and dropped their clones of `shared`.
+    let Ok(shared) = Arc::try_unwrap(shared) else {
+        unreachable!("all workers were joined, so no other Arc<ScanShared> can exist");
+    };
+    let raw = shared.raw_sizes.into_inner().unwrap();
+    let content = shared.content_sizes.into_inner().unwrap();
     (raw, content, top_files.into_sorted_vec())
 }
 
@@ -386,11 +397,7 @@ fn is_path_ignored(stack: &[Arc<Gitignore>], path: &Path, is_dir: bool) -> bool 
 pub fn scan_directory(
     task: Task,
     config: &ScanConfig,
-    task_tx: &crossbeam_channel::Sender<Task>,
-    active_tasks: &AtomicUsize,
-    raw_sizes: &Mutex<HashMap<PathBuf, u64>>,
-    content_sizes: &Mutex<HashMap<PathBuf, u64>>,
-    seen_inodes: &Mutex<HashSet<(u64, u64)>>,
+    shared: &ScanShared,
     mut top_files: Option<&mut TopFiles>,
 ) {
     let dir_path = task.path.as_path();
@@ -475,8 +482,8 @@ pub fn scan_directory(
             if config.ignore_dirs.contains(file_name.as_ref()) {
                 continue;
             }
-            active_tasks.fetch_add(1, Ordering::SeqCst);
-            let _ = task_tx.send(Task {
+            shared.active_tasks.fetch_add(1, Ordering::SeqCst);
+            let _ = shared.task_tx.send(Task {
                 path: entry_path,
                 ignore_stack: Arc::clone(&ignore_stack),
             });
@@ -499,7 +506,7 @@ pub fn scan_directory(
                     {
                         if metadata.nlink() > 1 {
                             let key = (metadata.dev(), metadata.ino());
-                            let mut seen = seen_inodes.lock().unwrap();
+                            let mut seen = shared.seen_inodes.lock().unwrap();
                             !seen.insert(key)
                         } else {
                             false
@@ -530,11 +537,13 @@ pub fn scan_directory(
         local_dir_size += size_from_metadata(&dir_metadata, config.apparent_size);
     }
 
-    raw_sizes
+    shared
+        .raw_sizes
         .lock()
         .unwrap()
         .insert(dir_path.to_path_buf(), local_dir_size);
-    content_sizes
+    shared
+        .content_sizes
         .lock()
         .unwrap()
         .insert(dir_path.to_path_buf(), local_content_size);

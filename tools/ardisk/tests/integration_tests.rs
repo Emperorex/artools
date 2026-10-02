@@ -3,7 +3,11 @@ use ardisk::{
     build_exclude_matcher, format_size, parallel_scan, parallel_scan_with_files,
 };
 use glob::Pattern;
-use std::{collections::HashSet, fs, path::PathBuf};
+use std::{
+    collections::HashSet,
+    fs,
+    path::{Path, PathBuf},
+};
 use tempfile::TempDir;
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -699,12 +703,12 @@ fn apparent_size_produces_smaller_or_equal_size_than_blocks() {
 
 /// Scans `root` with the default ignores plus the given `--exclude` patterns
 /// and returns the aggregated sizes.
-fn run_with_exclude(root: &PathBuf, patterns: &[&str]) -> std::collections::HashMap<PathBuf, u64> {
+fn run_with_exclude(root: &Path, patterns: &[&str]) -> std::collections::HashMap<PathBuf, u64> {
     let ignore_dirs: HashSet<String> = DEFAULT_IGNORES.iter().map(|s| s.to_string()).collect();
     let patterns: Vec<String> = patterns.iter().map(|s| s.to_string()).collect();
     let exclude = build_exclude_matcher(root, &patterns).unwrap();
     let config = build_config_with_exclude(ignore_dirs, None, false, true, true, exclude);
-    let (raw, _content) = parallel_scan(root.clone(), 4, config);
+    let (raw, _content) = parallel_scan(root.to_path_buf(), 4, config);
     aggregate_sizes(&raw, root)
 }
 
@@ -845,7 +849,7 @@ fn make_sized_tree(files: &[(&str, usize)]) -> (TempDir, PathBuf) {
 /// Runs a scan collecting the `n` largest files. Uses logical sizes so the
 /// expected values are exact, default ignores, no .gitignore handling.
 fn largest(
-    root: &PathBuf,
+    root: &Path,
     n: usize,
     workers: usize,
     include: Option<&str>,
@@ -862,7 +866,7 @@ fn largest(
         false,
         matcher,
     );
-    let (_raw, _content, files) = parallel_scan_with_files(root.clone(), workers, config, n);
+    let (_raw, _content, files) = parallel_scan_with_files(root.to_path_buf(), workers, config, n);
     files
 }
 

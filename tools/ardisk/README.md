@@ -24,17 +24,18 @@ ardisk [OPTIONS] [PATH]
 
 ## Options
 
-| Flag                | Short | Default   | Description                                                                                              |
-|---------------------|-------|-----------|----------------------------------------------------------------------------------------------------------|
-| `--top N`           | `-n`  | `20`      | Number of top directories to display                                                                     |
-| `--max-depth N`     | —     | unlimited | Maximum depth of directories to display in the report                                                    |
-| `--threshold SIZE`  | —     | —         | Only show directories larger than this size (e.g. `100MB`, `1GB`)                                        |
-| `--summarize`       | `-s`  | —         | Print only the grand total for the root directory                                                        |
-| `--include PATTERN` | —     | —         | Only count files matching this glob pattern (e.g. `"*.rs"`, `"*.mp4"`)                                   |
-| `--exclude GLOB`    | —     | —         | Exclude files/dirs matching a gitignore-style glob; repeatable (see [Excluding paths](#excluding-paths)) |
-| `--apparent-size`   | —     | —         | Use logical file sizes instead of block allocation — matches `du -sh`                                    |
-| `--jobs N`          | `-j`  | CPU-aware | Number of parallel worker threads (1–128; default is half the available cores, clamped to 1–16)          |
-| `--debug`           | `-d`  | —         | Print scan statistics and errors to stderr                                                               |
+| Flag                | Short | Default   | Description                                                                                                                         |
+|---------------------|-------|-----------|-------------------------------------------------------------------------------------------------------------------------------------|
+| `--top N`           | `-n`  | `20`      | Number of top directories to display                                                                                                |
+| `--max-depth N`     | —     | unlimited | Maximum depth of directories to display in the report                                                                               |
+| `--threshold SIZE`  | —     | —         | Only show directories larger than this size (e.g. `100MB`, `1GB`)                                                                   |
+| `--summarize`       | `-s`  | —         | Print only the grand total for the root directory                                                                                   |
+| `--largest-files N` | —     | —         | List the `N` largest individual files instead of the directory report (see [Finding the largest files](#finding-the-largest-files)) |
+| `--include PATTERN` | —     | —         | Only count files matching this glob pattern (e.g. `"*.rs"`, `"*.mp4"`)                                                              |
+| `--exclude GLOB`    | —     | —         | Exclude files/dirs matching a gitignore-style glob; repeatable (see [Excluding paths](#excluding-paths))                            |
+| `--apparent-size`   | —     | —         | Use logical file sizes instead of block allocation — matches `du -sh`                                                               |
+| `--jobs N`          | `-j`  | CPU-aware | Number of parallel worker threads (1–128; default is half the available cores, clamped to 1–16)                                     |
+| `--debug`           | `-d`  | —         | Print scan statistics and errors to stderr                                                                                          |
 
 ## Size units
 
@@ -52,6 +53,31 @@ The following directories are always skipped:
 - `.git`
 - `node_modules`
 - `__pycache__`
+
+## Finding the largest files
+
+`--largest-files N` lists the `N` biggest individual files, largest first, instead of the per-directory report:
+
+```bash
+ardisk ~ --largest-files 20
+```
+
+```
+  2.31 GB  /Users/me/Movies/raw/take3.mov
+  1.12 GB  /Users/me/Library/Caches/big.bin
+ ...
+```
+
+What counts as a candidate is exactly what counts toward the directory totals:
+
+- **Same filters as the directory report.** `--include`, `--exclude`, `--ignore`, the built-in ignores and `.gitignore`/`.ignore` rules all apply, so `ardisk . --largest-files 10 --include "*.mp4"` finds the biggest videos, and files you excluded can never show up.
+- **Same sizes.** Physical block allocation by default, logical length with `--apparent-size`, so the numbers agree with the directory report.
+- **Hard links are listed once.** A file with several names (hard links) appears as a single entry. Which name is shown depends on which one the parallel scan reached first and can differ between runs; the size and the set of other files are unaffected. A name hidden by `--exclude`/`--include` never "uses up" the file, so another name that passes the filters is still reported.
+- **Symlinks are never listed** (and never followed), and directories are never listed.
+- **Ties** (equal sizes) are ordered by path, so the output is deterministic.
+- If the tree has fewer than `N` files, all of them are printed.
+
+`--largest-files` replaces the directory report, so it cannot be combined with `--summarize`, `--top`, `--max-depth` or `--threshold`. Memory use is proportional to `N` times the number of worker threads, not to the number of files scanned.
 
 ## Excluding paths
 
@@ -127,6 +153,12 @@ ardisk . --summarize --apparent-size
 # Top directories using logical sizes
 ardisk . --top 10 --apparent-size
 
+# 20 largest files under the home directory
+ardisk ~ --largest-files 20
+
+# 10 largest videos, ignoring a scratch directory
+ardisk ~/Movies --largest-files 10 --include "*.mp4" --exclude 'scratch/**'
+
 # Ignore log files and the build directory
 ardisk . --exclude '*.log' --exclude 'target/**'
 
@@ -136,16 +168,17 @@ ardisk / -j 8 --top 20
 
 ## Comparison with `du`
 
-| Task                | `du`                               | `ardisk`                                    |
-|---------------------|------------------------------------|---------------------------------------------|
-| Top heaviest dirs   | `du -sh * \| sort -rh \| head -10` | `ardisk . --top 10`                         |
-| Limit depth         | `du -d 1`                          | `ardisk . --max-depth 1`                    |
-| Total only          | `du -sh .`                         | `ardisk . --summarize --apparent-size`      |
-| Physical total      | `du -s .`                          | `ardisk . --summarize`                      |
-| Filter by size      | not supported                      | `ardisk . --threshold 1GB`                  |
-| Filter by file type | not supported                      | `ardisk . --include "*.mp4"`                |
-| Skip node_modules   | `--exclude=node_modules`           | automatic                                   |
-| Exclude by glob     | `--exclude='*.log'`                | `ardisk . --exclude '*.log'`                |
+| Task                | `du`                                                   | `ardisk`                               |
+|---------------------|--------------------------------------------------------|----------------------------------------|
+| Top heaviest dirs   | `du -sh * \| sort -rh \| head -10`                     | `ardisk . --top 10`                    |
+| Limit depth         | `du -d 1`                                              | `ardisk . --max-depth 1`               |
+| Total only          | `du -sh .`                                             | `ardisk . --summarize --apparent-size` |
+| Physical total      | `du -s .`                                              | `ardisk . --summarize`                 |
+| Filter by size      | not supported                                          | `ardisk . --threshold 1GB`             |
+| Filter by file type | not supported                                          | `ardisk . --include "*.mp4"`           |
+| Biggest files       | `find . -type f -printf '%s %p\n' \| sort -rn \| head` | `ardisk . --largest-files 20`          |
+| Skip node_modules   | `--exclude=node_modules`                               | automatic                              |
+| Exclude by glob     | `--exclude='*.log'`                                    | `ardisk . --exclude '*.log'`           |
 
 ## Key advantages over `du`
 
@@ -157,8 +190,8 @@ ardisk / -j 8 --top 20
 
 ## Exit codes
 
-| Code | Meaning                                                             |
-|------|---------------------------------------------------------------------|
-| `0`  | Success                                                             |
-| `1`  | Invalid `--threshold`/`--include`/`--exclude` value or config error |
-| `2`  | Invalid CLI usage — bad or missing flag (e.g. `-j 0`)               |
+| Code | Meaning                                                                    |
+|------|----------------------------------------------------------------------------|
+| `0`  | Success                                                                    |
+| `1`  | Invalid `--threshold`/`--include`/`--exclude` value or config error        |
+| `2`  | Invalid CLI usage — bad or missing flag (e.g. `-j 0`, `--largest-files 0`) |

@@ -1,6 +1,6 @@
 use ardisk::{
     DEFAULT_IGNORES, aggregate_sizes, build_config_with_exclude, build_exclude_matcher,
-    format_size, parallel_scan,
+    format_size, parallel_scan_with_files,
 };
 use clap::Parser;
 use clap::builder::TypedValueParser as _;
@@ -131,6 +131,17 @@ struct Args {
     #[arg(short = 's', long)]
     summarize: bool,
 
+    /// List the N largest individual files instead of the directory report.
+    /// Respects --include, --exclude, --ignore and .gitignore; hard-linked
+    /// files are listed once; sizes follow --apparent-size.
+    #[arg(
+        long,
+        value_name = "N",
+        value_parser = clap::value_parser!(u64).range(1..).map(|v| v as usize),
+        conflicts_with_all = ["summarize", "top", "max_depth", "threshold"]
+    )]
+    largest_files: Option<usize>,
+
     /// Use logical file sizes instead of physical block allocation.
     /// Matches the output of du -sh on macOS and Linux.
     #[arg(long)]
@@ -209,7 +220,12 @@ fn main() {
     let start_time = Instant::now();
 
     // Phase 1: Parallel file scanning
-    let (raw_sizes, raw_content_sizes) = parallel_scan(target_path.clone(), args.jobs, config);
+    let (raw_sizes, raw_content_sizes, largest_files) = parallel_scan_with_files(
+        target_path.clone(),
+        args.jobs,
+        config,
+        args.largest_files.unwrap_or(0),
+    );
 
     // Phase 2: Aggregation and rollup from bottom to top
     let aggregated_sizes = aggregate_sizes(&raw_sizes, &target_path);
@@ -230,11 +246,22 @@ fn main() {
     };
 
     if args.debug {
-        println!("{}", "=== Top Directories ===".yellow().bold());
+        let title = if args.largest_files.is_some() {
+            "=== Largest Files ==="
+        } else {
+            "=== Top Directories ==="
+        };
+        println!("{}", title.yellow().bold());
     }
 
-    // --summarize: print only the root total and exit
-    if args.summarize {
+    if args.largest_files.is_some() {
+        // --largest-files: individual files, largest first, instead of the
+        // per-directory report.
+        for file in &largest_files {
+            println!("{:>10}  {}", format_size(file.size), file.path.display());
+        }
+    } else if args.summarize {
+        // --summarize: print only the root total and exit
         let root_size = aggregated_sizes.get(&target_path).copied().unwrap_or(0);
         println!("{:>10}  {}", format_size(root_size), target_path.display());
     } else {
@@ -350,6 +377,66 @@ mod tests {
         ])
         .unwrap();
         assert_eq!(args.exclude, vec!["*.log", "target/**"]);
+    }
+
+    // ── --largest-files ───────────────────────────────────────────────────
+
+    #[test]
+    fn largest_files_parses_a_positive_count() {
+        let args = Args::try_parse_from(["ardisk", ".", "--largest-files", "20"]).unwrap();
+        assert_eq!(args.largest_files, Some(20));
+    }
+
+    #[test]
+    fn largest_files_defaults_to_none() {
+        let args = Args::try_parse_from(["ardisk", "."]).unwrap();
+        assert_eq!(args.largest_files, None);
+    }
+
+    #[test]
+    fn largest_files_zero_is_rejected() {
+        assert!(Args::try_parse_from(["ardisk", ".", "--largest-files", "0"]).is_err());
+    }
+
+    #[test]
+    fn largest_files_rejects_non_numeric_and_negative() {
+        assert!(Args::try_parse_from(["ardisk", ".", "--largest-files", "x"]).is_err());
+        assert!(Args::try_parse_from(["ardisk", ".", "--largest-files", "-3"]).is_err());
+    }
+
+    #[test]
+    fn largest_files_conflicts_with_directory_report_flags() {
+        for extra in [
+            vec!["--summarize"],
+            vec!["--top", "5"],
+            vec!["--max-depth", "2"],
+            vec!["--threshold", "1MB"],
+        ] {
+            let mut argv = vec!["ardisk", ".", "--largest-files", "3"];
+            argv.extend(extra.iter());
+            assert!(
+                Args::try_parse_from(argv).is_err(),
+                "--largest-files must conflict with {:?}",
+                extra
+            );
+        }
+    }
+
+    #[test]
+    fn largest_files_combines_with_include_exclude_and_apparent_size() {
+        let args = Args::try_parse_from([
+            "ardisk",
+            ".",
+            "--largest-files",
+            "5",
+            "--include",
+            "*.mp4",
+            "--exclude",
+            "tmp/**",
+            "--apparent-size",
+        ])
+        .unwrap();
+        assert_eq!(args.largest_files, Some(5));
     }
 
     #[test]

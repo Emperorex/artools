@@ -6,7 +6,8 @@ use ignore::{
     gitignore::{Gitignore, GitignoreBuilder},
 };
 use std::{
-    collections::{HashMap, HashSet},
+    cmp::{Ordering as CmpOrdering, Reverse},
+    collections::{BinaryHeap, HashMap, HashSet},
     fs,
     path::{Path, PathBuf},
     sync::{
@@ -21,6 +22,85 @@ use std::os::unix::fs::MetadataExt;
 
 /// Default directories to ignore during scanning
 pub const DEFAULT_IGNORES: &[&str] = &[".git", "node_modules", "__pycache__"];
+
+/// A single file reported by `--largest-files`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FileEntry {
+    pub size: u64,
+    pub path: PathBuf,
+}
+
+// "Greater" means "ranks higher in the report": bigger size first, and for
+// equal sizes the lexicographically smaller path first, so output is
+// deterministic regardless of thread scheduling.
+impl Ord for FileEntry {
+    fn cmp(&self, other: &Self) -> CmpOrdering {
+        self.size
+            .cmp(&other.size)
+            .then_with(|| other.path.cmp(&self.path))
+    }
+}
+
+impl PartialOrd for FileEntry {
+    fn partial_cmp(&self, other: &Self) -> Option<CmpOrdering> {
+        Some(self.cmp(other))
+    }
+}
+
+/// Bounded collection of the `limit` highest-ranked files seen so far.
+///
+/// Each worker thread owns one (no locking on the hot path); they are merged
+/// once after the scan. Memory is O(limit * workers), independent of the
+/// number of files scanned.
+#[derive(Debug)]
+pub struct TopFiles {
+    limit: usize,
+    // Min-heap on rank: the root is the entry that would be evicted next.
+    heap: BinaryHeap<Reverse<FileEntry>>,
+}
+
+impl TopFiles {
+    pub fn new(limit: usize) -> Self {
+        Self {
+            limit,
+            heap: BinaryHeap::new(),
+        }
+    }
+
+    /// Considers a file for inclusion. Takes the path by value so rejected
+    /// candidates cost nothing beyond dropping it.
+    pub fn offer(&mut self, size: u64, path: PathBuf) {
+        if self.limit == 0 {
+            return;
+        }
+        if self.heap.len() >= self.limit
+            && let Some(Reverse(worst)) = self.heap.peek()
+            && size < worst.size
+        {
+            return;
+        }
+        self.heap.push(Reverse(FileEntry { size, path }));
+        if self.heap.len() > self.limit {
+            self.heap.pop();
+        }
+    }
+
+    pub fn merge(&mut self, other: TopFiles) {
+        for Reverse(entry) in other.heap {
+            self.offer(entry.size, entry.path);
+        }
+    }
+
+    /// Consumes the collection, returning entries largest first.
+    pub fn into_sorted_vec(self) -> Vec<FileEntry> {
+        // Ascending order of Reverse<FileEntry> is descending rank.
+        self.heap
+            .into_sorted_vec()
+            .into_iter()
+            .map(|Reverse(e)| e)
+            .collect()
+    }
+}
 
 /// Task sent to workers representing a directory to scan
 pub struct Task {
@@ -135,6 +215,24 @@ pub fn parallel_scan(
     workers: usize,
     config: Arc<ScanConfig>,
 ) -> (HashMap<PathBuf, u64>, HashMap<PathBuf, u64>) {
+    let (raw, content, _files) = parallel_scan_with_files(root, workers, config, 0);
+    (raw, content)
+}
+
+/// Like [`parallel_scan`], but additionally collects the `largest_files`
+/// biggest individual files (largest first; `0` disables collection).
+///
+/// Candidates are exactly the files that contribute to the directory totals:
+/// symlinks, `--exclude`d/`.gitignore`d paths and files rejected by
+/// `--include` are never candidates, hard-linked files are listed once (under
+/// whichever path the scan reached first), and sizes use the same
+/// `--apparent-size` / block-allocation rule as the directory report.
+pub fn parallel_scan_with_files(
+    root: PathBuf,
+    workers: usize,
+    config: Arc<ScanConfig>,
+    largest_files: usize,
+) -> (HashMap<PathBuf, u64>, HashMap<PathBuf, u64>, Vec<FileEntry>) {
     let (task_tx, task_rx) = unbounded::<Task>();
     let active_tasks = Arc::new(AtomicUsize::new(1));
     let raw_sizes = Arc::new(Mutex::new(HashMap::<PathBuf, u64>::new()));
@@ -163,6 +261,7 @@ pub fn parallel_scan(
         let seen_inodes = Arc::clone(&seen_inodes);
 
         let handle = thread::spawn(move || {
+            let mut top_files = TopFiles::new(largest_files);
             loop {
                 let task = crossbeam_channel::select! {
                     recv(task_rx) -> msg => match msg {
@@ -186,9 +285,11 @@ pub fn parallel_scan(
                     &raw_sizes,
                     &content_sizes,
                     &seen_inodes,
+                    (largest_files > 0).then_some(&mut top_files),
                 );
                 active_tasks.fetch_sub(1, Ordering::SeqCst);
             }
+            top_files
         });
 
         handles.push(handle);
@@ -196,8 +297,9 @@ pub fn parallel_scan(
 
     drop(task_tx);
 
+    let mut top_files = TopFiles::new(largest_files);
     for handle in handles {
-        handle.join().unwrap();
+        top_files.merge(handle.join().unwrap());
     }
 
     let raw = Arc::try_unwrap(raw_sizes).unwrap().into_inner().unwrap();
@@ -205,7 +307,7 @@ pub fn parallel_scan(
         .unwrap()
         .into_inner()
         .unwrap();
-    (raw, content)
+    (raw, content, top_files.into_sorted_vec())
 }
 
 /// Computes the on-disk contribution of a single metadata entry, honoring
@@ -289,6 +391,7 @@ pub fn scan_directory(
     raw_sizes: &Mutex<HashMap<PathBuf, u64>>,
     content_sizes: &Mutex<HashMap<PathBuf, u64>>,
     seen_inodes: &Mutex<HashSet<(u64, u64)>>,
+    mut top_files: Option<&mut TopFiles>,
 ) {
     let dir_path = task.path.as_path();
 
@@ -412,6 +515,9 @@ pub fn scan_directory(
                     let file_size = size_from_metadata(&metadata, config.apparent_size);
                     local_content_size += file_size;
                     local_dir_size += file_size;
+                    if let Some(top) = top_files.as_mut() {
+                        top.offer(file_size, entry_path);
+                    }
                 }
             }
         }
@@ -549,5 +655,58 @@ mod tests {
 
         let gi = build_dir_gitignore(dir.path(), &[".gitignore"], false);
         assert!(gi.is_none());
+    }
+
+    // ── TopFiles ─────────────────────────────────────────────────────────────
+
+    fn tf_names(top: super::TopFiles) -> Vec<(u64, String)> {
+        top.into_sorted_vec()
+            .into_iter()
+            .map(|e| (e.size, e.path.to_string_lossy().into_owned()))
+            .collect()
+    }
+
+    #[test]
+    fn top_files_keeps_the_largest_and_evicts_the_rest() {
+        let mut top = super::TopFiles::new(2);
+        for (size, name) in [(5, "a"), (50, "b"), (1, "c"), (20, "d")] {
+            top.offer(size, name.into());
+        }
+        assert_eq!(tf_names(top), [(50, "b".into()), (20, "d".into())]);
+    }
+
+    #[test]
+    fn top_files_ties_prefer_the_smaller_path_regardless_of_arrival_order() {
+        for order in [["a", "b", "c"], ["c", "b", "a"], ["b", "c", "a"]] {
+            let mut top = super::TopFiles::new(2);
+            for name in order {
+                top.offer(10, name.into());
+            }
+            assert_eq!(tf_names(top), [(10, "a".into()), (10, "b".into())]);
+        }
+    }
+
+    #[test]
+    fn top_files_limit_zero_stores_nothing() {
+        let mut top = super::TopFiles::new(0);
+        top.offer(10, "a".into());
+        assert!(top.into_sorted_vec().is_empty());
+    }
+
+    #[test]
+    fn top_files_merge_equals_single_collection() {
+        let items = [(3, "a"), (9, "b"), (9, "c"), (1, "d"), (7, "e"), (7, "f")];
+        let mut whole = super::TopFiles::new(3);
+        let (mut left, mut right) = (super::TopFiles::new(3), super::TopFiles::new(3));
+        for (i, (size, name)) in items.iter().enumerate() {
+            whole.offer(*size, (*name).into());
+            if i % 2 == 0 {
+                left.offer(*size, (*name).into());
+            } else {
+                right.offer(*size, (*name).into());
+            }
+        }
+        left.merge(right);
+        assert_eq!(tf_names(left), tf_names(whole));
     }
 }

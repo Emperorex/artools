@@ -1,6 +1,6 @@
 use ardisk::{
-    DEFAULT_IGNORES, aggregate_sizes, build_config, build_config_with_exclude,
-    build_exclude_matcher, format_size, parallel_scan,
+    DEFAULT_IGNORES, FileEntry, aggregate_sizes, build_config, build_config_with_exclude,
+    build_exclude_matcher, format_size, parallel_scan, parallel_scan_with_files,
 };
 use glob::Pattern;
 use std::{collections::HashSet, fs, path::PathBuf};
@@ -824,4 +824,197 @@ fn exclude_empty_pattern_is_rejected() {
 fn exclude_without_patterns_builds_no_matcher() {
     let (_d, root) = make_tree(&["a"]);
     assert!(build_exclude_matcher(&root, &[]).unwrap().is_none());
+}
+
+// ── --largest-files ───────────────────────────────────────────────────────────
+
+/// Creates files with explicit byte sizes. Returns the TempDir and canonical root.
+fn make_sized_tree(files: &[(&str, usize)]) -> (TempDir, PathBuf) {
+    let dir = TempDir::new().unwrap();
+    for (rel, len) in files {
+        let full = dir.path().join(rel);
+        if let Some(parent) = full.parent() {
+            fs::create_dir_all(parent).unwrap();
+        }
+        fs::write(&full, vec![b'x'; *len]).unwrap();
+    }
+    let root = fs::canonicalize(dir.path()).unwrap();
+    (dir, root)
+}
+
+/// Runs a scan collecting the `n` largest files. Uses logical sizes so the
+/// expected values are exact, default ignores, no .gitignore handling.
+fn largest(
+    root: &PathBuf,
+    n: usize,
+    workers: usize,
+    include: Option<&str>,
+    exclude: &[&str],
+) -> Vec<FileEntry> {
+    let ignore_dirs: HashSet<String> = DEFAULT_IGNORES.iter().map(|s| s.to_string()).collect();
+    let patterns: Vec<String> = exclude.iter().map(|s| s.to_string()).collect();
+    let matcher = build_exclude_matcher(root, &patterns).unwrap();
+    let config = build_config_with_exclude(
+        ignore_dirs,
+        include.map(|p| Pattern::new(p).unwrap()),
+        false,
+        true,
+        false,
+        matcher,
+    );
+    let (_raw, _content, files) = parallel_scan_with_files(root.clone(), workers, config, n);
+    files
+}
+
+fn names(root: &PathBuf, files: &[FileEntry]) -> Vec<String> {
+    files
+        .iter()
+        .map(|f| {
+            f.path
+                .strip_prefix(root)
+                .unwrap()
+                .to_string_lossy()
+                .into_owned()
+        })
+        .collect()
+}
+
+#[test]
+fn largest_files_returns_top_n_largest_first() {
+    let (_d, root) = make_sized_tree(&[
+        ("small", 10),
+        ("a/medium", 500),
+        ("a/b/big", 9000),
+        ("c/huge", 70000),
+        ("tiny", 1),
+    ]);
+    let files = largest(&root, 3, 4, None, &[]);
+    assert_eq!(names(&root, &files), ["c/huge", "a/b/big", "a/medium"]);
+    assert_eq!(
+        files.iter().map(|f| f.size).collect::<Vec<_>>(),
+        [70000, 9000, 500]
+    );
+}
+
+#[test]
+fn largest_files_with_n_above_file_count_returns_all_files() {
+    let (_d, root) = make_sized_tree(&[("a", 3), ("sub/b", 2)]);
+    let files = largest(&root, 100, 2, None, &[]);
+    assert_eq!(names(&root, &files), ["a", "sub/b"]);
+}
+
+#[test]
+fn largest_files_never_lists_directories() {
+    let (_d, root) = make_sized_tree(&[("deep/er/file", 4)]);
+    let files = largest(&root, 10, 2, None, &[]);
+    assert_eq!(names(&root, &files), ["deep/er/file"]);
+}
+
+#[test]
+fn largest_files_ties_are_ordered_by_path() {
+    let (_d, root) = make_sized_tree(&[("c", 7), ("a", 7), ("b", 7), ("d", 7)]);
+    // Three of four equal-size files survive: the lexicographically first ones.
+    let files = largest(&root, 3, 4, None, &[]);
+    assert_eq!(names(&root, &files), ["a", "b", "c"]);
+}
+
+#[test]
+fn largest_files_result_is_independent_of_worker_count() {
+    let spec: Vec<(String, usize)> = (0..60)
+        .map(|i| (format!("d{}/f{}", i % 7, i), (i * 37) % 11 + 1))
+        .collect();
+    let spec_ref: Vec<(&str, usize)> = spec.iter().map(|(p, n)| (p.as_str(), *n)).collect();
+    let (_d, root) = make_sized_tree(&spec_ref);
+    let one = largest(&root, 10, 1, None, &[]);
+    let eight = largest(&root, 10, 8, None, &[]);
+    assert_eq!(one, eight);
+}
+
+#[test]
+fn largest_files_respects_include() {
+    let (_d, root) = make_sized_tree(&[("big.txt", 9999), ("a.mp4", 300), ("b/c.mp4", 200)]);
+    let files = largest(&root, 5, 2, Some("*.mp4"), &[]);
+    assert_eq!(names(&root, &files), ["a.mp4", "b/c.mp4"]);
+}
+
+#[test]
+fn largest_files_respects_exclude() {
+    let (_d, root) = make_sized_tree(&[
+        ("huge.log", 9999),
+        ("target/debug/app", 5000),
+        ("keep/data", 100),
+    ]);
+    let files = largest(&root, 5, 2, None, &["*.log", "target/**"]);
+    assert_eq!(names(&root, &files), ["keep/data"]);
+}
+
+#[test]
+fn largest_files_skips_ignored_directories() {
+    let (_d, root) = make_sized_tree(&[("node_modules/pkg/blob", 9999), ("src/main.rs", 10)]);
+    let files = largest(&root, 5, 2, None, &[]);
+    assert_eq!(names(&root, &files), ["src/main.rs"]);
+}
+
+#[cfg(unix)]
+#[test]
+fn largest_files_skips_symlinks() {
+    let (_d, root) = make_sized_tree(&[("real", 100)]);
+    std::os::unix::fs::symlink(root.join("real"), root.join("link")).unwrap();
+    let files = largest(&root, 5, 2, None, &[]);
+    assert_eq!(names(&root, &files), ["real"]);
+}
+
+#[cfg(unix)]
+#[test]
+fn largest_files_lists_a_hard_linked_file_once() {
+    let (_d, root) = make_sized_tree(&[("a/original", 4000), ("other", 10)]);
+    fs::create_dir_all(root.join("b")).unwrap();
+    fs::hard_link(root.join("a/original"), root.join("b/alias")).unwrap();
+
+    let files = largest(&root, 10, 4, None, &[]);
+    assert_eq!(files.len(), 2, "one entry per inode, got {:?}", files);
+    assert_eq!(files[0].size, 4000);
+    // Which of the two names is reported depends on scheduling.
+    let first = names(&root, &files[..1]).remove(0);
+    assert!(first == "a/original" || first == "b/alias", "got {first}");
+}
+
+#[cfg(unix)]
+#[test]
+fn largest_files_excluded_hard_link_does_not_hide_the_other_name() {
+    // The excluded name must not "use up" the inode: the surviving name is
+    // still a legitimate candidate.
+    let (_d, root) = make_sized_tree(&[("data.log", 4000)]);
+    fs::hard_link(root.join("data.log"), root.join("data.bin")).unwrap();
+
+    let files = largest(&root, 10, 2, None, &["*.log"]);
+    assert_eq!(names(&root, &files), ["data.bin"]);
+    assert_eq!(files[0].size, 4000);
+}
+
+#[test]
+fn largest_files_sizes_add_up_to_the_directory_content_total() {
+    // With N larger than the file count the report must account for exactly
+    // the bytes the directory totals count (hard links included).
+    let (_d, root) = make_sized_tree(&[("a", 123), ("x/b", 456), ("x/y/c", 789)]);
+    #[cfg(unix)]
+    fs::hard_link(root.join("a"), root.join("x/a2")).unwrap();
+
+    let ignore_dirs: HashSet<String> = HashSet::new();
+    let config = build_config(ignore_dirs, None, false, true, false);
+    let (_raw, content, files) = parallel_scan_with_files(root.clone(), 4, config, 1000);
+    let agg_content = aggregate_sizes(&content, &root);
+
+    let listed: u64 = files.iter().map(|f| f.size).sum();
+    assert_eq!(listed, agg_content[&root]);
+}
+
+#[test]
+fn largest_files_zero_collects_nothing_and_keeps_directory_results() {
+    let (_d, root) = make_sized_tree(&[("a", 10), ("s/b", 20)]);
+    let ignore_dirs: HashSet<String> = HashSet::new();
+    let config = build_config(ignore_dirs, None, false, true, false);
+    let (raw, _content, files) = parallel_scan_with_files(root.clone(), 2, config, 0);
+    assert!(files.is_empty());
+    assert!(raw.contains_key(&root.join("s")));
 }

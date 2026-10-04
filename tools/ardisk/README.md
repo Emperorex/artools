@@ -33,6 +33,7 @@ ardisk [OPTIONS] [PATH]
 | `--largest-files N` | —     | —         | List the `N` largest individual files instead of the directory report (see [Finding the largest files](#finding-the-largest-files)) |
 | `--duplicates`      | —     | —         | Report groups of files with identical content; read-only (see [Finding duplicate files](#finding-duplicate-files)) |
 | `--min-size SIZE`   | —     | `1B`      | With `--duplicates`: ignore files smaller than `SIZE` (e.g. `1MB`) |
+| `--json`            | —     | —         | Print the result as one JSON document on stdout (see [JSON output](#json-output)) |
 | `--include PATTERN` | —     | —         | Only count files matching this glob pattern (e.g. `"*.rs"`, `"*.mp4"`) |
 | `--exclude GLOB`    | —     | —         | Exclude files/dirs matching a gitignore-style glob; repeatable (see [Excluding paths](#excluding-paths)) |
 | `--apparent-size`   | —     | —         | Use logical file sizes instead of block allocation — matches `du -sh`  |
@@ -125,6 +126,128 @@ Groups are formed from the 256-bit hash plus the length. Files are not additiona
 
 `--duplicates` replaces the directory report, so it cannot be combined with `--largest-files`, `--max-depth` or `--threshold`.
 
+## JSON output
+
+`--json` changes only the **output format**. It does not turn on `--largest-files` or `--duplicates`; it serializes the result of whichever mode you picked:
+
+```bash
+ardisk . --json                          # directory report
+ardisk . --largest-files 20 --json       # largest files
+ardisk . --duplicates --json             # duplicate files
+ardisk ~/Projects --exclude 'target/**' --json
+```
+
+Only the JSON document goes to **stdout**. Warnings and `--debug` diagnostics go to **stderr**, so the output can be piped to `jq` or saved to a file as is. If ardisk fails, nothing is written to stdout and the exit code is non-zero.
+
+### Document layout (`schema_version` 1)
+
+Every document is one object with the same header:
+
+| Key              | Meaning |
+|------------------|---------|
+| `schema_version` | Integer. Changes only for incompatible changes. New keys may be added without a bump, so ignore keys you don't know. |
+| `mode`           | `"directories"`, `"largest_files"` or `"duplicates"` |
+| `root`           | Canonical absolute path that was scanned |
+| `size_mode`      | `"disk"` (block allocation, the default) or `"apparent"` (logical length, `--apparent-size`). Always `"apparent"` for `duplicates`. |
+| `filters`        | `include` (string or `null`), `exclude` (array), `ignore` (array, extra `--ignore` names only), `no_ignore` (bool) |
+| `params`         | Options that shape the result, mode-specific (below) |
+| `summary`        | Totals for the **whole scan**, mode-specific (below) |
+| `entries` / `groups` | The listed items |
+| `truncated`      | `true` if more items existed than were listed |
+
+Paths in `entries` and `groups` are **relative to `root`**, use `/` as separator, and the root itself is `"."`. Sizes are integers in bytes. A path that is not valid UTF-8 is written with the invalid bytes replaced by U+FFFD, and ardisk prints a warning to stderr.
+
+The list obeys the same limits as the text report: `--top` (default 20) for directories and duplicate groups, `--max-depth`, `--threshold`, and `--summarize`, which lists nothing and keeps only `summary`. Use `truncated` to tell whether a list was cut, and raise `--top` to get more. Ties in size are ordered by path, so output does not depend on thread count or timing.
+
+**`directories`**
+
+```json
+{
+  "schema_version": 1,
+  "mode": "directories",
+  "root": "/home/me/project",
+  "size_mode": "disk",
+  "filters": { "include": null, "exclude": ["target/**"], "ignore": [], "no_ignore": false },
+  "params": { "top": 20, "max_depth": null, "threshold_bytes": null },
+  "summary": { "total_bytes": 1073741824, "files": 15230, "directories": 842 },
+  "entries": [
+    { "path": ".",    "bytes": 1073741824, "depth": 0, "kind": "directory" },
+    { "path": "data", "bytes": 734003200,  "depth": 1, "kind": "directory" }
+  ],
+  "truncated": true
+}
+```
+
+`summary.total_bytes` is the size of the root (what `--summarize` prints). `files` counts regular files that contributed to the totals (a hard-linked file counts once; symlinks and filtered-out files not at all). `directories` counts directories visited, including the root.
+
+**`largest_files`**
+
+```json
+{
+  "schema_version": 1,
+  "mode": "largest_files",
+  "params": { "limit": 20 },
+  "summary": { "total_bytes": 1073741824, "files": 15230 },
+  "entries": [
+    { "path": "data/archive.tar", "bytes": 524288000, "kind": "file" }
+  ],
+  "truncated": true
+}
+```
+
+(header keys omitted for brevity). Files are listed largest first. `truncated` is `true` when the scan contained more than `limit` files.
+
+**`duplicates`**
+
+```json
+{
+  "schema_version": 1,
+  "mode": "duplicates",
+  "params": { "top": 20, "min_size_bytes": 1 },
+  "summary": {
+    "groups": 1,
+    "duplicate_files": 2,
+    "redundant_files": 1,
+    "potentially_reclaimable_bytes": 52428800,
+    "files_considered": 9120,
+    "unreadable_files": 0
+  },
+  "groups": [
+    {
+      "hash": "blake3:3fcfb222e40513a26f6990c23f423c0c14cf40955b2190a1010e7c6b1a003007",
+      "bytes_per_file": 52428800,
+      "files": ["backup/archive1.zip", "backup/archive2.zip"],
+      "potentially_reclaimable_bytes": 52428800
+    }
+  ],
+  "truncated": false
+}
+```
+
+- `hash` is the BLAKE3 digest of the full content shared by the files in the group.
+- `duplicate_files` counts every file that belongs to a group, including the copy you would keep; `redundant_files` is that number minus one per group.
+- `files_considered` is the number of files examined (regular files of at least `min_size_bytes`), which tells "no duplicates" apart from "nothing was looked at". `unreadable_files` counts files that were skipped because they could not be read; if it is not zero the result may be incomplete.
+- `summary` covers every group found; `groups` holds the `--top` groups with the most reclaimable space.
+
+**Why "potentially" reclaimable.** `potentially_reclaimable_bytes` is `bytes_per_file × (files − 1)` per group, and the summary is the sum over all groups: the space freed if you keep **one** copy of each group and delete the rest. It is not the sum of all sizes in the group. The real saving can be smaller: the same data may also be hard-linked from places outside the scanned tree, shared by snapshots, clones or deduplicating filesystems, or kept alive by other references. Sizes here are logical lengths, not disk blocks.
+
+### Examples with `jq`
+
+```bash
+# total size of a tree, in bytes
+ardisk . --json | jq .summary.total_bytes
+
+# paths of the 20 largest files
+ardisk . --largest-files 20 --json | jq -r '.entries[].path'
+
+# how much a duplicate cleanup could free, in MiB
+ardisk ~ --duplicates --min-size 1MB --summarize --json \
+  | jq '.summary.potentially_reclaimable_bytes / 1048576'
+
+# save a snapshot for later comparison
+ardisk ~/Projects --exclude 'target/**' --json > projects.json
+```
+
 ## Excluding paths
 
 `--exclude GLOB` removes matching entries from the scan. It can be repeated, and patterns use gitignore syntax, matched against paths relative to `PATH`:
@@ -204,6 +327,9 @@ ardisk ~ --largest-files 20
 
 # 10 largest videos, ignoring a scratch directory
 ardisk ~/Movies --largest-files 10 --include "*.mp4" --exclude 'scratch/**'
+
+# Machine-readable output for scripts
+ardisk . --largest-files 20 --json | jq -r '.entries[].path'
 
 # Duplicate files of at least 1 MB, show the 10 most wasteful groups
 ardisk ~ --duplicates --min-size 1MB --top 10

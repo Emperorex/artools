@@ -1,0 +1,306 @@
+//! End-to-end tests for `--json`: they run the real binary and check what
+//! actually reaches stdout and stderr.
+
+use serde_json::Value;
+use std::{
+    fs,
+    path::{Path, PathBuf},
+    process::{Command, Output},
+};
+use tempfile::TempDir;
+
+fn ardisk(args: &[&str]) -> Output {
+    Command::new(env!("CARGO_BIN_EXE_ardisk"))
+        .args(args)
+        .output()
+        .expect("failed to run ardisk")
+}
+
+/// Runs ardisk and requires that **all** of stdout is one JSON document.
+fn json(args: &[&str]) -> (Value, String) {
+    let out = ardisk(args);
+    assert!(
+        out.status.success(),
+        "ardisk {args:?} failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8(out.stdout).expect("stdout is UTF-8");
+    let doc: Value = serde_json::from_str(&stdout)
+        .unwrap_or_else(|e| panic!("stdout is not exactly one JSON document ({e}):\n{stdout}"));
+    (doc, String::from_utf8_lossy(&out.stderr).into_owned())
+}
+
+/// Deterministic content; different seeds differ from the first byte on.
+fn data(seed: u8, len: usize) -> Vec<u8> {
+    (0..len)
+        .map(|i| (i as u8).wrapping_mul(31).wrapping_add(seed))
+        .collect()
+}
+
+/// A small tree with one duplicate pair, one unique file and an ignored dir.
+fn sample() -> (TempDir, PathBuf) {
+    let dir = TempDir::new().unwrap();
+    for (rel, content) in [
+        ("photos/a.raw", data(1, 20_000)),
+        ("backup/a-copy.raw", data(1, 20_000)),
+        ("docs/notes.txt", data(2, 3_000)),
+        ("node_modules/pkg/index.js", data(3, 50_000)),
+    ] {
+        let full = dir.path().join(rel);
+        fs::create_dir_all(full.parent().unwrap()).unwrap();
+        fs::write(full, content).unwrap();
+    }
+    let root = fs::canonicalize(dir.path()).unwrap();
+    (dir, root)
+}
+
+fn p(path: &Path) -> &str {
+    path.to_str().unwrap()
+}
+
+#[test]
+fn default_mode_prints_one_directories_document() {
+    let (_d, root) = sample();
+    let (doc, stderr) = json(&[p(&root), "--json", "--apparent-size"]);
+    assert_eq!(stderr, "");
+    assert_eq!(doc["schema_version"], 1);
+    assert_eq!(doc["mode"], "directories");
+    assert_eq!(doc["root"], p(&root));
+    assert_eq!(doc["size_mode"], "apparent");
+
+    let entries = doc["entries"].as_array().unwrap();
+    assert_eq!(entries[0]["path"], ".");
+    assert_eq!(entries[0]["depth"], 0);
+    assert_eq!(entries[0]["bytes"], doc["summary"]["total_bytes"]);
+    // node_modules is ignored by default, so only the three real files count.
+    assert_eq!(doc["summary"]["files"], 3);
+    assert_eq!(doc["summary"]["directories"], 4); // root + photos, backup, docs
+    let paths: Vec<&str> = entries
+        .iter()
+        .map(|e| e["path"].as_str().unwrap())
+        .collect();
+    assert!(paths.contains(&"photos") && paths.contains(&"backup") && paths.contains(&"docs"));
+    assert!(!paths.iter().any(|p| p.contains("node_modules")));
+    for e in entries {
+        assert_eq!(e["kind"], "directory");
+        assert!(
+            !e["path"].as_str().unwrap().starts_with('/'),
+            "paths are relative"
+        );
+    }
+}
+
+#[test]
+fn largest_files_mode_prints_one_largest_files_document() {
+    let (_d, root) = sample();
+    let (doc, stderr) = json(&[
+        p(&root),
+        "--json",
+        "--largest-files",
+        "2",
+        "--apparent-size",
+    ]);
+    assert_eq!(stderr, "");
+    assert_eq!(doc["mode"], "largest_files");
+    assert_eq!(doc["params"]["limit"], 2);
+    assert_eq!(doc["summary"]["files"], 3);
+    assert_eq!(doc["truncated"], true);
+    let entries = doc["entries"].as_array().unwrap();
+    assert_eq!(entries.len(), 2);
+    assert_eq!(entries[0]["bytes"], 20_000);
+    assert_eq!(entries[0]["kind"], "file");
+    assert_eq!(
+        entries[0]["path"], "backup/a-copy.raw",
+        "ties are ordered by path"
+    );
+    assert_eq!(entries[1]["path"], "photos/a.raw");
+}
+
+#[test]
+fn duplicates_mode_prints_one_duplicates_document() {
+    let (_d, root) = sample();
+    let (doc, stderr) = json(&[p(&root), "--json", "--duplicates"]);
+    assert_eq!(stderr, "");
+    assert_eq!(doc["mode"], "duplicates");
+    assert_eq!(doc["size_mode"], "apparent");
+    assert_eq!(doc["summary"]["groups"], 1);
+    assert_eq!(doc["summary"]["duplicate_files"], 2);
+    assert_eq!(doc["summary"]["redundant_files"], 1);
+    assert_eq!(doc["summary"]["potentially_reclaimable_bytes"], 20_000);
+
+    let group = &doc["groups"][0];
+    assert_eq!(group["bytes_per_file"], 20_000);
+    assert_eq!(group["potentially_reclaimable_bytes"], 20_000);
+    assert_eq!(
+        group["files"],
+        serde_json::json!(["backup/a-copy.raw", "photos/a.raw"])
+    );
+    let expected = format!("blake3:{}", blake3::hash(&data(1, 20_000)).to_hex());
+    assert_eq!(group["hash"], expected.as_str());
+}
+
+#[test]
+fn json_does_not_switch_on_other_modes() {
+    let (_d, root) = sample();
+    let (doc, _) = json(&[p(&root), "--json"]);
+    assert_eq!(doc["mode"], "directories");
+    assert!(doc.get("groups").is_none());
+}
+
+#[test]
+fn stdout_stays_valid_json_when_debug_and_warnings_are_active() {
+    let (_d, root) = sample();
+    for extra in [vec![], vec!["--largest-files", "3"], vec!["--duplicates"]] {
+        let mut args = vec![p(&root), "--json", "--debug"];
+        args.extend(extra.iter());
+        let (doc, stderr) = json(&args);
+        assert!(doc.get("schema_version").is_some());
+        assert!(
+            stderr.contains("Operational Metrics"),
+            "diagnostics belong on stderr for {args:?}, got {stderr:?}"
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn unreadable_files_are_warned_about_on_stderr_not_stdout() {
+    use std::os::unix::fs::PermissionsExt;
+    let (_d, root) = sample();
+    let locked = root.join("photos/locked.bin");
+    fs::write(&locked, data(1, 20_000)).unwrap(); // same length as the pair
+    fs::set_permissions(&locked, fs::Permissions::from_mode(0o000)).unwrap();
+    if fs::File::open(&locked).is_ok() {
+        return; // running as root: permissions are not enforced
+    }
+    let (doc, stderr) = json(&[p(&root), "--json", "--duplicates"]);
+    fs::set_permissions(&locked, fs::Permissions::from_mode(0o644)).unwrap();
+
+    assert_eq!(doc["summary"]["unreadable_files"], 1);
+    assert_eq!(doc["summary"]["groups"], 1);
+    assert!(
+        stderr.contains("could not be read"),
+        "stderr was {stderr:?}"
+    );
+}
+
+#[test]
+fn summarize_keeps_the_summary_and_empties_the_list() {
+    let (_d, root) = sample();
+    let (dirs, _) = json(&[p(&root), "--json", "--summarize"]);
+    assert_eq!(dirs["entries"], serde_json::json!([]));
+    assert_eq!(dirs["truncated"], true);
+    assert!(dirs["summary"]["total_bytes"].as_u64().unwrap() > 0);
+
+    let (dups, _) = json(&[p(&root), "--json", "--duplicates", "--summarize"]);
+    assert_eq!(dups["groups"], serde_json::json!([]));
+    assert_eq!(dups["summary"]["groups"], 1);
+}
+
+#[test]
+fn top_and_max_depth_shape_the_directory_list_and_truncated_says_so() {
+    let (_d, root) = sample();
+    let (doc, _) = json(&[p(&root), "--json", "--top", "2"]);
+    assert_eq!(doc["entries"].as_array().unwrap().len(), 2);
+    assert_eq!(doc["truncated"], true);
+    assert_eq!(doc["params"]["top"], 2);
+
+    let (doc, _) = json(&[p(&root), "--json", "--max-depth", "0"]);
+    let entries = doc["entries"].as_array().unwrap();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0]["path"], ".");
+    assert_eq!(doc["params"]["max_depth"], 0);
+    assert_eq!(doc["truncated"], false);
+}
+
+#[test]
+fn filters_are_applied_and_echoed() {
+    let (_d, root) = sample();
+    let (doc, _) = json(&[
+        p(&root),
+        "--json",
+        "--largest-files",
+        "10",
+        "--exclude",
+        "backup/**",
+        "--include",
+        "*.raw",
+    ]);
+    assert_eq!(doc["filters"]["include"], "*.raw");
+    assert_eq!(doc["filters"]["exclude"], serde_json::json!(["backup/**"]));
+    let paths: Vec<&str> = doc["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| e["path"].as_str().unwrap())
+        .collect();
+    assert_eq!(paths, ["photos/a.raw"]);
+}
+
+#[test]
+fn output_does_not_depend_on_the_worker_count() {
+    let (_d, root) = sample();
+    for extra in [vec![], vec!["--largest-files", "5"], vec!["--duplicates"]] {
+        let mut one = vec![p(&root), "--json", "-j", "1"];
+        let mut many = vec![p(&root), "--json", "-j", "8"];
+        one.extend(extra.iter());
+        many.extend(extra.iter());
+        assert_eq!(json(&one).0, json(&many).0, "differs for {extra:?}");
+    }
+}
+
+#[test]
+fn relative_root_argument_is_reported_as_an_absolute_path() {
+    let (_d, root) = sample();
+    let out = Command::new(env!("CARGO_BIN_EXE_ardisk"))
+        .current_dir(&root)
+        .args([".", "--json"])
+        .output()
+        .unwrap();
+    let doc: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(doc["root"], p(&root));
+}
+
+#[test]
+fn errors_produce_no_json_on_stdout() {
+    let (_d, root) = sample();
+    // Rejected by the argument parser.
+    let out = ardisk(&[p(&root), "--json", "--largest-files", "0"]);
+    assert!(!out.status.success());
+    assert!(out.stdout.is_empty());
+    // Rejected after parsing.
+    let out = ardisk(&[p(&root), "--json", "--exclude", "   "]);
+    assert!(!out.status.success());
+    assert!(out.stdout.is_empty());
+    let out = ardisk(&[p(&root), "--json", "--include", "[bad"]);
+    assert!(!out.status.success());
+    assert!(out.stdout.is_empty());
+}
+
+#[test]
+fn without_json_the_output_is_still_text() {
+    let (_d, root) = sample();
+    let out = ardisk(&[p(&root)]);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(serde_json::from_str::<Value>(&stdout).is_err());
+    assert!(stdout.contains(p(&root)));
+}
+
+#[cfg(unix)]
+#[test]
+fn non_utf8_file_names_keep_stdout_valid_and_are_flagged_on_stderr() {
+    use std::os::unix::ffi::OsStrExt;
+    let (_d, root) = sample();
+    let bad = root.join(std::ffi::OsStr::from_bytes(b"bad-\xff-name"));
+    if fs::write(bad, data(9, 500)).is_err() {
+        return; // filesystem refuses non-UTF-8 names
+    }
+    let (doc, stderr) = json(&[p(&root), "--json", "--largest-files", "10"]);
+    let has_replacement = doc["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|e| e["path"].as_str().unwrap().contains('\u{FFFD}'));
+    assert!(has_replacement);
+    assert!(stderr.contains("not valid UTF-8"), "stderr was {stderr:?}");
+}

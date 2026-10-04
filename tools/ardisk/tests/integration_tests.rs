@@ -1,4 +1,8 @@
 use ardisk::duplicates::{DuplicateReport, PREFIX_LEN, find_duplicates};
+use ardisk::report::{
+    DirectoryQuery, DirectorySelection, DirectorySummary, Filters, ReportMeta, SCHEMA_VERSION,
+    select_directories, write_directories, write_duplicates, write_largest_files,
+};
 use ardisk::{
     Collect, DEFAULT_IGNORES, FileEntry, aggregate_sizes, build_config, build_config_with_exclude,
     build_exclude_matcher, format_size, parallel_scan, parallel_scan_collect,
@@ -6,7 +10,7 @@ use ardisk::{
 };
 use glob::Pattern;
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     fs,
     path::{Path, PathBuf},
 };
@@ -1364,4 +1368,391 @@ fn collect_nothing_and_duplicates_do_not_change_directory_totals() {
     assert!(none.is_empty());
     assert_eq!(dup.len(), 2);
     assert_eq!(raw_none, raw_dup);
+}
+
+// ── report selection and JSON writers ─────────────────────────────────────────
+
+fn query(top: usize) -> DirectoryQuery {
+    DirectoryQuery {
+        top,
+        ..DirectoryQuery::default()
+    }
+}
+
+fn dir_maps(root: &Path, dirs: &[(&str, u64)]) -> HashMap<PathBuf, u64> {
+    dirs.iter()
+        .map(|(rel, size)| {
+            let p = if rel.is_empty() {
+                root.to_path_buf()
+            } else {
+                root.join(rel)
+            };
+            (p, *size)
+        })
+        .collect()
+}
+
+fn selected(root: &Path, sel: &DirectorySelection) -> Vec<(String, u64)> {
+    sel.entries
+        .iter()
+        .map(|(p, s)| {
+            let rel = p.strip_prefix(root).unwrap().to_string_lossy().into_owned();
+            (if rel.is_empty() { ".".into() } else { rel }, *s)
+        })
+        .collect()
+}
+
+fn meta(root: &Path) -> ReportMeta {
+    ReportMeta {
+        root: root.to_path_buf(),
+        apparent_size: false,
+        filters: Filters::default(),
+    }
+}
+
+fn to_json<F>(write: F) -> (serde_json::Value, usize)
+where
+    F: FnOnce(&mut Vec<u8>) -> std::io::Result<usize>,
+{
+    let mut buf = Vec::new();
+    let lossy = write(&mut buf).unwrap();
+    let text = String::from_utf8(buf).expect("JSON output is UTF-8");
+    assert!(text.ends_with('\n'), "document ends with a newline");
+    (serde_json::from_str(&text).expect("valid JSON"), lossy)
+}
+
+#[test]
+fn select_directories_orders_by_size_then_path() {
+    let root = PathBuf::from("/r");
+    let all = dir_maps(&root, &[("", 100), ("b", 10), ("a", 10), ("c", 50)]);
+    let sel = select_directories(&all, &all, &root, &query(10));
+    assert_eq!(
+        selected(&root, &sel),
+        [
+            (".".into(), 100),
+            ("c".into(), 50),
+            ("a".into(), 10),
+            ("b".into(), 10)
+        ]
+    );
+    assert!(!sel.truncated);
+}
+
+#[test]
+fn select_directories_reports_truncation_only_when_something_was_left_out() {
+    let root = PathBuf::from("/r");
+    let all = dir_maps(&root, &[("", 100), ("a", 10), ("b", 5)]);
+    assert!(select_directories(&all, &all, &root, &query(2)).truncated);
+    assert!(!select_directories(&all, &all, &root, &query(3)).truncated);
+    assert!(!select_directories(&all, &all, &root, &query(4)).truncated);
+}
+
+#[test]
+fn select_directories_summarize_lists_nothing_but_flags_truncation() {
+    let root = PathBuf::from("/r");
+    let all = dir_maps(&root, &[("", 100), ("a", 10)]);
+    let q = DirectoryQuery {
+        top: 20,
+        summarize: true,
+        ..DirectoryQuery::default()
+    };
+    let sel = select_directories(&all, &all, &root, &q);
+    assert!(sel.entries.is_empty());
+    assert!(sel.truncated);
+}
+
+#[test]
+fn select_directories_applies_max_depth_and_threshold() {
+    let root = PathBuf::from("/r");
+    let all = dir_maps(&root, &[("", 900), ("a", 500), ("a/b", 400), ("c", 7)]);
+    let q = DirectoryQuery {
+        top: 10,
+        max_depth: Some(1),
+        threshold_bytes: Some(100),
+        ..DirectoryQuery::default()
+    };
+    let sel = select_directories(&all, &all, &root, &q);
+    assert_eq!(
+        selected(&root, &sel),
+        [(".".into(), 900), ("a".into(), 500)]
+    );
+    assert!(
+        !sel.truncated,
+        "depth/threshold exclusions are not truncation"
+    );
+}
+
+#[test]
+fn select_directories_hides_directories_without_matching_content_for_include() {
+    let root = PathBuf::from("/r");
+    let all = dir_maps(&root, &[("", 9000), ("has", 4100), ("empty", 4096)]);
+    let content = dir_maps(&root, &[("", 5), ("has", 5), ("empty", 0)]);
+    let q = DirectoryQuery {
+        top: 10,
+        include_active: true,
+        ..DirectoryQuery::default()
+    };
+    let sel = select_directories(&all, &content, &root, &q);
+    assert_eq!(
+        selected(&root, &sel),
+        [(".".into(), 9000), ("has".into(), 4100)]
+    );
+}
+
+#[test]
+fn json_directories_document_has_the_documented_shape() {
+    let (_d, root) = make_sized_tree(&[("a/f", 10), ("a/b/g", 20), ("c", 5)]);
+    let all = dir_maps(&root, &[("", 300), ("a", 200), ("a/b", 100)]);
+    let q = query(10);
+    let sel = select_directories(&all, &all, &root, &q);
+    let summary = DirectorySummary {
+        total_bytes: 300,
+        files: 3,
+        directories: 3,
+    };
+    let (doc, lossy) = to_json(|w| write_directories(w, &meta(&root), &q, &sel, summary));
+    assert_eq!(lossy, 0);
+
+    assert_eq!(doc["schema_version"], SCHEMA_VERSION);
+    assert_eq!(doc["mode"], "directories");
+    assert_eq!(doc["root"], root.to_str().unwrap());
+    assert_eq!(doc["size_mode"], "disk");
+    assert_eq!(doc["filters"]["include"], serde_json::Value::Null);
+    assert_eq!(doc["filters"]["exclude"], serde_json::json!([]));
+    assert_eq!(doc["filters"]["no_ignore"], false);
+    assert_eq!(doc["params"]["top"], 10);
+    assert_eq!(doc["params"]["max_depth"], serde_json::Value::Null);
+    assert_eq!(doc["summary"]["total_bytes"], 300);
+    assert_eq!(doc["summary"]["files"], 3);
+    assert_eq!(doc["summary"]["directories"], 3);
+    assert_eq!(doc["truncated"], false);
+    assert_eq!(
+        doc["entries"],
+        serde_json::json!([
+            {"path": ".",   "bytes": 300, "depth": 0, "kind": "directory"},
+            {"path": "a",   "bytes": 200, "depth": 1, "kind": "directory"},
+            {"path": "a/b", "bytes": 100, "depth": 2, "kind": "directory"},
+        ])
+    );
+    assert!(doc.get("groups").is_none(), "no keys from other modes");
+}
+
+#[test]
+fn json_echoes_filters_and_apparent_size_mode() {
+    let (_d, root) = make_sized_tree(&[("f", 1)]);
+    let m = ReportMeta {
+        root: root.clone(),
+        apparent_size: true,
+        filters: Filters {
+            include: Some("*.rs".into()),
+            exclude: vec!["*.log".into(), "target/**".into()],
+            ignore: vec!["vendor".into()],
+            no_ignore: true,
+        },
+    };
+    let all = dir_maps(&root, &[("", 1)]);
+    let q = query(5);
+    let sel = select_directories(&all, &all, &root, &q);
+    let summary = DirectorySummary {
+        total_bytes: 1,
+        files: 1,
+        directories: 1,
+    };
+    let (doc, _) = to_json(|w| write_directories(w, &m, &q, &sel, summary));
+    assert_eq!(doc["size_mode"], "apparent");
+    assert_eq!(doc["filters"]["include"], "*.rs");
+    assert_eq!(
+        doc["filters"]["exclude"],
+        serde_json::json!(["*.log", "target/**"])
+    );
+    assert_eq!(doc["filters"]["ignore"], serde_json::json!(["vendor"]));
+    assert_eq!(doc["filters"]["no_ignore"], true);
+}
+
+#[test]
+fn json_largest_files_document_has_the_documented_shape() {
+    let (_d, root) = make_sized_tree(&[("a/big", 900), ("small", 10), ("b/mid", 90)]);
+    let ignore_dirs: HashSet<String> = HashSet::new();
+    let config = build_config(ignore_dirs, None, false, true, false);
+    let out = ardisk::parallel_scan_report(root.clone(), 2, config, Collect::Largest(2));
+    let (doc, lossy) =
+        to_json(|w| write_largest_files(w, &meta(&root), 2, 1000, out.file_count, &out.files));
+    assert_eq!(lossy, 0);
+    assert_eq!(doc["mode"], "largest_files");
+    assert_eq!(doc["params"]["limit"], 2);
+    assert_eq!(doc["summary"]["files"], 3);
+    assert_eq!(doc["truncated"], true, "3 files exist, 2 listed");
+    assert_eq!(
+        doc["entries"],
+        serde_json::json!([
+            {"path": "a/big", "bytes": 900, "kind": "file"},
+            {"path": "b/mid", "bytes": 90,  "kind": "file"},
+        ])
+    );
+}
+
+#[test]
+fn json_largest_files_is_not_truncated_when_everything_is_listed() {
+    let (_d, root) = make_sized_tree(&[("a", 3), ("b", 2)]);
+    let ignore_dirs: HashSet<String> = HashSet::new();
+    let config = build_config(ignore_dirs, None, false, true, false);
+    let out = ardisk::parallel_scan_report(root.clone(), 2, config, Collect::Largest(10));
+    let (doc, _) =
+        to_json(|w| write_largest_files(w, &meta(&root), 10, 5, out.file_count, &out.files));
+    assert_eq!(doc["truncated"], false);
+}
+
+#[test]
+fn scan_report_counts_only_files_that_contribute_to_the_totals() {
+    let (_d, root) = make_sized_tree(&[("a.rs", 3), ("b.log", 4), ("sub/c.rs", 5)]);
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(root.join("a.rs"), root.join("link")).unwrap();
+        fs::hard_link(root.join("sub/c.rs"), root.join("c-again.rs")).unwrap();
+    }
+    let ignore_dirs: HashSet<String> = HashSet::new();
+    let patterns = vec!["*.log".to_string()];
+    let exclude = build_exclude_matcher(&root, &patterns).unwrap();
+    let config = build_config_with_exclude(ignore_dirs, None, false, true, false, exclude);
+    let out = ardisk::parallel_scan_report(root.clone(), 3, config, Collect::Nothing);
+    // a.rs and c.rs (once, despite the hard link): the symlink and the
+    // excluded .log file do not count.
+    assert_eq!(out.file_count, 2);
+    assert!(out.files.is_empty());
+}
+
+fn dup_report_for(files: &[(&str, Vec<u8>)]) -> (TempDir, PathBuf, DuplicateReport) {
+    let (d, root) = make_files(files);
+    let report = find_dups(&root, 1, 2, None, &[]);
+    (d, root, report)
+}
+
+#[test]
+fn json_duplicates_document_has_the_documented_shape() {
+    let data = pattern(7, 6000);
+    let (_d, root, report) = dup_report_for(&[
+        ("backup/one.zip", data.clone()),
+        ("backup/two.zip", data.clone()),
+        ("other/three.zip", data.clone()),
+        ("x", pattern(8, 300)),
+        ("y", pattern(8, 300)),
+    ]);
+    let (doc, lossy) = to_json(|w| write_duplicates(w, &meta(&root), 20, false, 1, &report));
+    assert_eq!(lossy, 0);
+
+    assert_eq!(doc["mode"], "duplicates");
+    assert_eq!(
+        doc["size_mode"], "apparent",
+        "duplicate sizes are logical lengths, whatever --apparent-size says"
+    );
+    assert_eq!(
+        doc["params"],
+        serde_json::json!({"top": 20, "min_size_bytes": 1})
+    );
+    assert_eq!(doc["truncated"], false);
+    assert!(doc.get("entries").is_none(), "no keys from other modes");
+
+    let s = &doc["summary"];
+    assert_eq!(s["groups"], 2);
+    assert_eq!(s["duplicate_files"], 5);
+    assert_eq!(s["redundant_files"], 3);
+    assert_eq!(s["potentially_reclaimable_bytes"], 2 * 6000 + 300);
+    assert_eq!(s["files_considered"], 5);
+    assert_eq!(s["unreadable_files"], 0);
+
+    let g = &doc["groups"][0];
+    assert_eq!(g["bytes_per_file"], 6000);
+    assert_eq!(
+        g["files"],
+        serde_json::json!(["backup/one.zip", "backup/two.zip", "other/three.zip"])
+    );
+    // One copy is kept: two of three are reclaimable, not all three.
+    assert_eq!(g["potentially_reclaimable_bytes"], 2 * 6000);
+    let expected = format!("blake3:{}", blake3::hash(&data).to_hex());
+    assert_eq!(g["hash"], expected.as_str());
+}
+
+#[test]
+fn json_duplicates_summary_matches_the_sum_of_the_groups() {
+    let (_d, root, report) = dup_report_for(&[
+        ("a", pattern(1, 5000)),
+        ("b", pattern(1, 5000)),
+        ("c", pattern(2, 700)),
+        ("d", pattern(2, 700)),
+        ("e", pattern(2, 700)),
+    ]);
+    let (doc, _) = to_json(|w| write_duplicates(w, &meta(&root), 20, false, 1, &report));
+    let listed: u64 = doc["groups"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|g| g["potentially_reclaimable_bytes"].as_u64().unwrap())
+        .sum();
+    assert_eq!(doc["summary"]["potentially_reclaimable_bytes"], listed);
+    assert_eq!(listed, 5000 + 2 * 700);
+}
+
+#[test]
+fn json_duplicates_top_limits_the_list_but_not_the_summary() {
+    let (_d, root, report) = dup_report_for(&[
+        ("a", pattern(1, 5000)),
+        ("b", pattern(1, 5000)),
+        ("c", pattern(2, 700)),
+        ("d", pattern(2, 700)),
+    ]);
+    let (doc, _) = to_json(|w| write_duplicates(w, &meta(&root), 1, false, 1, &report));
+    assert_eq!(doc["groups"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        doc["groups"][0]["bytes_per_file"], 5000,
+        "most reclaimable first"
+    );
+    assert_eq!(doc["truncated"], true);
+    assert_eq!(doc["summary"]["groups"], 2);
+    assert_eq!(doc["summary"]["potentially_reclaimable_bytes"], 5700);
+}
+
+#[test]
+fn json_duplicates_summarize_lists_no_groups() {
+    let (_d, root, report) = dup_report_for(&[("a", pattern(1, 900)), ("b", pattern(1, 900))]);
+    let (doc, _) = to_json(|w| write_duplicates(w, &meta(&root), 20, true, 1, &report));
+    assert_eq!(doc["groups"], serde_json::json!([]));
+    assert_eq!(doc["truncated"], true);
+    assert_eq!(doc["summary"]["groups"], 1);
+}
+
+#[test]
+fn json_duplicates_without_duplicates_is_an_empty_but_valid_document() {
+    let (_d, root, report) = dup_report_for(&[("a", pattern(1, 900)), ("b", pattern(2, 900))]);
+    let (doc, _) = to_json(|w| write_duplicates(w, &meta(&root), 20, false, 1, &report));
+    assert_eq!(doc["groups"], serde_json::json!([]));
+    assert_eq!(doc["truncated"], false);
+    assert_eq!(doc["summary"]["groups"], 0);
+    assert_eq!(doc["summary"]["potentially_reclaimable_bytes"], 0);
+}
+
+#[cfg(unix)]
+#[test]
+fn json_replaces_invalid_utf8_in_paths_and_says_so() {
+    use std::os::unix::ffi::OsStrExt;
+    let (_d, root) = make_sized_tree(&[("ok", 1)]);
+    let bad_name = std::ffi::OsStr::from_bytes(b"bad-\xff-name");
+    let bad_path = root.join(bad_name);
+    if fs::write(&bad_path, b"x").is_err() {
+        return; // filesystem refuses non-UTF-8 names (e.g. macOS APFS)
+    }
+    let files = vec![
+        FileEntry {
+            size: 5,
+            path: bad_path,
+        },
+        FileEntry {
+            size: 1,
+            path: root.join("ok"),
+        },
+    ];
+    let (doc, lossy) = to_json(|w| write_largest_files(w, &meta(&root), 10, 6, 2, &files));
+    assert_eq!(lossy, 1);
+    let first = doc["entries"][0]["path"].as_str().unwrap();
+    assert!(first.contains('\u{FFFD}'), "got {first:?}");
+    assert_eq!(doc["entries"][1]["path"], "ok");
 }

@@ -1,6 +1,7 @@
 use ardisk::{
-    DEFAULT_IGNORES, aggregate_sizes, build_config_with_exclude, build_exclude_matcher,
-    format_size, parallel_scan_with_files,
+    Collect, DEFAULT_IGNORES, aggregate_sizes, build_config_with_exclude, build_exclude_matcher,
+    duplicates::{DuplicateReport, find_duplicates},
+    format_size, parallel_scan_collect,
 };
 use clap::Parser;
 use clap::builder::TypedValueParser as _;
@@ -142,6 +143,29 @@ struct Args {
     )]
     largest_files: Option<usize>,
 
+    /// Report groups of files with identical content (nothing is modified or
+    /// deleted). Files are grouped by length, then by a hash of their first
+    /// 4 KiB, then by a hash of their full content. Respects --include,
+    /// --exclude, --ignore and .gitignore; hard links to one file are not
+    /// duplicates; empty files are ignored. --top limits the groups shown,
+    /// --summarize prints only the totals. Sizes are logical file lengths.
+    #[arg(
+        long,
+        conflicts_with_all = ["largest_files", "max_depth", "threshold"]
+    )]
+    duplicates: bool,
+
+    /// With --duplicates: ignore files smaller than this (e.g. 1MB, 100KB).
+    /// Raising it is the most effective way to cut memory use and run time
+    /// on large trees. Default: 1B (only empty files are skipped).
+    #[arg(
+        long,
+        value_name = "SIZE",
+        requires = "duplicates",
+        value_parser = parse_threshold
+    )]
+    min_size: Option<u64>,
+
     /// Use logical file sizes instead of physical block allocation.
     /// Matches the output of du -sh on macOS and Linux.
     #[arg(long)]
@@ -220,12 +244,31 @@ fn main() {
     let start_time = Instant::now();
 
     // Phase 1: Parallel file scanning
-    let (raw_sizes, raw_content_sizes, largest_files) = parallel_scan_with_files(
-        target_path.clone(),
-        args.jobs,
-        config,
-        args.largest_files.unwrap_or(0),
-    );
+    let collect = if args.duplicates {
+        Collect::Duplicates {
+            min_len: args.min_size.unwrap_or(1),
+        }
+    } else {
+        match args.largest_files {
+            Some(n) => Collect::Largest(n),
+            None => Collect::Nothing,
+        }
+    };
+    let (raw_sizes, raw_content_sizes, collected_files) =
+        parallel_scan_collect(target_path.clone(), args.jobs, config, collect);
+
+    // Phase 1b (--duplicates only): narrow the candidates down to groups of
+    // identical files. This is where almost all of the time goes.
+    // The candidate list is moved, not copied: on a big tree it is the
+    // largest allocation of the whole run.
+    let (largest_files, duplicate_report) = if args.duplicates {
+        (
+            Vec::new(),
+            Some(find_duplicates(collected_files, args.jobs)),
+        )
+    } else {
+        (collected_files, None)
+    };
 
     // Phase 2: Aggregation and rollup from bottom to top
     let aggregated_sizes = aggregate_sizes(&raw_sizes, &target_path);
@@ -246,7 +289,9 @@ fn main() {
     };
 
     if args.debug {
-        let title = if args.largest_files.is_some() {
+        let title = if args.duplicates {
+            "=== Duplicate Files ==="
+        } else if args.largest_files.is_some() {
             "=== Largest Files ==="
         } else {
             "=== Top Directories ==="
@@ -254,7 +299,9 @@ fn main() {
         println!("{}", title.yellow().bold());
     }
 
-    if args.largest_files.is_some() {
+    if let Some(report) = &duplicate_report {
+        print_duplicates(report, args.top, args.summarize, args.debug);
+    } else if args.largest_files.is_some() {
         // --largest-files: individual files, largest first, instead of the
         // per-directory report.
         for file in &largest_files {
@@ -306,6 +353,80 @@ fn main() {
         eprintln!("Worker threads:        {}", args.jobs);
         eprintln!("Total scanned folders: {}", raw_sizes.len());
         eprintln!("Execution time:        {:.2?}", duration);
+        if let Some(report) = &duplicate_report {
+            let st = &report.stats;
+            eprintln!("Duplicate candidates:  {}", st.candidates);
+            eprintln!("  same length:         {}", st.same_length);
+            eprintln!("  prefix-hashed:       {}", st.prefix_hashed);
+            eprintln!("  fully hashed:        {}", st.full_hashed);
+            eprintln!("  bytes read:          {}", format_size(st.bytes_read));
+        }
+    }
+}
+
+/// "s" unless `n` is exactly one.
+fn plural(n: usize) -> &'static str {
+    if n == 1 { "" } else { "s" }
+}
+
+/// Prints the `--duplicates` report: the `top` groups with the most
+/// reclaimable space (or only the totals with `--summarize`), then a summary.
+fn print_duplicates(report: &DuplicateReport, top: usize, summarize: bool, debug: bool) {
+    if !summarize {
+        for group in report.groups.iter().take(top) {
+            println!(
+                "{} identical files, {} each, {} reclaimable",
+                group.paths.len(),
+                format_size(group.len),
+                format_size(group.reclaimable())
+            );
+            for path in &group.paths {
+                println!("  {}", path.display());
+            }
+            println!();
+        }
+    }
+
+    let shown = if summarize {
+        0
+    } else {
+        report.groups.len().min(top)
+    };
+    let more = if summarize || shown == report.groups.len() {
+        String::new()
+    } else {
+        format!(" (showing the top {} group{})", shown, plural(shown))
+    };
+    let (groups, redundant) = (report.groups.len(), report.redundant_files());
+    println!(
+        "{} duplicate group{}, {} redundant file{}, {} reclaimable{}",
+        groups,
+        plural(groups),
+        redundant,
+        plural(redundant),
+        format_size(report.reclaimable()),
+        more
+    );
+
+    if !report.unreadable.is_empty() {
+        eprintln!(
+            "{}",
+            format!(
+                "ardisk: skipped {} file(s) that could not be read{}",
+                report.unreadable.len(),
+                if debug {
+                    ":"
+                } else {
+                    " (use --debug to list them)"
+                }
+            )
+            .yellow()
+        );
+        if debug {
+            for (path, reason) in &report.unreadable {
+                eprintln!("  {}: {}", path.display(), reason);
+            }
+        }
     }
 }
 
@@ -377,6 +498,78 @@ mod tests {
         ])
         .unwrap();
         assert_eq!(args.exclude, vec!["*.log", "target/**"]);
+    }
+
+    // ── --duplicates ──────────────────────────────────────────────────────
+
+    #[test]
+    fn duplicates_flag_parses() {
+        let args = Args::try_parse_from(["ardisk", ".", "--duplicates"]).unwrap();
+        assert!(args.duplicates);
+        assert_eq!(args.min_size, None);
+    }
+
+    #[test]
+    fn duplicates_defaults_to_off() {
+        let args = Args::try_parse_from(["ardisk", "."]).unwrap();
+        assert!(!args.duplicates);
+    }
+
+    #[test]
+    fn min_size_requires_duplicates() {
+        assert!(Args::try_parse_from(["ardisk", ".", "--min-size", "1MB"]).is_err());
+    }
+
+    #[test]
+    fn min_size_is_parsed_like_threshold() {
+        let args =
+            Args::try_parse_from(["ardisk", ".", "--duplicates", "--min-size", "1MB"]).unwrap();
+        assert_eq!(args.min_size, Some(parse_threshold("1MB").unwrap()));
+    }
+
+    #[test]
+    fn min_size_rejects_garbage() {
+        assert!(
+            Args::try_parse_from(["ardisk", ".", "--duplicates", "--min-size", "lots"]).is_err()
+        );
+    }
+
+    #[test]
+    fn duplicates_conflicts_with_other_report_modes() {
+        for extra in [
+            vec!["--largest-files", "3"],
+            vec!["--max-depth", "2"],
+            vec!["--threshold", "1MB"],
+        ] {
+            let mut argv = vec!["ardisk", ".", "--duplicates"];
+            argv.extend(extra.iter());
+            assert!(
+                Args::try_parse_from(argv).is_err(),
+                "--duplicates must conflict with {:?}",
+                extra
+            );
+        }
+    }
+
+    #[test]
+    fn duplicates_combines_with_top_summarize_include_and_exclude() {
+        let args = Args::try_parse_from([
+            "ardisk",
+            ".",
+            "--duplicates",
+            "--top",
+            "5",
+            "--summarize",
+            "--include",
+            "*.jpg",
+            "--exclude",
+            "tmp/**",
+            "-j",
+            "2",
+        ])
+        .unwrap();
+        assert!(args.duplicates && args.summarize);
+        assert_eq!(args.top, 5);
     }
 
     // ── --largest-files ───────────────────────────────────────────────────

@@ -24,18 +24,20 @@ ardisk [OPTIONS] [PATH]
 
 ## Options
 
-| Flag                | Short | Default   | Description                                                                                                                         |
-|---------------------|-------|-----------|-------------------------------------------------------------------------------------------------------------------------------------|
-| `--top N`           | `-n`  | `20`      | Number of top directories to display                                                                                                |
-| `--max-depth N`     | —     | unlimited | Maximum depth of directories to display in the report                                                                               |
-| `--threshold SIZE`  | —     | —         | Only show directories larger than this size (e.g. `100MB`, `1GB`)                                                                   |
-| `--summarize`       | `-s`  | —         | Print only the grand total for the root directory                                                                                   |
+| Flag                | Short | Default   | Description                                                            |
+|---------------------|-------|-----------|------------------------------------------------------------------------|
+| `--top N`           | `-n`  | `20`      | Number of top directories to display                                   |
+| `--max-depth N`     | —     | unlimited | Maximum depth of directories to display in the report                  |
+| `--threshold SIZE`  | —     | —         | Only show directories larger than this size (e.g. `100MB`, `1GB`)      |
+| `--summarize`       | `-s`  | —         | Print only the grand total for the root directory                      |
 | `--largest-files N` | —     | —         | List the `N` largest individual files instead of the directory report (see [Finding the largest files](#finding-the-largest-files)) |
-| `--include PATTERN` | —     | —         | Only count files matching this glob pattern (e.g. `"*.rs"`, `"*.mp4"`)                                                              |
-| `--exclude GLOB`    | —     | —         | Exclude files/dirs matching a gitignore-style glob; repeatable (see [Excluding paths](#excluding-paths))                            |
-| `--apparent-size`   | —     | —         | Use logical file sizes instead of block allocation — matches `du -sh`                                                               |
-| `--jobs N`          | `-j`  | CPU-aware | Number of parallel worker threads (1–128; default is half the available cores, clamped to 1–16)                                     |
-| `--debug`           | `-d`  | —         | Print scan statistics and errors to stderr                                                                                          |
+| `--duplicates`      | —     | —         | Report groups of files with identical content; read-only (see [Finding duplicate files](#finding-duplicate-files)) |
+| `--min-size SIZE`   | —     | `1B`      | With `--duplicates`: ignore files smaller than `SIZE` (e.g. `1MB`) |
+| `--include PATTERN` | —     | —         | Only count files matching this glob pattern (e.g. `"*.rs"`, `"*.mp4"`) |
+| `--exclude GLOB`    | —     | —         | Exclude files/dirs matching a gitignore-style glob; repeatable (see [Excluding paths](#excluding-paths)) |
+| `--apparent-size`   | —     | —         | Use logical file sizes instead of block allocation — matches `du -sh`  |
+| `--jobs N`          | `-j`  | CPU-aware | Number of parallel worker threads (1–128; default is half the available cores, clamped to 1–16) |
+| `--debug`           | `-d`  | —         | Print scan statistics and errors to stderr                             |
 
 ## Size units
 
@@ -79,19 +81,63 @@ What counts as a candidate is exactly what counts toward the directory totals:
 
 `--largest-files` replaces the directory report, so it cannot be combined with `--summarize`, `--top`, `--max-depth` or `--threshold`. Memory use is proportional to `N` times the number of worker threads, not to the number of files scanned.
 
+## Finding duplicate files
+
+`--duplicates` reports files whose **content** is identical, whatever their names or locations. It only reports: nothing is deleted, moved or linked.
+
+```bash
+ardisk ~ --duplicates --min-size 1MB
+```
+
+```
+3 identical files, 2.86 MB each, 5.72 MB reclaimable
+  /Users/me/backup/photos/a-copy.raw
+  /Users/me/docs/renamed.bin
+  /Users/me/photos/a.raw
+
+1 duplicate group, 2 redundant files, 5.72 MB reclaimable
+```
+
+Groups are ordered by reclaimable space (the space freed by keeping one copy of each), paths inside a group are sorted. `--top N` limits how many groups are printed (the summary line always covers all of them), and `--summarize` prints only the summary line.
+
+**How it works.** Candidates are narrowed in three stages so that most files are never read:
+
+1. **Length.** A file with a unique length cannot have a twin and is never opened.
+2. **Prefix hash.** Files of equal length are compared by a BLAKE3 hash of their first 4 KiB. For files up to 4 KiB this is already the whole file.
+3. **Full hash.** Only files that still collide are read completely.
+
+Groups are formed from the 256-bit hash plus the length. Files are not additionally compared byte by byte. The result is a snapshot: a file modified while the search runs can be misreported, but one whose size changes while being read is detected and skipped.
+
+**What counts.**
+
+- Same filters as the directory report: `--include`, `--exclude`, `--ignore`, the built-in ignores and `.gitignore` rules apply, so `--include "*.jpg"` looks for duplicate photos only.
+- Only regular files. Symlinks are never followed or listed.
+- **Hard links are not duplicates.** Several names for one file occupy the space once, so they never form a group on their own. If a hard-linked file also has a separate copy, the group holds two entries (one of the hard-link names and the copy); which name is shown can vary between runs.
+- **Empty files are never reported** (all empty files are trivially identical). `--min-size` can only raise this floor.
+- Sizes in this report are **logical file lengths** (as with `--apparent-size`), because identical content means identical length; physical block allocation is not used.
+- Files that cannot be read (permissions, vanished, changed) are skipped with a one-line warning on stderr; `--debug` lists them.
+
+**Speed and memory on big trees.**
+
+- The scan keeps one path per regular file of at least `--min-size` bytes until it has finished, so peak memory grows with the number of such files (very roughly 100-200 bytes each). Raising `--min-size` is the most effective way to cut both memory and run time; on a large tree `--min-size 1MB` usually leaves a small fraction of the files and most of the reclaimable space.
+- Hashing uses `-j` threads. On spinning disks or network shares, fewer threads (`-j 1` or `-j 2`) can be faster than many.
+- `--debug` prints how many files reached each stage and how many bytes were read.
+
+`--duplicates` replaces the directory report, so it cannot be combined with `--largest-files`, `--max-depth` or `--threshold`.
+
 ## Excluding paths
 
 `--exclude GLOB` removes matching entries from the scan. It can be repeated, and patterns use gitignore syntax, matched against paths relative to `PATH`:
 
-| Pattern        | Effect                                                                                          |
-|----------------|-------------------------------------------------------------------------------------------------|
-| `*.log`        | No `/` → matches the name at **any depth**                                                      |
-| `/build`       | Leading `/` → anchored to `PATH`                                                                |
+| Pattern        | Effect                                                                             |
+|----------------|------------------------------------------------------------------------------------|
+| `*.log`        | No `/` → matches the name at **any depth**                                         |
+| `/build`       | Leading `/` → anchored to `PATH`                                                   |
 | `target/**`    | Contains `/` → anchored to `PATH`; excludes everything **inside** `target`, not `target` itself |
-| `**/target/**` | Same, at any depth                                                                              |
-| `cache/`       | Trailing `/` → directories only                                                                 |
-| `src/**/*.rs`  | Files only; never stops `src` or its subdirectories from being traversed                        |
-| `!keep.log`    | Re-includes a path matched by an earlier pattern                                                |
+| `**/target/**` | Same, at any depth                                                                 |
+| `cache/`       | Trailing `/` → directories only                                                    |
+| `src/**/*.rs`  | Files only; never stops `src` or its subdirectories from being traversed           |
+| `!keep.log`    | Re-includes a path matched by an earlier pattern                                   |
 
 Notes:
 
@@ -159,6 +205,9 @@ ardisk ~ --largest-files 20
 # 10 largest videos, ignoring a scratch directory
 ardisk ~/Movies --largest-files 10 --include "*.mp4" --exclude 'scratch/**'
 
+# Duplicate files of at least 1 MB, show the 10 most wasteful groups
+ardisk ~ --duplicates --min-size 1MB --top 10
+
 # Ignore log files and the build directory
 ardisk . --exclude '*.log' --exclude 'target/**'
 
@@ -168,17 +217,17 @@ ardisk / -j 8 --top 20
 
 ## Comparison with `du`
 
-| Task                | `du`                                                   | `ardisk`                               |
-|---------------------|--------------------------------------------------------|----------------------------------------|
-| Top heaviest dirs   | `du -sh * \| sort -rh \| head -10`                     | `ardisk . --top 10`                    |
-| Limit depth         | `du -d 1`                                              | `ardisk . --max-depth 1`               |
-| Total only          | `du -sh .`                                             | `ardisk . --summarize --apparent-size` |
-| Physical total      | `du -s .`                                              | `ardisk . --summarize`                 |
-| Filter by size      | not supported                                          | `ardisk . --threshold 1GB`             |
-| Filter by file type | not supported                                          | `ardisk . --include "*.mp4"`           |
-| Biggest files       | `find . -type f -printf '%s %p\n' \| sort -rn \| head` | `ardisk . --largest-files 20`          |
-| Skip node_modules   | `--exclude=node_modules`                               | automatic                              |
-| Exclude by glob     | `--exclude='*.log'`                                    | `ardisk . --exclude '*.log'`           |
+| Task                | `du`                               | `ardisk`                                    |
+|---------------------|------------------------------------|---------------------------------------------|
+| Top heaviest dirs   | `du -sh * \| sort -rh \| head -10` | `ardisk . --top 10`                         |
+| Limit depth         | `du -d 1`                          | `ardisk . --max-depth 1`                    |
+| Total only          | `du -sh .`                         | `ardisk . --summarize --apparent-size`      |
+| Physical total      | `du -s .`                          | `ardisk . --summarize`                      |
+| Filter by size      | not supported                      | `ardisk . --threshold 1GB`                  |
+| Filter by file type | not supported                      | `ardisk . --include "*.mp4"`                |
+| Biggest files       | `find . -type f -printf '%s %p\n' \| sort -rn \| head` | `ardisk . --largest-files 20`      |
+| Skip node_modules   | `--exclude=node_modules`           | automatic                                   |
+| Exclude by glob     | `--exclude='*.log'`                | `ardisk . --exclude '*.log'`                |
 
 ## Key advantages over `du`
 
@@ -190,8 +239,8 @@ ardisk / -j 8 --top 20
 
 ## Exit codes
 
-| Code | Meaning                                                                    |
-|------|----------------------------------------------------------------------------|
-| `0`  | Success                                                                    |
-| `1`  | Invalid `--threshold`/`--include`/`--exclude` value or config error        |
+| Code | Meaning                                                 |
+|------|---------------------------------------------------------|
+| `0`  | Success                                                 |
+| `1`  | Invalid `--threshold`/`--include`/`--exclude` value or config error |
 | `2`  | Invalid CLI usage — bad or missing flag (e.g. `-j 0`, `--largest-files 0`) |

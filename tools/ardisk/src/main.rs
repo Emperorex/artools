@@ -1,13 +1,24 @@
 use ardisk::{
-    Collect, DEFAULT_IGNORES, aggregate_sizes, build_config_with_exclude, build_exclude_matcher,
+    Collect, DEFAULT_IGNORES, ScanOutput, aggregate_sizes, build_config_with_exclude,
+    build_exclude_matcher,
     duplicates::{DuplicateReport, find_duplicates},
-    format_size, parallel_scan_collect,
+    format_size, parallel_scan_report,
+    report::{
+        DirectoryQuery, DirectorySummary, Filters, ReportMeta, select_directories,
+        write_directories, write_duplicates, write_largest_files,
+    },
 };
 use clap::Parser;
 use clap::builder::TypedValueParser as _;
 use colored::Colorize;
 use glob::Pattern;
-use std::{collections::HashSet, fs, path::PathBuf, time::Instant};
+use std::{
+    collections::HashSet,
+    fs,
+    io::{self, Write},
+    path::PathBuf,
+    time::Instant,
+};
 
 /// Parses a human-readable size string into bytes.
 /// Supported suffixes: B, KB, MB, GB, TB (case-insensitive).
@@ -166,6 +177,15 @@ struct Args {
     )]
     min_size: Option<u64>,
 
+    /// Print the result as one JSON document on stdout instead of text.
+    /// Works with every mode (directory report, --largest-files,
+    /// --duplicates) and does not change what is analysed. Only the JSON
+    /// goes to stdout; warnings and diagnostics go to stderr. Paths in the
+    /// document are relative to the scanned root; see the README for the
+    /// schema.
+    #[arg(long)]
+    json: bool,
+
     /// Use logical file sizes instead of physical block allocation.
     /// Matches the output of du -sh on macOS and Linux.
     #[arg(long)]
@@ -207,7 +227,7 @@ fn build_ignore_dirs(no_ignore: bool, extra: Vec<String>) -> HashSet<String> {
 fn main() {
     let args = Args::parse();
 
-    let ignore_dirs = build_ignore_dirs(args.no_ignore, args.ignore);
+    let ignore_dirs = build_ignore_dirs(args.no_ignore, args.ignore.clone());
     let target_path = fs::canonicalize(&args.path).unwrap_or_else(|_| PathBuf::from(&args.path));
 
     let include_pattern: Option<Pattern> = match &args.include {
@@ -244,18 +264,22 @@ fn main() {
     let start_time = Instant::now();
 
     // Phase 1: Parallel file scanning
+    // Empty files are never duplicates-of-interest, so the floor is 1 byte.
+    let min_len = args.min_size.unwrap_or(1).max(1);
     let collect = if args.duplicates {
-        Collect::Duplicates {
-            min_len: args.min_size.unwrap_or(1),
-        }
+        Collect::Duplicates { min_len }
     } else {
         match args.largest_files {
             Some(n) => Collect::Largest(n),
             None => Collect::Nothing,
         }
     };
-    let (raw_sizes, raw_content_sizes, collected_files) =
-        parallel_scan_collect(target_path.clone(), args.jobs, config, collect);
+    let ScanOutput {
+        raw_sizes,
+        content_sizes: raw_content_sizes,
+        files: collected_files,
+        file_count,
+    } = parallel_scan_report(target_path.clone(), args.jobs, config, collect);
 
     // Phase 1b (--duplicates only): narrow the candidates down to groups of
     // identical files. This is where almost all of the time goes.
@@ -288,62 +312,96 @@ fn main() {
         None => None,
     };
 
-    if args.debug {
-        let title = if args.duplicates {
-            "=== Duplicate Files ==="
-        } else if args.largest_files.is_some() {
-            "=== Largest Files ==="
-        } else {
-            "=== Top Directories ==="
+    let root_total = aggregated_sizes.get(&target_path).copied().unwrap_or(0);
+    let query = DirectoryQuery {
+        top: args.top,
+        max_depth: args.max_depth,
+        threshold_bytes,
+        include_active: args.include.is_some(),
+        summarize: args.summarize,
+    };
+
+    if args.json {
+        let meta = ReportMeta {
+            root: target_path.clone(),
+            apparent_size: args.apparent_size,
+            filters: Filters {
+                include: args.include.clone(),
+                exclude: args.exclude.clone(),
+                ignore: args.ignore.clone(),
+                no_ignore: args.no_ignore,
+            },
         };
-        println!("{}", title.yellow().bold());
-    }
-
-    if let Some(report) = &duplicate_report {
-        print_duplicates(report, args.top, args.summarize, args.debug);
-    } else if args.largest_files.is_some() {
-        // --largest-files: individual files, largest first, instead of the
-        // per-directory report.
-        for file in &largest_files {
-            println!("{:>10}  {}", format_size(file.size), file.path.display());
+        let stdout = io::stdout();
+        let mut out = io::BufWriter::new(stdout.lock());
+        let written = if let Some(report) = &duplicate_report {
+            warn_unreadable(report, args.debug);
+            write_duplicates(&mut out, &meta, args.top, args.summarize, min_len, report)
+        } else if let Some(limit) = args.largest_files {
+            write_largest_files(
+                &mut out,
+                &meta,
+                limit,
+                root_total,
+                file_count,
+                &largest_files,
+            )
+        } else {
+            let selection =
+                select_directories(&aggregated_sizes, &aggregated_content, &target_path, &query);
+            let summary = DirectorySummary {
+                total_bytes: root_total,
+                files: file_count,
+                directories: raw_sizes.len() as u64,
+            };
+            write_directories(&mut out, &meta, &query, &selection, summary)
+        };
+        match written.and_then(|lossy| out.flush().map(|()| lossy)) {
+            Ok(0) => {}
+            Ok(lossy) => eprintln!(
+                "{}",
+                format!(
+                    "ardisk: {} path(s) are not valid UTF-8; invalid bytes were replaced by U+FFFD in the JSON",
+                    lossy
+                )
+                .yellow()
+            ),
+            // The reader (e.g. `head`) went away; that is not an error.
+            Err(e) if e.kind() == io::ErrorKind::BrokenPipe => {}
+            Err(e) => {
+                eprintln!("{}", format!("error: cannot write JSON: {}", e).red());
+                std::process::exit(1);
+            }
         }
-    } else if args.summarize {
-        // --summarize: print only the root total and exit
-        let root_size = aggregated_sizes.get(&target_path).copied().unwrap_or(0);
-        println!("{:>10}  {}", format_size(root_size), target_path.display());
     } else {
-        // Sort results by size descending and print top folders
-        let mut sorted_results: Vec<(&PathBuf, &u64)> = aggregated_sizes.iter().collect();
-        sorted_results.sort_by(|a, b| b.1.cmp(a.1));
+        if args.debug {
+            let title = if args.duplicates {
+                "=== Duplicate Files ==="
+            } else if args.largest_files.is_some() {
+                "=== Largest Files ==="
+            } else {
+                "=== Top Directories ==="
+            };
+            println!("{}", title.yellow().bold());
+        }
 
-        let mut printed_count = 0;
-        for (path, size) in sorted_results.iter() {
-            if printed_count >= args.top {
-                break;
+        if let Some(report) = &duplicate_report {
+            print_duplicates(report, args.top, args.summarize);
+            warn_unreadable(report, args.debug);
+        } else if args.largest_files.is_some() {
+            // --largest-files: individual files, largest first, instead of
+            // the per-directory report.
+            for file in &largest_files {
+                println!("{:>10}  {}", format_size(file.size), file.path.display());
             }
-
-            // Suppress directories with no matching file content when
-            // --include is active — they only add noise to the output.
-            // We check the content map (file bytes only, no inode cost)
-            // so that directory inode costs don't defeat the suppression.
-            if threshold_bytes.is_none() && args.include.is_some() {
-                let content = aggregated_content.get(*path).copied().unwrap_or(0);
-                if content == 0 {
-                    continue;
-                }
-            }
-
-            // Apply --threshold filter
-            if threshold_bytes.is_some_and(|min| **size < min) {
-                continue;
-            }
-
-            if let Ok(rel_path) = path.strip_prefix(&target_path) {
-                let current_depth = rel_path.components().count();
-                if args.max_depth.is_none_or(|max_d| current_depth <= max_d) {
-                    println!("{:>10}  {}", format_size(**size), path.display());
-                    printed_count += 1;
-                }
+        } else if args.summarize {
+            // --summarize: print only the root total and exit
+            println!("{:>10}  {}", format_size(root_total), target_path.display());
+        } else {
+            let selection =
+                select_directories(&aggregated_sizes, &aggregated_content, &target_path, &query);
+            for (path, size) in &selection.entries {
+                println!("{:>10}  {}", format_size(*size), path.display());
             }
         }
     }
@@ -371,7 +429,7 @@ fn plural(n: usize) -> &'static str {
 
 /// Prints the `--duplicates` report: the `top` groups with the most
 /// reclaimable space (or only the totals with `--summarize`), then a summary.
-fn print_duplicates(report: &DuplicateReport, top: usize, summarize: bool, debug: bool) {
+fn print_duplicates(report: &DuplicateReport, top: usize, summarize: bool) {
     if !summarize {
         for group in report.groups.iter().take(top) {
             println!(
@@ -407,7 +465,10 @@ fn print_duplicates(report: &DuplicateReport, top: usize, summarize: bool, debug
         format_size(report.reclaimable()),
         more
     );
+}
 
+/// Warns on stderr about files the duplicate search had to skip.
+fn warn_unreadable(report: &DuplicateReport, debug: bool) {
     if !report.unreadable.is_empty() {
         eprintln!(
             "{}",
@@ -498,6 +559,46 @@ mod tests {
         ])
         .unwrap();
         assert_eq!(args.exclude, vec!["*.log", "target/**"]);
+    }
+
+    // ── --json ────────────────────────────────────────────────────────────
+
+    #[test]
+    fn json_defaults_to_off() {
+        let args = Args::try_parse_from(["ardisk", "."]).unwrap();
+        assert!(!args.json);
+    }
+
+    #[test]
+    fn json_is_accepted_with_every_mode() {
+        for extra in [
+            vec![],
+            vec!["--largest-files", "5"],
+            vec!["--duplicates"],
+            vec!["--duplicates", "--min-size", "1MB", "--top", "3"],
+            vec!["--summarize"],
+            vec!["--max-depth", "2", "--threshold", "1MB"],
+            vec![
+                "--exclude",
+                "target/**",
+                "--include",
+                "*.rs",
+                "--apparent-size",
+            ],
+        ] {
+            let mut argv = vec!["ardisk", ".", "--json"];
+            argv.extend(extra.iter());
+            let args = Args::try_parse_from(argv.clone())
+                .unwrap_or_else(|e| panic!("{argv:?} should parse: {e}"));
+            assert!(args.json);
+        }
+    }
+
+    #[test]
+    fn json_does_not_enable_any_mode_by_itself() {
+        let args = Args::try_parse_from(["ardisk", ".", "--json"]).unwrap();
+        assert!(!args.duplicates);
+        assert_eq!(args.largest_files, None);
     }
 
     // ── --duplicates ──────────────────────────────────────────────────────

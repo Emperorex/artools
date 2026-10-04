@@ -21,6 +21,7 @@
 use crate::FileEntry;
 use std::{
     collections::HashMap,
+    fmt::Write as _,
     fs::File,
     io::{self, Read},
     path::{Path, PathBuf},
@@ -41,11 +42,22 @@ type Digest = [u8; 32];
 pub struct DuplicateGroup {
     /// Logical length of each file, in bytes.
     pub len: u64,
+    /// BLAKE3 digest of the full content shared by all files in the group.
+    pub digest: [u8; 32],
     /// Paths of the identical files, sorted. Always at least two.
     pub paths: Vec<PathBuf>,
 }
 
 impl DuplicateGroup {
+    /// The digest as 64 lowercase hex characters.
+    pub fn digest_hex(&self) -> String {
+        let mut hex = String::with_capacity(64);
+        for byte in self.digest {
+            let _ = write!(hex, "{byte:02x}");
+        }
+        hex
+    }
+
     /// Bytes that would be freed by keeping a single copy.
     pub fn reclaimable(&self) -> u64 {
         self.len * (self.paths.len() as u64 - 1)
@@ -112,11 +124,11 @@ pub fn find_duplicates(candidates: Vec<FileEntry>, workers: usize) -> DuplicateR
 
     // Files no longer than the prefix were hashed completely: groups of
     // those are final. Longer ones need the full hash.
-    let mut confirmed: Vec<(u64, Vec<PathBuf>)> = Vec::new();
+    let mut confirmed: Vec<(u64, Digest, Vec<PathBuf>)> = Vec::new();
     let mut jobs: Vec<Job> = Vec::new();
-    for (len, paths) in prefix_groups {
+    for (len, digest, paths) in prefix_groups {
         if len <= PREFIX_LEN {
-            confirmed.push((len, paths));
+            confirmed.push((len, digest, paths));
         } else {
             jobs.extend(paths.into_iter().map(|path| Job { len, path }));
         }
@@ -128,9 +140,9 @@ pub fn find_duplicates(candidates: Vec<FileEntry>, workers: usize) -> DuplicateR
 
     report.groups = confirmed
         .into_iter()
-        .map(|(len, mut paths)| {
+        .map(|(len, digest, mut paths)| {
             paths.sort();
-            DuplicateGroup { len, paths }
+            DuplicateGroup { len, digest, paths }
         })
         .collect();
     report.groups.sort_by(|a, b| {
@@ -177,14 +189,15 @@ fn group_by_length(mut candidates: Vec<FileEntry>) -> Vec<(u64, Vec<PathBuf>)> {
 }
 
 /// Hashes the first `max_bytes` (or all) bytes of every job in parallel, then
-/// regroups by (length, hash) and returns the groups of two or more.
+/// regroups by (length, hash) and returns the groups of two or more, each with
+/// its digest.
 /// Unreadable or changed files are recorded in `report` and dropped.
 fn hash_and_regroup(
     jobs: Vec<Job>,
     max_bytes: Option<u64>,
     workers: usize,
     report: &mut DuplicateReport,
-) -> Vec<(u64, Vec<PathBuf>)> {
+) -> Vec<(u64, Digest, Vec<PathBuf>)> {
     let results = hash_jobs(&jobs, max_bytes, workers);
 
     let mut buckets: HashMap<(u64, Digest), Vec<PathBuf>> = HashMap::new();
@@ -209,7 +222,7 @@ fn hash_and_regroup(
     buckets
         .into_iter()
         .filter(|(_, paths)| paths.len() > 1)
-        .map(|((len, _), paths)| (len, paths))
+        .map(|((len, digest), paths)| (len, digest, paths))
         .collect()
 }
 

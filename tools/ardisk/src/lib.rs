@@ -1,4 +1,5 @@
 pub mod duplicates;
+pub mod report;
 
 use colored::Colorize;
 use crossbeam_channel::unbounded;
@@ -125,6 +126,8 @@ pub enum Collect {
 #[derive(Debug)]
 pub struct FileCollector {
     mode: Collect,
+    /// Regular files recorded so far, whatever the mode.
+    files: u64,
     top: TopFiles,
     candidates: Vec<FileEntry>,
 }
@@ -137,6 +140,7 @@ impl FileCollector {
         };
         Self {
             mode,
+            files: 0,
             top: TopFiles::new(limit),
             candidates: Vec::new(),
         }
@@ -147,6 +151,7 @@ impl FileCollector {
     /// `size` is the size under the active `--apparent-size` rule, `len` is
     /// the logical length (`metadata.len()`).
     fn observe(&mut self, size: u64, len: u64, path: PathBuf) {
+        self.files += 1;
         match self.mode {
             Collect::Nothing => {}
             Collect::Largest(_) => self.top.offer(size, path),
@@ -161,6 +166,7 @@ impl FileCollector {
     }
 
     fn merge(&mut self, other: FileCollector) {
+        self.files += other.files;
         self.top.merge(other.top);
         self.candidates.extend(other.candidates);
     }
@@ -348,6 +354,33 @@ pub fn parallel_scan_collect(
     config: Arc<ScanConfig>,
     mode: Collect,
 ) -> (HashMap<PathBuf, u64>, HashMap<PathBuf, u64>, Vec<FileEntry>) {
+    let out = parallel_scan_report(root, workers, config, mode);
+    (out.raw_sizes, out.content_sizes, out.files)
+}
+
+/// Everything a scan produces. See [`parallel_scan_report`].
+#[derive(Debug)]
+pub struct ScanOutput {
+    /// Per-directory total cost: file bytes + directory inode cost.
+    pub raw_sizes: HashMap<PathBuf, u64>,
+    /// Per-directory file bytes only (filtered by `--include`), no inode.
+    pub content_sizes: HashMap<PathBuf, u64>,
+    /// Individual files recorded according to the [`Collect`] mode.
+    pub files: Vec<FileEntry>,
+    /// Regular files that contributed to the totals: symlinks and paths
+    /// rejected by `--include`/`--exclude`/ignore rules are not counted, and
+    /// a hard-linked file counts once.
+    pub file_count: u64,
+}
+
+/// Like [`parallel_scan_collect`], but returns a [`ScanOutput`] that also
+/// carries the number of files counted.
+pub fn parallel_scan_report(
+    root: PathBuf,
+    workers: usize,
+    config: Arc<ScanConfig>,
+    mode: Collect,
+) -> ScanOutput {
     let (task_tx, task_rx) = unbounded::<Task>();
     let shared = Arc::new(ScanShared {
         task_tx,
@@ -409,7 +442,13 @@ pub fn parallel_scan_collect(
     };
     let raw = shared.raw_sizes.into_inner().unwrap();
     let content = shared.content_sizes.into_inner().unwrap();
-    (raw, content, collected.into_files())
+    let file_count = collected.files;
+    ScanOutput {
+        raw_sizes: raw,
+        content_sizes: content,
+        files: collected.into_files(),
+        file_count,
+    }
 }
 
 /// Computes the on-disk contribution of a single metadata entry, honoring

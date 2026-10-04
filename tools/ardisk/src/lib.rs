@@ -1,3 +1,5 @@
+pub mod duplicates;
+
 use colored::Colorize;
 use crossbeam_channel::unbounded;
 use glob::Pattern;
@@ -99,6 +101,78 @@ impl TopFiles {
             .into_iter()
             .map(|Reverse(e)| e)
             .collect()
+    }
+}
+
+/// What, besides directory sizes, a scan should record about individual files.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Collect {
+    /// Directory sizes only.
+    Nothing,
+    /// Keep the `n` largest files (`--largest-files`). `Largest(0)` is
+    /// equivalent to `Nothing`.
+    Largest(usize),
+    /// Keep every regular file whose logical length is at least `min_len`
+    /// (`--duplicates`). Empty files are never kept, whatever `min_len` is:
+    /// they are all trivially "identical" and not worth reporting.
+    Duplicates { min_len: u64 },
+}
+
+/// Per-worker sink for individual files seen during the scan.
+///
+/// Each worker owns one, so recording a file never takes a lock; the
+/// collectors are merged once after the scan.
+#[derive(Debug)]
+pub struct FileCollector {
+    mode: Collect,
+    top: TopFiles,
+    candidates: Vec<FileEntry>,
+}
+
+impl FileCollector {
+    pub fn new(mode: Collect) -> Self {
+        let limit = match mode {
+            Collect::Largest(n) => n,
+            _ => 0,
+        };
+        Self {
+            mode,
+            top: TopFiles::new(limit),
+            candidates: Vec::new(),
+        }
+    }
+
+    /// Records one regular file that was counted in the directory totals.
+    ///
+    /// `size` is the size under the active `--apparent-size` rule, `len` is
+    /// the logical length (`metadata.len()`).
+    fn observe(&mut self, size: u64, len: u64, path: PathBuf) {
+        match self.mode {
+            Collect::Nothing => {}
+            Collect::Largest(_) => self.top.offer(size, path),
+            // Content identity is a property of the logical length, so
+            // candidates are keyed by `len`, not by block allocation.
+            Collect::Duplicates { min_len } => {
+                if len >= min_len.max(1) {
+                    self.candidates.push(FileEntry { size: len, path });
+                }
+            }
+        }
+    }
+
+    fn merge(&mut self, other: FileCollector) {
+        self.top.merge(other.top);
+        self.candidates.extend(other.candidates);
+    }
+
+    /// `Largest`: the files, largest first. `Duplicates`: all candidates in
+    /// arbitrary order (see [`duplicates::find_duplicates`]). `Nothing`: empty.
+    fn into_files(self) -> Vec<FileEntry> {
+        match self.mode {
+            Collect::Nothing => Vec::new(),
+            Collect::Largest(_) => self.top.into_sorted_vec(),
+            Collect::Duplicates { .. } => self.candidates,
+        }
     }
 }
 
@@ -252,6 +326,28 @@ pub fn parallel_scan_with_files(
     config: Arc<ScanConfig>,
     largest_files: usize,
 ) -> (HashMap<PathBuf, u64>, HashMap<PathBuf, u64>, Vec<FileEntry>) {
+    let mode = if largest_files > 0 {
+        Collect::Largest(largest_files)
+    } else {
+        Collect::Nothing
+    };
+    parallel_scan_collect(root, workers, config, mode)
+}
+
+/// The general form of [`parallel_scan`]: additionally records individual
+/// files according to `mode` and returns them as the third tuple element
+/// (see [`Collect`] for what that contains).
+///
+/// The same filters apply as for the directory totals: symlinks,
+/// `--exclude`d/`.gitignore`d paths and files rejected by `--include` are
+/// never recorded, and a hard-linked file is recorded once (under whichever
+/// path the scan reached first). Only regular files are recorded.
+pub fn parallel_scan_collect(
+    root: PathBuf,
+    workers: usize,
+    config: Arc<ScanConfig>,
+    mode: Collect,
+) -> (HashMap<PathBuf, u64>, HashMap<PathBuf, u64>, Vec<FileEntry>) {
     let (task_tx, task_rx) = unbounded::<Task>();
     let shared = Arc::new(ScanShared {
         task_tx,
@@ -277,7 +373,7 @@ pub fn parallel_scan_with_files(
         let shared = Arc::clone(&shared);
 
         let handle = thread::spawn(move || {
-            let mut top_files = TopFiles::new(largest_files);
+            let mut collector = FileCollector::new(mode);
             loop {
                 let task = crossbeam_channel::select! {
                     recv(task_rx) -> msg => match msg {
@@ -293,23 +389,18 @@ pub fn parallel_scan_with_files(
                     }
                 };
 
-                scan_directory(
-                    task,
-                    &config,
-                    &shared,
-                    (largest_files > 0).then_some(&mut top_files),
-                );
+                scan_directory(task, &config, &shared, &mut collector);
                 shared.active_tasks.fetch_sub(1, Ordering::SeqCst);
             }
-            top_files
+            collector
         });
 
         handles.push(handle);
     }
 
-    let mut top_files = TopFiles::new(largest_files);
+    let mut collected = FileCollector::new(mode);
     for handle in handles {
-        top_files.merge(handle.join().unwrap());
+        collected.merge(handle.join().unwrap());
     }
 
     // All workers have finished and dropped their clones of `shared`.
@@ -318,7 +409,7 @@ pub fn parallel_scan_with_files(
     };
     let raw = shared.raw_sizes.into_inner().unwrap();
     let content = shared.content_sizes.into_inner().unwrap();
-    (raw, content, top_files.into_sorted_vec())
+    (raw, content, collected.into_files())
 }
 
 /// Computes the on-disk contribution of a single metadata entry, honoring
@@ -398,7 +489,7 @@ pub fn scan_directory(
     task: Task,
     config: &ScanConfig,
     shared: &ScanShared,
-    mut top_files: Option<&mut TopFiles>,
+    collector: &mut FileCollector,
 ) {
     let dir_path = task.path.as_path();
 
@@ -522,8 +613,8 @@ pub fn scan_directory(
                     let file_size = size_from_metadata(&metadata, config.apparent_size);
                     local_content_size += file_size;
                     local_dir_size += file_size;
-                    if let Some(top) = top_files.as_mut() {
-                        top.offer(file_size, entry_path);
+                    if metadata.is_file() {
+                        collector.observe(file_size, metadata.len(), entry_path);
                     }
                 }
             }

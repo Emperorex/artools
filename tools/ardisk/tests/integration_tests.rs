@@ -1,6 +1,8 @@
+use ardisk::duplicates::{DuplicateReport, PREFIX_LEN, find_duplicates};
 use ardisk::{
-    DEFAULT_IGNORES, FileEntry, aggregate_sizes, build_config, build_config_with_exclude,
-    build_exclude_matcher, format_size, parallel_scan, parallel_scan_with_files,
+    Collect, DEFAULT_IGNORES, FileEntry, aggregate_sizes, build_config, build_config_with_exclude,
+    build_exclude_matcher, format_size, parallel_scan, parallel_scan_collect,
+    parallel_scan_with_files,
 };
 use glob::Pattern;
 use std::{
@@ -1021,4 +1023,345 @@ fn largest_files_zero_collects_nothing_and_keeps_directory_results() {
     let (raw, _content, files) = parallel_scan_with_files(root.clone(), 2, config, 0);
     assert!(files.is_empty());
     assert!(raw.contains_key(&root.join("s")));
+}
+
+// ── --duplicates ──────────────────────────────────────────────────────────────
+
+/// Deterministic, non-repeating-looking bytes. Different seeds differ from
+/// the very first byte on.
+fn pattern(seed: u8, len: usize) -> Vec<u8> {
+    (0..len)
+        .map(|i| {
+            (i as u8)
+                .wrapping_mul(31)
+                .wrapping_add(seed)
+                .wrapping_add((i >> 8) as u8)
+        })
+        .collect()
+}
+
+fn make_files(files: &[(&str, Vec<u8>)]) -> (TempDir, PathBuf) {
+    let dir = TempDir::new().unwrap();
+    for (rel, data) in files {
+        let full = dir.path().join(rel);
+        if let Some(parent) = full.parent() {
+            fs::create_dir_all(parent).unwrap();
+        }
+        fs::write(&full, data).unwrap();
+    }
+    let root = fs::canonicalize(dir.path()).unwrap();
+    (dir, root)
+}
+
+/// Scans `root` in duplicate-candidate mode and runs the duplicate search.
+fn find_dups(
+    root: &Path,
+    min_len: u64,
+    workers: usize,
+    include: Option<&str>,
+    exclude: &[&str],
+) -> DuplicateReport {
+    let ignore_dirs: HashSet<String> = DEFAULT_IGNORES.iter().map(|s| s.to_string()).collect();
+    let patterns: Vec<String> = exclude.iter().map(|s| s.to_string()).collect();
+    let matcher = build_exclude_matcher(root, &patterns).unwrap();
+    let config = build_config_with_exclude(
+        ignore_dirs,
+        include.map(|p| Pattern::new(p).unwrap()),
+        false,
+        false,
+        false,
+        matcher,
+    );
+    let (_raw, _content, candidates) = parallel_scan_collect(
+        root.to_path_buf(),
+        workers,
+        config,
+        Collect::Duplicates { min_len },
+    );
+    find_duplicates(candidates, workers)
+}
+
+/// Each group as a sorted list of root-relative paths.
+fn group_names(root: &Path, report: &DuplicateReport) -> Vec<Vec<String>> {
+    report
+        .groups
+        .iter()
+        .map(|g| {
+            g.paths
+                .iter()
+                .map(|p| p.strip_prefix(root).unwrap().to_string_lossy().into_owned())
+                .collect()
+        })
+        .collect()
+}
+
+#[test]
+fn duplicates_groups_identical_files_across_directories() {
+    let (_d, root) = make_files(&[
+        ("a/one.bin", pattern(1, 500)),
+        ("b/deeper/other-name.dat", pattern(1, 500)),
+        ("c/different.bin", pattern(2, 500)),
+    ]);
+    let report = find_dups(&root, 1, 4, None, &[]);
+    assert_eq!(
+        group_names(&root, &report),
+        [vec!["a/one.bin", "b/deeper/other-name.dat"]]
+    );
+    assert_eq!(report.groups[0].len, 500);
+    assert_eq!(report.groups[0].reclaimable(), 500);
+}
+
+#[test]
+fn duplicates_same_length_different_content_is_not_a_group() {
+    let (_d, root) = make_files(&[("a", vec![b'a'; 64]), ("b", vec![b'b'; 64])]);
+    let report = find_dups(&root, 1, 2, None, &[]);
+    assert!(report.groups.is_empty());
+}
+
+#[test]
+fn duplicates_same_prefix_but_different_tail_is_not_a_group() {
+    // Identical for the first PREFIX_LEN bytes, different after: only the
+    // full hash can tell them apart.
+    let len = PREFIX_LEN as usize + 5000;
+    let a = pattern(3, len);
+    let mut b = a.clone();
+    *b.last_mut().unwrap() ^= 0xff;
+    let (_d, root) = make_files(&[("a", a), ("b", b)]);
+    let report = find_dups(&root, 1, 2, None, &[]);
+    assert!(report.groups.is_empty());
+    assert_eq!(
+        report.stats.full_hashed, 2,
+        "the prefix could not tell them apart"
+    );
+}
+
+#[test]
+fn duplicates_large_identical_files_spanning_several_read_buffers() {
+    let data = pattern(9, 300_000); // > the 128 KiB read buffer
+    let (_d, root) = make_files(&[("x/big1", data.clone()), ("y/big2", data)]);
+    let report = find_dups(&root, 1, 3, None, &[]);
+    assert_eq!(group_names(&root, &report), [vec!["x/big1", "y/big2"]]);
+    assert_eq!(report.stats.full_hashed, 2);
+    assert_eq!(report.stats.bytes_read, 2 * PREFIX_LEN + 2 * 300_000);
+}
+
+#[test]
+fn duplicates_a_differing_prefix_avoids_reading_the_whole_file() {
+    let a = pattern(1, 10_000);
+    let b = pattern(2, 10_000); // differs from byte 0
+    let (_d, root) = make_files(&[("a", a), ("b", b)]);
+    let report = find_dups(&root, 1, 2, None, &[]);
+    assert!(report.groups.is_empty());
+    assert_eq!(report.stats.full_hashed, 0);
+    assert_eq!(report.stats.bytes_read, 2 * PREFIX_LEN);
+}
+
+#[test]
+fn duplicates_files_with_a_unique_length_are_never_opened() {
+    let (_d, root) = make_files(&[
+        ("a", pattern(1, 100)),
+        ("b", pattern(1, 100)),
+        ("unique", pattern(1, 50_000)),
+    ]);
+    let report = find_dups(&root, 1, 2, None, &[]);
+    assert_eq!(report.stats.candidates, 3);
+    assert_eq!(report.stats.same_length, 2);
+    assert_eq!(
+        report.stats.bytes_read, 200,
+        "only the two 100-byte files are read"
+    );
+}
+
+#[test]
+fn duplicates_small_files_are_final_after_the_prefix_stage() {
+    // Shorter than the prefix: the prefix hash covers the whole file, so no
+    // second read is needed.
+    let (_d, root) = make_files(&[("a", pattern(5, 1000)), ("b", pattern(5, 1000))]);
+    let report = find_dups(&root, 1, 2, None, &[]);
+    assert_eq!(report.groups.len(), 1);
+    assert_eq!(report.stats.full_hashed, 0);
+    assert_eq!(report.stats.bytes_read, 2000);
+}
+
+#[test]
+fn duplicates_groups_are_ordered_by_reclaimable_space() {
+    let (_d, root) = make_files(&[
+        // 3 x 1000 -> 2000 reclaimable
+        ("s1", pattern(1, 1000)),
+        ("s2", pattern(1, 1000)),
+        ("s3", pattern(1, 1000)),
+        // 2 x 5000 -> 5000 reclaimable
+        ("b1", pattern(2, 5000)),
+        ("b2", pattern(2, 5000)),
+    ]);
+    let report = find_dups(&root, 1, 2, None, &[]);
+    assert_eq!(
+        group_names(&root, &report),
+        [vec!["b1", "b2"], vec!["s1", "s2", "s3"]]
+    );
+    assert_eq!(report.reclaimable(), 7000);
+    assert_eq!(report.redundant_files(), 3);
+}
+
+#[test]
+fn duplicates_empty_files_are_never_reported() {
+    let (_d, root) = make_files(&[("e1", vec![]), ("e2", vec![]), ("e3", vec![])]);
+    // Even an explicit minimum of 0 must not turn empty files into a group.
+    let report = find_dups(&root, 0, 2, None, &[]);
+    assert!(report.groups.is_empty());
+    assert_eq!(report.stats.candidates, 0);
+}
+
+#[test]
+fn duplicates_min_len_drops_small_files() {
+    let (_d, root) = make_files(&[
+        ("s1", pattern(1, 100)),
+        ("s2", pattern(1, 100)),
+        ("b1", pattern(2, 10_000)),
+        ("b2", pattern(2, 10_000)),
+    ]);
+    let report = find_dups(&root, 1000, 2, None, &[]);
+    assert_eq!(group_names(&root, &report), [vec!["b1", "b2"]]);
+    assert_eq!(report.stats.candidates, 2);
+}
+
+#[test]
+fn duplicates_respect_include_and_exclude() {
+    let (_d, root) = make_files(&[
+        ("a.jpg", pattern(1, 800)),
+        ("b.jpg", pattern(1, 800)),
+        ("c.png", pattern(1, 800)),
+        ("d.png", pattern(1, 800)),
+        ("target/e.jpg", pattern(1, 800)),
+    ]);
+    let included = find_dups(&root, 1, 2, Some("*.jpg"), &["target/**"]);
+    assert_eq!(group_names(&root, &included), [vec!["a.jpg", "b.jpg"]]);
+
+    let excluded = find_dups(&root, 1, 2, None, &["*.png", "target/**"]);
+    assert_eq!(group_names(&root, &excluded), [vec!["a.jpg", "b.jpg"]]);
+}
+
+#[test]
+fn duplicates_skip_ignored_directories() {
+    let (_d, root) = make_files(&[
+        ("node_modules/pkg/f", pattern(1, 800)),
+        ("src/f", pattern(1, 800)),
+    ]);
+    let report = find_dups(&root, 1, 2, None, &[]);
+    assert!(
+        report.groups.is_empty(),
+        "node_modules is ignored by default"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn duplicates_ignore_symlinks() {
+    let (_d, root) = make_files(&[("real", pattern(1, 800))]);
+    std::os::unix::fs::symlink(root.join("real"), root.join("link")).unwrap();
+    let report = find_dups(&root, 1, 2, None, &[]);
+    assert!(report.groups.is_empty());
+    assert_eq!(report.stats.candidates, 1);
+}
+
+#[cfg(unix)]
+#[test]
+fn duplicates_hard_links_to_one_file_are_not_duplicates() {
+    let (_d, root) = make_files(&[("a/orig", pattern(1, 2000))]);
+    fs::create_dir_all(root.join("b")).unwrap();
+    fs::hard_link(root.join("a/orig"), root.join("b/link")).unwrap();
+    let report = find_dups(&root, 1, 4, None, &[]);
+    assert!(report.groups.is_empty(), "same inode: nothing to reclaim");
+    assert_eq!(report.stats.candidates, 1);
+}
+
+#[cfg(unix)]
+#[test]
+fn duplicates_a_real_copy_of_a_hard_linked_file_is_one_group_of_two() {
+    let (_d, root) = make_files(&[("a/orig", pattern(1, 2000)), ("z/copy", pattern(1, 2000))]);
+    fs::hard_link(root.join("a/orig"), root.join("a/link")).unwrap();
+    let report = find_dups(&root, 1, 4, None, &[]);
+    assert_eq!(report.groups.len(), 1);
+    let names = &group_names(&root, &report)[0];
+    // Two physical copies, not three; which of the two hard-link names is
+    // shown depends on scheduling.
+    assert_eq!(names.len(), 2, "{names:?}");
+    assert!(names.contains(&"z/copy".to_string()));
+    assert_eq!(report.groups[0].reclaimable(), 2000);
+}
+
+#[cfg(unix)]
+#[test]
+fn duplicates_unreadable_files_are_reported_not_fatal() {
+    use std::os::unix::fs::PermissionsExt;
+    let (_d, root) = make_files(&[
+        ("ok1", pattern(1, 900)),
+        ("ok2", pattern(1, 900)),
+        ("locked", pattern(1, 900)),
+    ]);
+    let locked = root.join("locked");
+    fs::set_permissions(&locked, fs::Permissions::from_mode(0o000)).unwrap();
+    if fs::File::open(&locked).is_ok() {
+        return; // running as root: permissions are not enforced
+    }
+    let report = find_dups(&root, 1, 2, None, &[]);
+    fs::set_permissions(&locked, fs::Permissions::from_mode(0o644)).unwrap();
+
+    assert_eq!(group_names(&root, &report), [vec!["ok1", "ok2"]]);
+    assert_eq!(report.unreadable.len(), 1);
+    assert_eq!(report.unreadable[0].0, locked);
+}
+
+#[test]
+fn duplicates_a_file_whose_size_changed_is_skipped() {
+    // Candidates claim 10 bytes but the files hold 5: as if they had been
+    // truncated after the scan. They must not be grouped.
+    let (_d, root) = make_files(&[("a", vec![b'x'; 5]), ("b", vec![b'x'; 5])]);
+    let candidates = vec![
+        FileEntry {
+            size: 10,
+            path: root.join("a"),
+        },
+        FileEntry {
+            size: 10,
+            path: root.join("b"),
+        },
+    ];
+    let report = find_duplicates(candidates, 2);
+    assert!(report.groups.is_empty());
+    assert_eq!(report.unreadable.len(), 2);
+    assert!(report.unreadable[0].1.contains("changed"));
+}
+
+#[test]
+fn duplicates_result_is_independent_of_worker_count() {
+    let mut files: Vec<(String, Vec<u8>)> = Vec::new();
+    for i in 0..48usize {
+        // 6 content classes of varying sizes, spread over 5 directories.
+        let class = (i % 6) as u8;
+        let len = 300 + usize::from(class) * 2500;
+        files.push((format!("d{}/f{}", i % 5, i), pattern(class, len)));
+    }
+    let spec: Vec<(&str, Vec<u8>)> = files.iter().map(|(p, d)| (p.as_str(), d.clone())).collect();
+    let (_d, root) = make_files(&spec);
+
+    let one = find_dups(&root, 1, 1, None, &[]);
+    let eight = find_dups(&root, 1, 8, None, &[]);
+    assert_eq!(one.groups, eight.groups);
+    assert_eq!(one.groups.len(), 6);
+    assert_eq!(one.redundant_files(), 48 - 6);
+}
+
+#[test]
+fn collect_nothing_and_duplicates_do_not_change_directory_totals() {
+    let (_d, root) = make_files(&[("a", pattern(1, 700)), ("s/b", pattern(1, 700))]);
+    let ignore_dirs: HashSet<String> = HashSet::new();
+    let config = build_config(ignore_dirs.clone(), None, false, true, false);
+    let (raw_none, _c1, none) = parallel_scan_collect(root.clone(), 2, config, Collect::Nothing);
+    let config = build_config(ignore_dirs, None, false, true, false);
+    let (raw_dup, _c2, dup) =
+        parallel_scan_collect(root.clone(), 2, config, Collect::Duplicates { min_len: 1 });
+    assert!(none.is_empty());
+    assert_eq!(dup.len(), 2);
+    assert_eq!(raw_none, raw_dup);
 }

@@ -2,7 +2,7 @@
 //!
 //! `--json` is an output format, independent of the analysis mode: it
 //! serializes whatever the selected mode (`directories`, `largest_files`,
-//! `duplicates`) produced. The text and JSON outputs share the selection
+//! `duplicates`, `by_type`) produced. The text and JSON outputs share the selection
 //! logic in this module, so they always agree on *what* is reported.
 //!
 //! # Document layout (schema version 1)
@@ -11,13 +11,13 @@
 //!
 //! ```text
 //! schema_version  integer   bumped on incompatible changes only
-//! mode            string    "directories" | "largest_files" | "duplicates"
+//! mode            string    "directories" | "largest_files" | "duplicates" | "by_type"
 //! root            string    canonical absolute path that was scanned
 //! size_mode       string    "disk" (block allocation) | "apparent" (logical length)
 //! filters         object    include / exclude / ignore / no_ignore as given
 //! params          object    mode-specific options that shape the result
 //! summary         object    mode-specific totals, always over the whole scan
-//! entries|groups  array     the listed items (see below)
+//! entries|groups|types  array  the listed items (see below)
 //! truncated       boolean   true if more items existed than were listed
 //! ```
 //!
@@ -29,7 +29,7 @@
 //! Compatible additions (new keys) do not change `schema_version`; consumers
 //! must ignore keys they do not know.
 
-use crate::{FileEntry, duplicates::DuplicateReport};
+use crate::{FileEntry, duplicates::DuplicateReport, format_size_plain, types::TypeTable};
 use serde::Serialize;
 use std::{
     collections::HashMap,
@@ -456,4 +456,190 @@ pub fn write_duplicates<W: Write>(
     };
     emit(w, &doc)?;
     Ok(fmt.lossy)
+}
+
+// ── By type ─────────────────────────────────────────────────────────────────
+
+#[derive(Serialize)]
+struct ByTypeParams {
+    top: usize,
+}
+
+#[derive(Serialize)]
+struct ByTypeSummary {
+    /// Sum of the sizes of all counted files (directory entries themselves
+    /// are not included), i.e. the sum of `bytes` over every type.
+    total_bytes: u64,
+    /// Number of files counted.
+    files: u64,
+    /// Number of distinct types found (the length of the full list).
+    types: usize,
+}
+
+#[derive(Serialize)]
+struct TypeItem<'a> {
+    /// Lower-cased extension with its leading dot, or `null` for files
+    /// without an extension.
+    extension: Option<&'a str>,
+    files: u64,
+    bytes: u64,
+}
+
+#[derive(Serialize)]
+struct ByTypeDoc<'a> {
+    #[serde(flatten)]
+    header: Header<'a>,
+    params: ByTypeParams,
+    summary: ByTypeSummary,
+    types: Vec<TypeItem<'a>>,
+    truncated: bool,
+}
+
+/// Writes the `by_type` document: the `top` types with the most bytes
+/// (none with `summarize`); `summary` always covers every type.
+pub fn write_by_type<W: Write>(
+    w: &mut W,
+    meta: &ReportMeta,
+    top: usize,
+    summarize: bool,
+    table: &TypeTable,
+) -> io::Result<usize> {
+    let mut fmt = PathFmt {
+        root: &meta.root,
+        lossy: 0,
+    };
+    let limit = if summarize { 0 } else { top };
+    let header = header(meta, "by_type", meta.apparent_size, &mut fmt);
+    let types = table
+        .rows
+        .iter()
+        .take(limit)
+        .map(|r| TypeItem {
+            extension: r.extension.as_deref(),
+            files: r.files,
+            bytes: r.bytes,
+        })
+        .collect();
+    let doc = ByTypeDoc {
+        header,
+        params: ByTypeParams { top },
+        summary: ByTypeSummary {
+            total_bytes: table.total_bytes,
+            files: table.total_files,
+            types: table.rows.len(),
+        },
+        types,
+        truncated: table.rows.len() > limit,
+    };
+    emit(w, &doc)?;
+    Ok(fmt.lossy)
+}
+
+/// Longest type label shown in the text table; longer ones are cut with `…`
+/// (the JSON output always has the full extension).
+const MAX_LABEL_CHARS: usize = 32;
+
+fn label_of(extension: &Option<String>) -> String {
+    match extension {
+        None => "(no extension)".to_string(),
+        Some(ext) if ext.chars().count() > MAX_LABEL_CHARS => {
+            let cut: String = ext.chars().take(MAX_LABEL_CHARS - 1).collect();
+            format!("{cut}…")
+        }
+        Some(ext) => ext.clone(),
+    }
+}
+
+fn plural(n: usize) -> &'static str {
+    if n == 1 { "" } else { "s" }
+}
+
+/// Renders the `--by-type` text report, ending with a newline.
+///
+/// The `top` biggest types get a row each; the rest are folded into one
+/// `(N other types)` row, so the shares always add up to the total. With
+/// `summarize` only a one-line summary is produced. Sizes are plain text so
+/// the columns line up on a terminal.
+pub fn render_by_type_text(table: &TypeTable, top: usize, summarize: bool) -> String {
+    if summarize {
+        return format!(
+            "{} file{} in {} type{}, {} total\n",
+            table.total_files,
+            plural(table.total_files as usize),
+            table.rows.len(),
+            plural(table.rows.len()),
+            format_size_plain(table.total_bytes),
+        );
+    }
+
+    let shown = &table.rows[..table.rows.len().min(top)];
+    let rest = &table.rows[shown.len()..];
+
+    // (label, files, size, share) per line.
+    let share = |bytes: u64| format!("{:.1}%", table.share_percent(bytes));
+    let mut lines: Vec<(String, String, String, String)> = shown
+        .iter()
+        .map(|r| {
+            (
+                label_of(&r.extension),
+                r.files.to_string(),
+                format_size_plain(r.bytes),
+                share(r.bytes),
+            )
+        })
+        .collect();
+    if !rest.is_empty() {
+        let files: u64 = rest.iter().map(|r| r.files).sum();
+        let bytes: u64 = rest.iter().map(|r| r.bytes).sum();
+        lines.push((
+            format!("({} other type{})", rest.len(), plural(rest.len())),
+            files.to_string(),
+            format_size_plain(bytes),
+            share(bytes),
+        ));
+    }
+    let total = (
+        "Total".to_string(),
+        table.total_files.to_string(),
+        format_size_plain(table.total_bytes),
+        share(table.total_bytes),
+    );
+
+    let width = |pick: fn(&(String, String, String, String)) -> usize, head: &str| {
+        lines
+            .iter()
+            .chain(std::iter::once(&total))
+            .map(pick)
+            .max()
+            .unwrap_or(0)
+            .max(head.chars().count())
+    };
+    let w_label = width(|l| l.0.chars().count(), "Extension");
+    let w_files = width(|l| l.1.len(), "Files");
+    let w_size = width(|l| l.2.len(), "Size");
+    let w_share = width(|l| l.3.len(), "Share");
+
+    let row = |l: &(String, String, String, String)| {
+        format!(
+            "{:<w_label$}  {:>w_files$}  {:>w_size$}  {:>w_share$}\n",
+            l.0, l.1, l.2, l.3
+        )
+    };
+    let rule = "-".repeat(w_label + w_files + w_size + w_share + 6);
+
+    let mut out = row(&(
+        "Extension".to_string(),
+        "Files".to_string(),
+        "Size".to_string(),
+        "Share".to_string(),
+    ));
+    out.push_str(&rule);
+    out.push('\n');
+    for l in &lines {
+        out.push_str(&row(l));
+    }
+    out.push_str(&rule);
+    out.push('\n');
+    out.push_str(&row(&total));
+    out
 }

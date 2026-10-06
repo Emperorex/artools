@@ -1,8 +1,10 @@
 use ardisk::duplicates::{DuplicateReport, PREFIX_LEN, find_duplicates};
 use ardisk::report::{
     DirectoryQuery, DirectorySelection, DirectorySummary, Filters, ReportMeta, SCHEMA_VERSION,
-    select_directories, write_directories, write_duplicates, write_largest_files,
+    render_by_type_text, select_directories, write_by_type, write_directories, write_duplicates,
+    write_largest_files,
 };
+use ardisk::types::{TypeAccumulator, TypeTable};
 use ardisk::{
     Collect, DEFAULT_IGNORES, FileEntry, aggregate_sizes, build_config, build_config_with_exclude,
     build_exclude_matcher, format_size, parallel_scan, parallel_scan_collect,
@@ -1755,4 +1757,423 @@ fn json_replaces_invalid_utf8_in_paths_and_says_so() {
     let first = doc["entries"][0]["path"].as_str().unwrap();
     assert!(first.contains('\u{FFFD}'), "got {first:?}");
     assert_eq!(doc["entries"][1]["path"], "ok");
+}
+
+// ── --by-type ─────────────────────────────────────────────────────────────────
+
+/// Scans `root` in by-type mode and returns the table. The scan does not
+/// honour .gitignore files; `DEFAULT_IGNORES` apply.
+fn by_type(
+    root: &Path,
+    workers: usize,
+    apparent: bool,
+    include: Option<&str>,
+    exclude: &[&str],
+) -> TypeTable {
+    let ignore_dirs: HashSet<String> = DEFAULT_IGNORES.iter().map(|s| s.to_string()).collect();
+    let patterns: Vec<String> = exclude.iter().map(|s| s.to_string()).collect();
+    let matcher = build_exclude_matcher(root, &patterns).unwrap();
+    let config = build_config_with_exclude(
+        ignore_dirs,
+        include.map(|p| Pattern::new(p).unwrap()),
+        false,
+        apparent,
+        false,
+        matcher,
+    );
+    ardisk::parallel_scan_report(root.to_path_buf(), workers, config, Collect::ByType).types
+}
+
+/// `(label, files, bytes)` per row; `None` extensions are shown as "-".
+fn type_rows(table: &TypeTable) -> Vec<(String, u64, u64)> {
+    table
+        .rows
+        .iter()
+        .map(|r| {
+            (
+                r.extension.clone().unwrap_or_else(|| "-".to_string()),
+                r.files,
+                r.bytes,
+            )
+        })
+        .collect()
+}
+
+fn row(ext: &str, files: u64, bytes: u64) -> (String, u64, u64) {
+    (ext.to_string(), files, bytes)
+}
+
+#[test]
+fn by_type_counts_files_and_bytes_per_extension() {
+    let (_d, root) = make_sized_tree(&[
+        ("a.mp4", 5000),
+        ("sub/b.mp4", 700),
+        ("c.jpg", 900),
+        ("sub/deep/d.rs", 30),
+        ("e.rs", 20),
+        ("f.rs", 10),
+    ]);
+    let t = by_type(&root, 3, true, None, &[]);
+    assert_eq!(
+        type_rows(&t),
+        [row(".mp4", 2, 5700), row(".jpg", 1, 900), row(".rs", 3, 60)]
+    );
+    assert_eq!((t.total_files, t.total_bytes), (6, 6660));
+}
+
+#[test]
+fn by_type_uses_the_last_extension_and_treats_dotfiles_as_extensionless() {
+    let (_d, root) = make_sized_tree(&[
+        ("foo.tar.gz", 100),
+        ("archive.zip", 10),
+        ("README", 1),
+        (".env", 2),
+        ("foo.", 4),
+        (".config.json", 8),
+        (".gitignore", 16),
+    ]);
+    let t = by_type(&root, 2, true, None, &[]);
+    assert_eq!(
+        type_rows(&t),
+        [
+            row(".gz", 1, 100),
+            // README + .env + foo. + .gitignore
+            row("-", 4, 23),
+            row(".zip", 1, 10),
+            row(".json", 1, 8),
+        ]
+    );
+}
+
+#[test]
+fn by_type_folds_case() {
+    let (_d, root) = make_sized_tree(&[("a.JPG", 1), ("b.jpg", 2), ("c.Jpg", 4)]);
+    let t = by_type(&root, 2, true, None, &[]);
+    assert_eq!(type_rows(&t), [row(".jpg", 3, 7)]);
+}
+
+#[test]
+fn by_type_sorts_by_bytes_then_extension() {
+    let (_d, root) = make_sized_tree(&[("a.zip", 10), ("b.avi", 10), ("c.mp4", 50), ("noext", 10)]);
+    let t = by_type(&root, 2, true, None, &[]);
+    assert_eq!(
+        type_rows(&t),
+        [
+            row(".mp4", 1, 50),
+            row("-", 1, 10),
+            row(".avi", 1, 10),
+            row(".zip", 1, 10)
+        ]
+    );
+}
+
+#[test]
+fn by_type_skips_ignored_directories() {
+    let (_d, root) = make_sized_tree(&[("node_modules/p/x.js", 999), ("src/y.js", 5)]);
+    let t = by_type(&root, 2, true, None, &[]);
+    assert_eq!(type_rows(&t), [row(".js", 1, 5)]);
+}
+
+#[cfg(unix)]
+#[test]
+fn by_type_ignores_symlinks_and_counts_hard_links_once() {
+    let (_d, root) = make_sized_tree(&[("real.dat", 100)]);
+    std::os::unix::fs::symlink(root.join("real.dat"), root.join("link.dat")).unwrap();
+    fs::hard_link(root.join("real.dat"), root.join("alias.dat")).unwrap();
+    let t = by_type(&root, 4, true, None, &[]);
+    assert_eq!(type_rows(&t), [row(".dat", 1, 100)]);
+}
+
+#[cfg(unix)]
+#[test]
+fn by_type_counts_a_hard_link_under_the_name_that_passes_the_filters() {
+    let (_d, root) = make_sized_tree(&[("data.log", 400)]);
+    fs::hard_link(root.join("data.log"), root.join("data.bin")).unwrap();
+    let t = by_type(&root, 2, true, None, &["*.log"]);
+    assert_eq!(type_rows(&t), [row(".bin", 1, 400)]);
+}
+
+#[test]
+fn by_type_respects_include_and_exclude() {
+    let (_d, root) = make_sized_tree(&[
+        ("a.rs", 10),
+        ("b.md", 20),
+        ("target/c.rs", 40),
+        ("sub/d.rs", 80),
+    ]);
+    let included = by_type(&root, 2, true, Some("*.rs"), &["target/**"]);
+    assert_eq!(type_rows(&included), [row(".rs", 2, 90)]);
+
+    let excluded = by_type(&root, 2, true, None, &["*.md", "target/**"]);
+    assert_eq!(type_rows(&excluded), [row(".rs", 2, 90)]);
+}
+
+#[test]
+fn by_type_is_independent_of_the_worker_count() {
+    let names: Vec<(String, usize)> = (0..80)
+        .map(|i| {
+            let ext = ["rs", "RS", "md", "png", "", "gz"][i % 6];
+            let name = if ext.is_empty() {
+                format!("d{}/file{}", i % 7, i)
+            } else {
+                format!("d{}/file{}.{}", i % 7, i, ext)
+            };
+            (name, (i * 13) % 50 + 1)
+        })
+        .collect();
+    let spec: Vec<(&str, usize)> = names.iter().map(|(n, l)| (n.as_str(), *l)).collect();
+    let (_d, root) = make_sized_tree(&spec);
+    let one = by_type(&root, 1, true, None, &[]);
+    let eight = by_type(&root, 8, true, None, &[]);
+    assert_eq!(one, eight);
+    assert_eq!(one.total_files, 80);
+}
+
+#[test]
+fn by_type_total_equals_the_directory_content_total() {
+    // One scan, two views: the per-type bytes must add up to the file bytes
+    // the directory report rolls up, in both sizing modes.
+    let (_d, root) = make_sized_tree(&[
+        ("a.txt", 1234),
+        ("sub/b.bin", 98765),
+        ("sub/deep/c", 5),
+        ("sub/deep/d.TXT", 4097),
+    ]);
+    for apparent in [true, false] {
+        let config = build_config(HashSet::new(), None, false, apparent, false);
+        let out = ardisk::parallel_scan_report(root.clone(), 3, config, Collect::ByType);
+        let content = aggregate_sizes(&out.content_sizes, &root);
+        assert_eq!(out.types.total_bytes, content[&root], "apparent={apparent}");
+        assert_eq!(out.types.total_files, out.file_count);
+        let per_type: u64 = out.types.rows.iter().map(|r| r.bytes).sum();
+        assert_eq!(per_type, out.types.total_bytes);
+    }
+}
+
+#[test]
+fn by_type_does_not_change_directory_totals() {
+    let (_d, root) = make_sized_tree(&[("a.rs", 70), ("s/b.md", 90)]);
+    let scan = |mode| {
+        let config = build_config(HashSet::new(), None, false, true, false);
+        ardisk::parallel_scan_report(root.clone(), 2, config, mode)
+    };
+    let plain = scan(Collect::Nothing);
+    let typed = scan(Collect::ByType);
+    assert_eq!(plain.raw_sizes, typed.raw_sizes);
+    assert_eq!(plain.file_count, typed.file_count);
+    assert!(plain.types.rows.is_empty());
+    assert!(typed.files.is_empty(), "no individual files are kept");
+}
+
+#[test]
+fn by_type_of_an_empty_tree_is_an_empty_table() {
+    let (_d, root) = make_tree(&[]);
+    let t = by_type(&root, 2, true, None, &[]);
+    assert!(t.rows.is_empty());
+    assert_eq!((t.total_files, t.total_bytes), (0, 0));
+}
+
+#[test]
+fn by_type_counts_empty_files() {
+    let (_d, root) = make_sized_tree(&[("a.txt", 0), ("b.txt", 0), ("c", 0)]);
+    let t = by_type(&root, 2, true, None, &[]);
+    assert_eq!(type_rows(&t), [row("-", 1, 0), row(".txt", 2, 0)]);
+}
+
+// ── by-type text report ───────────────────────────────────────────────────────
+
+fn table_of(files: &[(&str, u64)]) -> TypeTable {
+    let mut acc = TypeAccumulator::default();
+    for (name, bytes) in files {
+        acc.add(name, *bytes);
+    }
+    acc.into_table()
+}
+
+const MIB: u64 = 1024 * 1024;
+
+#[test]
+fn text_report_has_the_documented_layout() {
+    let t = table_of(&[
+        ("a.mp4", 2 * MIB),
+        ("b.mp4", MIB),
+        ("c.jpg", MIB),
+        ("README", 0),
+    ]);
+    let expected = [
+        "Extension       Files     Size   Share",
+        "--------------------------------------",
+        ".mp4                2  3.00 MB   75.0%",
+        ".jpg                1  1.00 MB   25.0%",
+        "(no extension)      1      0 B    0.0%",
+        "--------------------------------------",
+        "Total               4  4.00 MB  100.0%",
+        "",
+    ]
+    .join("\n");
+    assert_eq!(render_by_type_text(&t, 20, false), expected);
+}
+
+#[test]
+fn text_report_folds_the_tail_into_one_row_so_shares_add_up() {
+    let t = table_of(&[
+        ("a.aa", 4 * MIB),
+        ("b.bb", 2 * MIB),
+        ("c.cc", MIB),
+        ("d.dd", MIB),
+    ]);
+    let text = render_by_type_text(&t, 2, false);
+    let lines: Vec<&str> = text.lines().collect();
+    assert_eq!(lines.len(), 7, "{text}");
+    assert!(lines[2].starts_with(".aa"));
+    assert!(lines[3].starts_with(".bb"));
+    assert!(lines[4].starts_with("(2 other types)"), "{text}");
+    assert!(
+        lines[4].contains("2.00 MB") && lines[4].ends_with("25.0%"),
+        "{text}"
+    );
+    assert!(lines[6].starts_with("Total") && lines[6].ends_with("100.0%"));
+}
+
+#[test]
+fn text_report_uses_singular_for_one_other_type() {
+    let t = table_of(&[("a.aa", 2 * MIB), ("b.bb", MIB)]);
+    let text = render_by_type_text(&t, 1, false);
+    assert!(text.contains("(1 other type)"), "{text}");
+}
+
+#[test]
+fn text_report_columns_line_up() {
+    let t = table_of(&[
+        ("a.mp4", 123 * MIB),
+        ("b.jpg", 7),
+        ("c.verylongextensionnamehere", 1000),
+        ("README", 3),
+    ]);
+    let text = render_by_type_text(&t, 20, false);
+    let widths: Vec<usize> = text.lines().map(|l| l.chars().count()).collect();
+    assert!(
+        widths.iter().all(|w| *w == widths[0]),
+        "all lines have the same width: {widths:?}\n{text}"
+    );
+}
+
+#[test]
+fn text_report_shortens_very_long_extensions() {
+    let long = format!("x.{}", "e".repeat(100));
+    let t = table_of(&[(long.as_str(), 10)]);
+    let text = render_by_type_text(&t, 20, false);
+    assert!(text.contains('…'), "{text}");
+    assert!(text.lines().all(|l| l.chars().count() < 80), "{text}");
+}
+
+#[test]
+fn text_report_summarize_is_one_line() {
+    let t = table_of(&[("a.x", 2 * MIB), ("b.y", 2 * MIB), ("c", 0)]);
+    assert_eq!(
+        render_by_type_text(&t, 20, true),
+        "3 files in 3 types, 4.00 MB total\n"
+    );
+    let one = table_of(&[("a.x", 5)]);
+    assert_eq!(
+        render_by_type_text(&one, 20, true),
+        "1 file in 1 type, 5 B total\n"
+    );
+}
+
+#[test]
+fn text_report_for_no_files_is_header_and_zero_total() {
+    let text = render_by_type_text(&TypeTable::default(), 20, false);
+    let lines: Vec<&str> = text.lines().collect();
+    assert_eq!(lines.len(), 4, "{text}");
+    assert!(lines[0].starts_with("Extension"));
+    assert!(
+        lines[3].starts_with("Total") && lines[3].ends_with("0.0%"),
+        "{text}"
+    );
+}
+
+// ── by-type JSON ──────────────────────────────────────────────────────────────
+
+#[test]
+fn json_by_type_document_has_the_documented_shape() {
+    let (_d, root) = make_sized_tree(&[("a.mp4", 1)]);
+    let t = table_of(&[
+        ("a.mp4", 600),
+        ("b.MP4", 400),
+        ("c.jpg", 500),
+        ("README", 7),
+    ]);
+    let (doc, lossy) = to_json(|w| write_by_type(w, &meta(&root), 20, false, &t));
+    assert_eq!(lossy, 0);
+
+    assert_eq!(doc["schema_version"], SCHEMA_VERSION);
+    assert_eq!(doc["mode"], "by_type");
+    assert_eq!(doc["root"], root.to_str().unwrap());
+    assert_eq!(doc["size_mode"], "disk");
+    assert_eq!(doc["params"], serde_json::json!({"top": 20}));
+    assert_eq!(
+        doc["summary"],
+        serde_json::json!({"total_bytes": 1507, "files": 4, "types": 3})
+    );
+    assert_eq!(doc["truncated"], false);
+    assert_eq!(
+        doc["types"],
+        serde_json::json!([
+            {"extension": ".mp4", "files": 2, "bytes": 1000},
+            {"extension": ".jpg", "files": 1, "bytes": 500},
+            {"extension": null,   "files": 1, "bytes": 7},
+        ])
+    );
+    assert!(doc.get("entries").is_none() && doc.get("groups").is_none());
+    assert!(
+        doc["types"][0].get("share").is_none(),
+        "shares are not stored; compute them from bytes"
+    );
+}
+
+#[test]
+fn json_by_type_top_limits_the_list_but_not_the_summary() {
+    let (_d, root) = make_sized_tree(&[("a", 1)]);
+    let t = table_of(&[("a.x", 30), ("b.y", 20), ("c.z", 10)]);
+    let (doc, _) = to_json(|w| write_by_type(w, &meta(&root), 2, false, &t));
+    assert_eq!(doc["types"].as_array().unwrap().len(), 2);
+    assert_eq!(doc["truncated"], true);
+    assert_eq!(doc["summary"]["types"], 3);
+    assert_eq!(doc["summary"]["total_bytes"], 60);
+    assert_eq!(doc["summary"]["files"], 3);
+
+    let (doc, _) = to_json(|w| write_by_type(w, &meta(&root), 3, false, &t));
+    assert_eq!(doc["truncated"], false);
+}
+
+#[test]
+fn json_by_type_summarize_lists_nothing_but_keeps_the_summary() {
+    let (_d, root) = make_sized_tree(&[("a", 1)]);
+    let t = table_of(&[("a.x", 30)]);
+    let (doc, _) = to_json(|w| write_by_type(w, &meta(&root), 20, true, &t));
+    assert_eq!(doc["types"], serde_json::json!([]));
+    assert_eq!(doc["truncated"], true);
+    assert_eq!(doc["summary"]["total_bytes"], 30);
+}
+
+#[test]
+fn json_by_type_without_files_is_an_empty_valid_document() {
+    let (_d, root) = make_sized_tree(&[("a", 1)]);
+    let (doc, _) = to_json(|w| write_by_type(w, &meta(&root), 20, false, &TypeTable::default()));
+    assert_eq!(doc["types"], serde_json::json!([]));
+    assert_eq!(doc["truncated"], false);
+    assert_eq!(
+        doc["summary"],
+        serde_json::json!({"total_bytes": 0, "files": 0, "types": 0})
+    );
+}
+
+#[test]
+fn json_by_type_reports_apparent_size_mode() {
+    let (_d, root) = make_sized_tree(&[("a", 1)]);
+    let mut m = meta(&root);
+    m.apparent_size = true;
+    let (doc, _) = to_json(|w| write_by_type(w, &m, 20, false, &TypeTable::default()));
+    assert_eq!(doc["size_mode"], "apparent");
 }

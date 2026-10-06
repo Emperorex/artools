@@ -4,8 +4,9 @@ use ardisk::{
     duplicates::{DuplicateReport, find_duplicates},
     format_size, parallel_scan_report,
     report::{
-        DirectoryQuery, DirectorySummary, Filters, ReportMeta, select_directories,
-        write_directories, write_duplicates, write_largest_files,
+        DirectoryQuery, DirectorySummary, Filters, ReportMeta, render_by_type_text,
+        select_directories, write_by_type, write_directories, write_duplicates,
+        write_largest_files,
     },
 };
 use clap::Parser;
@@ -173,6 +174,11 @@ struct Args {
         long,
         value_name = "SIZE",
         requires = "duplicates",
+        // `requires` alone is not enough: clap skips a missing-requirement
+        // error when the required flag conflicts with another flag that is
+        // present, so --min-size would be silently accepted (and ignored)
+        // next to every mode that conflicts with --duplicates.
+        conflicts_with_all = ["largest_files", "by_type", "max_depth", "threshold"],
         value_parser = parse_threshold
     )]
     min_size: Option<u64>,
@@ -185,6 +191,20 @@ struct Args {
     /// schema.
     #[arg(long)]
     json: bool,
+
+    /// Show which file types take up the space: files and total size per
+    /// extension, biggest first, with each type's share of the total. The
+    /// extension is the part of the name after the last '.', compared
+    /// case-insensitively ('foo.tar.gz' is '.gz'; '.env', 'foo.' and 'README'
+    /// have none). Respects --include, --exclude, --ignore and .gitignore;
+    /// hard-linked files count once; sizes follow --apparent-size. --top
+    /// limits the rows (the rest are summed into one line), --summarize
+    /// prints only the totals.
+    #[arg(
+        long,
+        conflicts_with_all = ["largest_files", "duplicates", "max_depth", "threshold"]
+    )]
+    by_type: bool,
 
     /// Use logical file sizes instead of physical block allocation.
     /// Matches the output of du -sh on macOS and Linux.
@@ -268,6 +288,8 @@ fn main() {
     let min_len = args.min_size.unwrap_or(1).max(1);
     let collect = if args.duplicates {
         Collect::Duplicates { min_len }
+    } else if args.by_type {
+        Collect::ByType
     } else {
         match args.largest_files {
             Some(n) => Collect::Largest(n),
@@ -279,6 +301,7 @@ fn main() {
         content_sizes: raw_content_sizes,
         files: collected_files,
         file_count,
+        types,
     } = parallel_scan_report(target_path.clone(), args.jobs, config, collect);
 
     // Phase 1b (--duplicates only): narrow the candidates down to groups of
@@ -337,6 +360,8 @@ fn main() {
         let written = if let Some(report) = &duplicate_report {
             warn_unreadable(report, args.debug);
             write_duplicates(&mut out, &meta, args.top, args.summarize, min_len, report)
+        } else if args.by_type {
+            write_by_type(&mut out, &meta, args.top, args.summarize, &types)
         } else if let Some(limit) = args.largest_files {
             write_largest_files(
                 &mut out,
@@ -377,6 +402,8 @@ fn main() {
         if args.debug {
             let title = if args.duplicates {
                 "=== Duplicate Files ==="
+            } else if args.by_type {
+                "=== File Types ==="
             } else if args.largest_files.is_some() {
                 "=== Largest Files ==="
             } else {
@@ -388,6 +415,8 @@ fn main() {
         if let Some(report) = &duplicate_report {
             print_duplicates(report, args.top, args.summarize);
             warn_unreadable(report, args.debug);
+        } else if args.by_type {
+            print!("{}", render_by_type_text(&types, args.top, args.summarize));
         } else if args.largest_files.is_some() {
             // --largest-files: individual files, largest first, instead of
             // the per-directory report.
@@ -559,6 +588,81 @@ mod tests {
         ])
         .unwrap();
         assert_eq!(args.exclude, vec!["*.log", "target/**"]);
+    }
+
+    // ── --by-type ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn by_type_defaults_to_off() {
+        let args = Args::try_parse_from(["ardisk", "."]).unwrap();
+        assert!(!args.by_type);
+    }
+
+    #[test]
+    fn by_type_parses() {
+        let args = Args::try_parse_from(["ardisk", ".", "--by-type"]).unwrap();
+        assert!(args.by_type);
+    }
+
+    #[test]
+    fn by_type_conflicts_with_other_report_modes() {
+        for extra in [
+            vec!["--duplicates"],
+            vec!["--largest-files", "3"],
+            vec!["--max-depth", "2"],
+            vec!["--threshold", "1MB"],
+        ] {
+            let mut argv = vec!["ardisk", ".", "--by-type"];
+            argv.extend(extra.iter());
+            assert!(
+                Args::try_parse_from(argv).is_err(),
+                "--by-type must conflict with {:?}",
+                extra
+            );
+        }
+    }
+
+    #[test]
+    fn by_type_combines_with_filters_top_summarize_and_json() {
+        let args = Args::try_parse_from([
+            "ardisk",
+            ".",
+            "--by-type",
+            "--top",
+            "5",
+            "--summarize",
+            "--json",
+            "--include",
+            "*.rs",
+            "--exclude",
+            "target/**",
+            "--apparent-size",
+            "-j",
+            "2",
+        ])
+        .unwrap();
+        assert!(args.by_type && args.summarize && args.json);
+        assert_eq!(args.top, 5);
+    }
+
+    #[test]
+    fn min_size_is_rejected_with_every_mode_other_than_duplicates() {
+        for extra in [
+            vec!["--by-type"],
+            vec!["--largest-files", "3"],
+            vec!["--max-depth", "2"],
+            vec!["--threshold", "1MB"],
+            vec!["--summarize"],
+            vec![],
+        ] {
+            let mut argv = vec!["ardisk", ".", "--min-size", "1MB"];
+            argv.extend(extra.iter());
+            assert!(
+                Args::try_parse_from(argv).is_err(),
+                "--min-size without --duplicates must be an error (with {:?})",
+                extra
+            );
+        }
     }
 
     // ── --json ────────────────────────────────────────────────────────────

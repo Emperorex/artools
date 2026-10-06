@@ -1,5 +1,6 @@
 pub mod duplicates;
 pub mod report;
+pub mod types;
 
 use colored::Colorize;
 use crossbeam_channel::unbounded;
@@ -19,6 +20,7 @@ use std::{
     },
     thread,
 };
+use types::{TypeAccumulator, TypeTable};
 
 #[cfg(unix)]
 use std::os::unix::fs::MetadataExt;
@@ -117,6 +119,9 @@ pub enum Collect {
     /// (`--duplicates`). Empty files are never kept, whatever `min_len` is:
     /// they are all trivially "identical" and not worth reporting.
     Duplicates { min_len: u64 },
+    /// Count files and bytes per extension (`--by-type`). No individual
+    /// files are kept.
+    ByType,
 }
 
 /// Per-worker sink for individual files seen during the scan.
@@ -130,6 +135,7 @@ pub struct FileCollector {
     files: u64,
     top: TopFiles,
     candidates: Vec<FileEntry>,
+    types: TypeAccumulator,
 }
 
 impl FileCollector {
@@ -143,6 +149,7 @@ impl FileCollector {
             files: 0,
             top: TopFiles::new(limit),
             candidates: Vec::new(),
+            types: TypeAccumulator::default(),
         }
     }
 
@@ -162,6 +169,10 @@ impl FileCollector {
                     self.candidates.push(FileEntry { size: len, path });
                 }
             }
+            Collect::ByType => {
+                let name = path.file_name().map(|n| n.to_string_lossy());
+                self.types.add(name.as_deref().unwrap_or(""), size);
+            }
         }
     }
 
@@ -169,13 +180,15 @@ impl FileCollector {
         self.files += other.files;
         self.top.merge(other.top);
         self.candidates.extend(other.candidates);
+        self.types.merge(other.types);
     }
 
     /// `Largest`: the files, largest first. `Duplicates`: all candidates in
-    /// arbitrary order (see [`duplicates::find_duplicates`]). `Nothing`: empty.
+    /// arbitrary order (see [`duplicates::find_duplicates`]). `Nothing` and
+    /// `ByType`: empty.
     fn into_files(self) -> Vec<FileEntry> {
         match self.mode {
-            Collect::Nothing => Vec::new(),
+            Collect::Nothing | Collect::ByType => Vec::new(),
             Collect::Largest(_) => self.top.into_sorted_vec(),
             Collect::Duplicates { .. } => self.candidates,
         }
@@ -371,6 +384,9 @@ pub struct ScanOutput {
     /// rejected by `--include`/`--exclude`/ignore rules are not counted, and
     /// a hard-linked file counts once.
     pub file_count: u64,
+    /// Files and bytes per extension; empty unless the mode is
+    /// [`Collect::ByType`].
+    pub types: TypeTable,
 }
 
 /// Like [`parallel_scan_collect`], but returns a [`ScanOutput`] that also
@@ -443,11 +459,13 @@ pub fn parallel_scan_report(
     let raw = shared.raw_sizes.into_inner().unwrap();
     let content = shared.content_sizes.into_inner().unwrap();
     let file_count = collected.files;
+    let types = std::mem::take(&mut collected.types).into_table();
     ScanOutput {
         raw_sizes: raw,
         content_sizes: content,
         files: collected.into_files(),
         file_count,
+        types,
     }
 }
 
@@ -706,30 +724,50 @@ pub fn aggregate_sizes(
     aggregated
 }
 
-/// Formats raw bytes into human-readable strings (e.g., KB, MB, GB, TB)
-pub fn format_size(bytes: u64) -> String {
+/// How big a size is, which decides its colour in [`format_size`].
+enum SizeTier {
+    Bytes,
+    Kb,
+    Mb,
+    Gb,
+    Tb,
+}
+
+fn size_text(bytes: u64) -> (SizeTier, String) {
     const KB: u64 = 1024;
     const MB: u64 = KB * 1024;
     const GB: u64 = MB * 1024;
     const TB: u64 = GB * 1024;
 
     if bytes >= TB {
-        format!("{:.2} TB", bytes as f64 / TB as f64)
-            .magenta()
-            .bold()
-            .to_string()
+        (SizeTier::Tb, format!("{:.2} TB", bytes as f64 / TB as f64))
     } else if bytes >= GB {
-        format!("{:.2} GB", bytes as f64 / GB as f64)
-            .cyan()
-            .to_string()
+        (SizeTier::Gb, format!("{:.2} GB", bytes as f64 / GB as f64))
     } else if bytes >= MB {
-        format!("{:.2} MB", bytes as f64 / MB as f64)
-            .green()
-            .to_string()
+        (SizeTier::Mb, format!("{:.2} MB", bytes as f64 / MB as f64))
     } else if bytes >= KB {
-        format!("{:.2} KB", bytes as f64 / KB as f64).to_string()
+        (SizeTier::Kb, format!("{:.2} KB", bytes as f64 / KB as f64))
     } else {
-        format!("{} B", bytes).to_string()
+        (SizeTier::Bytes, format!("{} B", bytes))
+    }
+}
+
+/// Formats raw bytes into human-readable strings (e.g., KB, MB, GB, TB),
+/// without colour. Use this where text has to line up in columns: escape
+/// codes count towards `{:>N}` padding.
+pub fn format_size_plain(bytes: u64) -> String {
+    size_text(bytes).1
+}
+
+/// Formats raw bytes into human-readable strings (e.g., KB, MB, GB, TB),
+/// coloured by magnitude when the terminal supports it.
+pub fn format_size(bytes: u64) -> String {
+    let (tier, text) = size_text(bytes);
+    match tier {
+        SizeTier::Tb => text.magenta().bold().to_string(),
+        SizeTier::Gb => text.cyan().to_string(),
+        SizeTier::Mb => text.green().to_string(),
+        SizeTier::Kb | SizeTier::Bytes => text,
     }
 }
 

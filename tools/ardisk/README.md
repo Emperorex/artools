@@ -31,6 +31,7 @@ ardisk [OPTIONS] [PATH]
 | `--threshold SIZE`  | —     | —         | Only show directories larger than this size (e.g. `100MB`, `1GB`)      |
 | `--summarize`       | `-s`  | —         | Print only the grand total for the root directory                      |
 | `--largest-files N` | —     | —         | List the `N` largest individual files instead of the directory report (see [Finding the largest files](#finding-the-largest-files)) |
+| `--by-type`         | —     | —         | Show files and total size per file extension, with each type's share (see [Breakdown by file type](#breakdown-by-file-type)) |
 | `--duplicates`      | —     | —         | Report groups of files with identical content; read-only (see [Finding duplicate files](#finding-duplicate-files)) |
 | `--min-size SIZE`   | —     | `1B`      | With `--duplicates`: ignore files smaller than `SIZE` (e.g. `1MB`) |
 | `--json`            | —     | —         | Print the result as one JSON document on stdout (see [JSON output](#json-output)) |
@@ -82,6 +83,52 @@ What counts as a candidate is exactly what counts toward the directory totals:
 
 `--largest-files` replaces the directory report, so it cannot be combined with `--summarize`, `--top`, `--max-depth` or `--threshold`. Memory use is proportional to `N` times the number of worker threads, not to the number of files scanned.
 
+## Breakdown by file type
+
+`--by-type` answers "what kinds of data take the space?", where `--largest-files` answers "which files?":
+
+```bash
+ardisk ~ --by-type --top 6
+```
+
+```
+Extension         Files       Size   Share
+------------------------------------------
+.mp4                124   18.40 GB   43.2%
+.jpg               8321    7.20 GB   16.9%
+.zip                 86    4.80 GB   11.3%
+.rs               12400    1.10 GB    2.6%
+.pdf                412  820.30 MB    1.9%
+(no extension)     1932  410.20 MB    0.9%
+(35 other types)   1725    9.89 GB   23.2%
+------------------------------------------
+Total             25000   42.59 GB  100.0%
+```
+
+Rows are ordered by size, biggest first; types of equal size are ordered by extension, and files without an extension come first among equals. `--top N` (default 20) limits the rows: the remaining types are summed into one `(N other types)` row, so the shares always add up to 100%. `--summarize` prints just one line with the totals.
+
+**What counts as the extension.** The part of the file name after the **last** `.`, compared case-insensitively:
+
+| Name           | Type            |
+|----------------|-----------------|
+| `archive.zip`  | `.zip`          |
+| `foo.tar.gz`   | `.gz` (compound extensions are not recognized) |
+| `PHOTO.JPG`    | `.jpg` (same type as `photo.jpg`) |
+| `.config.json` | `.json`         |
+| `README`       | no extension    |
+| `.env`, `.gitignore` | no extension (a leading dot marks a hidden file) |
+| `foo.`         | no extension    |
+
+**What is counted.**
+
+- The same files as the directory report: `--include`, `--exclude`, `--ignore`, the built-in ignores and `.gitignore` rules apply, symlinks are never followed, and a hard-linked file counts once.
+- Sizes follow `--apparent-size`: physical block allocation by default, logical length with the flag. (`--include` patterns are case-sensitive, even though types are grouped case-insensitively.)
+- The total is the sum of the **file** sizes. It is smaller than the root total of the directory report by the space taken by the directory entries themselves.
+- Empty files count as files of their type (with 0 bytes).
+- Memory use depends on the number of distinct extensions, not on the number of files.
+
+`--by-type` replaces the directory report, so it cannot be combined with `--largest-files`, `--duplicates`, `--max-depth` or `--threshold`.
+
 ## Finding duplicate files
 
 `--duplicates` reports files whose **content** is identical, whatever their names or locations. It only reports: nothing is deleted, moved or linked.
@@ -128,12 +175,13 @@ Groups are formed from the 256-bit hash plus the length. Files are not additiona
 
 ## JSON output
 
-`--json` changes only the **output format**. It does not turn on `--largest-files` or `--duplicates`; it serializes the result of whichever mode you picked:
+`--json` changes only the **output format**. It does not turn on `--largest-files`, `--duplicates` or `--by-type`; it serializes the result of whichever mode you picked:
 
 ```bash
 ardisk . --json                          # directory report
 ardisk . --largest-files 20 --json       # largest files
 ardisk . --duplicates --json             # duplicate files
+ardisk . --by-type --json                # files and bytes per extension
 ardisk ~/Projects --exclude 'target/**' --json
 ```
 
@@ -146,18 +194,18 @@ Every document is one object with the same header:
 | Key              | Meaning |
 |------------------|---------|
 | `schema_version` | Integer. Changes only for incompatible changes. New keys may be added without a bump, so ignore keys you don't know. |
-| `mode`           | `"directories"`, `"largest_files"` or `"duplicates"` |
+| `mode`           | `"directories"`, `"largest_files"`, `"duplicates"` or `"by_type"` |
 | `root`           | Canonical absolute path that was scanned |
 | `size_mode`      | `"disk"` (block allocation, the default) or `"apparent"` (logical length, `--apparent-size`). Always `"apparent"` for `duplicates`. |
 | `filters`        | `include` (string or `null`), `exclude` (array), `ignore` (array, extra `--ignore` names only), `no_ignore` (bool) |
 | `params`         | Options that shape the result, mode-specific (below) |
 | `summary`        | Totals for the **whole scan**, mode-specific (below) |
-| `entries` / `groups` | The listed items |
+| `entries` / `groups` / `types` | The listed items |
 | `truncated`      | `true` if more items existed than were listed |
 
 Paths in `entries` and `groups` are **relative to `root`**, use `/` as separator, and the root itself is `"."`. Sizes are integers in bytes. A path that is not valid UTF-8 is written with the invalid bytes replaced by U+FFFD, and ardisk prints a warning to stderr.
 
-The list obeys the same limits as the text report: `--top` (default 20) for directories and duplicate groups, `--max-depth`, `--threshold`, and `--summarize`, which lists nothing and keeps only `summary`. Use `truncated` to tell whether a list was cut, and raise `--top` to get more. Ties in size are ordered by path, so output does not depend on thread count or timing.
+The list obeys the same limits as the text report: `--top` (default 20) for directories, duplicate groups and file types, `--max-depth`, `--threshold`, and `--summarize`, which lists nothing and keeps only `summary`. Use `truncated` to tell whether a list was cut, and raise `--top` to get more. Ties in size are ordered by path, so output does not depend on thread count or timing.
 
 **`directories`**
 
@@ -231,6 +279,30 @@ The list obeys the same limits as the text report: `--top` (default 20) for dire
 
 **Why "potentially" reclaimable.** `potentially_reclaimable_bytes` is `bytes_per_file × (files − 1)` per group, and the summary is the sum over all groups: the space freed if you keep **one** copy of each group and delete the rest. It is not the sum of all sizes in the group. The real saving can be smaller: the same data may also be hard-linked from places outside the scanned tree, shared by snapshots, clones or deduplicating filesystems, or kept alive by other references. Sizes here are logical lengths, not disk blocks.
 
+**`by_type`**
+
+```json
+{
+  "schema_version": 1,
+  "mode": "by_type",
+  "params": { "top": 20 },
+  "summary": { "total_bytes": 45731340288, "files": 23275, "types": 41 },
+  "types": [
+    { "extension": ".mp4", "files": 124,  "bytes": 19756849521 },
+    { "extension": ".jpg", "files": 8321, "bytes": 7730941132 },
+    { "extension": null,   "files": 1932, "bytes": 430143283 }
+  ],
+  "truncated": true
+}
+```
+
+(header keys omitted for brevity).
+
+- `extension` is lower-cased and includes the dot; it is `null` for files without an extension. See [Breakdown by file type](#breakdown-by-file-type) for the rule.
+- Types are ordered by `bytes` descending, then by `extension` ascending (`null` first).
+- `summary.total_bytes` is the sum of `bytes` over **all** types, not just the listed ones, and `summary.types` is the number of types found; `truncated` is `true` if the list is shorter than that.
+- Shares are not stored. Compute them from the bytes (`bytes / summary.total_bytes`), which avoids rounding differences between consumers.
+
 ### Examples with `jq`
 
 ```bash
@@ -239,6 +311,10 @@ ardisk . --json | jq .summary.total_bytes
 
 # paths of the 20 largest files
 ardisk . --largest-files 20 --json | jq -r '.entries[].path'
+
+# share of each file type, in percent
+ardisk ~ --by-type --top 100 --json \
+  | jq '.summary.total_bytes as $t | .types[] | {extension, share: (.bytes / $t * 100)}'
 
 # how much a duplicate cleanup could free, in MiB
 ardisk ~ --duplicates --min-size 1MB --summarize --json \
@@ -331,6 +407,12 @@ ardisk ~/Movies --largest-files 10 --include "*.mp4" --exclude 'scratch/**'
 # Machine-readable output for scripts
 ardisk . --largest-files 20 --json | jq -r '.entries[].path'
 
+# Which file types take the space?
+ardisk ~ --by-type
+
+# ...only counting a project, without build output
+ardisk ~/Projects --by-type --exclude 'target/**' --top 10
+
 # Duplicate files of at least 1 MB, show the 10 most wasteful groups
 ardisk ~ --duplicates --min-size 1MB --top 10
 
@@ -351,6 +433,7 @@ ardisk / -j 8 --top 20
 | Physical total      | `du -s .`                          | `ardisk . --summarize`                      |
 | Filter by size      | not supported                      | `ardisk . --threshold 1GB`                  |
 | Filter by file type | not supported                      | `ardisk . --include "*.mp4"`                |
+| Space per file type | not supported                      | `ardisk . --by-type`                        |
 | Biggest files       | `find . -type f -printf '%s %p\n' \| sort -rn \| head` | `ardisk . --largest-files 20`      |
 | Skip node_modules   | `--exclude=node_modules`           | automatic                                   |
 | Exclude by glob     | `--exclude='*.log'`                | `ardisk . --exclude '*.log'`                |

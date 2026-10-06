@@ -304,3 +304,195 @@ fn non_utf8_file_names_keep_stdout_valid_and_are_flagged_on_stderr() {
     assert!(has_replacement);
     assert!(stderr.contains("not valid UTF-8"), "stderr was {stderr:?}");
 }
+
+// ── --by-type ─────────────────────────────────────────────────────────────────
+
+/// Extension edge cases: case folding, compound extensions, dotfiles, no
+/// extension, a trailing dot and an ignored directory.
+fn typed_sample() -> (TempDir, PathBuf) {
+    let dir = TempDir::new().unwrap();
+    for (rel, len) in [
+        ("media/clip.mp4", 5000),
+        ("media/B.MP4", 1200),
+        ("media/a.jpg", 900),
+        ("backup.tar.gz", 800),
+        ("README", 40),
+        (".env", 10),
+        ("foo.", 3),
+        ("node_modules/pkg/big.bin", 70_000),
+    ] {
+        let full = dir.path().join(rel);
+        fs::create_dir_all(full.parent().unwrap()).unwrap();
+        fs::write(full, data(1, len)).unwrap();
+    }
+    let root = fs::canonicalize(dir.path()).unwrap();
+    (dir, root)
+}
+
+#[test]
+fn by_type_json_prints_one_by_type_document() {
+    let (_d, root) = typed_sample();
+    let (doc, stderr) = json(&[p(&root), "--by-type", "--json", "--apparent-size"]);
+    assert_eq!(stderr, "");
+    assert_eq!(doc["schema_version"], 1);
+    assert_eq!(doc["mode"], "by_type");
+    assert_eq!(doc["root"], p(&root));
+    assert_eq!(doc["size_mode"], "apparent");
+    assert_eq!(
+        doc["types"],
+        serde_json::json!([
+            {"extension": ".mp4", "files": 2, "bytes": 6200},
+            {"extension": ".jpg", "files": 1, "bytes": 900},
+            {"extension": ".gz",  "files": 1, "bytes": 800},
+            {"extension": null,   "files": 3, "bytes": 53},
+        ])
+    );
+    assert_eq!(
+        doc["summary"],
+        serde_json::json!({"total_bytes": 7953, "files": 7, "types": 4})
+    );
+    assert_eq!(doc["truncated"], false);
+    assert!(doc.get("entries").is_none());
+}
+
+#[test]
+fn by_type_json_top_truncates_and_summarize_empties_the_list() {
+    let (_d, root) = typed_sample();
+    let (doc, _) = json(&[p(&root), "--by-type", "--json", "--top", "2"]);
+    assert_eq!(doc["types"].as_array().unwrap().len(), 2);
+    assert_eq!(doc["truncated"], true);
+    assert_eq!(doc["summary"]["types"], 4);
+
+    let (doc, _) = json(&[p(&root), "--by-type", "--json", "--summarize"]);
+    assert_eq!(doc["types"], serde_json::json!([]));
+    assert_eq!(doc["summary"]["files"], 7);
+}
+
+#[test]
+fn by_type_default_sizing_is_disk_blocks() {
+    let (_d, root) = typed_sample();
+    let (doc, _) = json(&[p(&root), "--by-type", "--json"]);
+    assert_eq!(doc["size_mode"], "disk");
+}
+
+#[test]
+fn by_type_applies_filters_and_echoes_them() {
+    let (_d, root) = typed_sample();
+    let (doc, _) = json(&[
+        p(&root),
+        "--by-type",
+        "--json",
+        "--apparent-size",
+        "--exclude",
+        "media/**",
+        "--exclude",
+        "*.gz",
+    ]);
+    assert_eq!(
+        doc["filters"]["exclude"],
+        serde_json::json!(["media/**", "*.gz"])
+    );
+    assert_eq!(
+        doc["types"],
+        serde_json::json!([{"extension": null, "files": 3, "bytes": 53}])
+    );
+
+    let (doc, _) = json(&[
+        p(&root),
+        "--by-type",
+        "--json",
+        "--apparent-size",
+        "--include",
+        "*.mp4",
+    ]);
+    assert_eq!(doc["filters"]["include"], "*.mp4");
+    assert_eq!(
+        doc["types"],
+        serde_json::json!([{"extension": ".mp4", "files": 1, "bytes": 5000}])
+    );
+}
+
+#[test]
+fn by_type_text_output_is_a_table_with_a_total() {
+    let (_d, root) = typed_sample();
+    let out = ardisk(&[p(&root), "--by-type", "--apparent-size"]);
+    assert!(out.status.success());
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    let lines: Vec<&str> = stdout.lines().collect();
+
+    assert!(
+        lines[0].starts_with("Extension") && lines[0].ends_with("Share"),
+        "{stdout}"
+    );
+    assert!(lines[1].chars().all(|c| c == '-'));
+    assert!(
+        lines[2].starts_with(".mp4") && lines[2].contains("2"),
+        "{stdout}"
+    );
+    assert!(
+        lines.iter().any(|l| l.starts_with("(no extension)")),
+        "{stdout}"
+    );
+    let total = lines.last().unwrap();
+    assert!(
+        total.starts_with("Total") && total.ends_with("100.0%"),
+        "{stdout}"
+    );
+    assert!(!stdout.contains("node_modules"));
+}
+
+#[test]
+fn by_type_summarize_text_is_one_line() {
+    let (_d, root) = typed_sample();
+    let out = ardisk(&[p(&root), "--by-type", "--summarize", "--apparent-size"]);
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    assert_eq!(stdout, "7 files in 4 types, 7.77 KB total\n");
+}
+
+#[test]
+fn by_type_stdout_stays_valid_json_with_debug() {
+    let (_d, root) = typed_sample();
+    let (doc, stderr) = json(&[p(&root), "--by-type", "--json", "--debug"]);
+    assert_eq!(doc["mode"], "by_type");
+    assert!(
+        stderr.contains("Operational Metrics"),
+        "stderr was {stderr:?}"
+    );
+}
+
+#[test]
+fn by_type_output_does_not_depend_on_the_worker_count() {
+    let (_d, root) = typed_sample();
+    let one = json(&[p(&root), "--by-type", "--json", "-j", "1"]).0;
+    let many = json(&[p(&root), "--by-type", "--json", "-j", "8"]).0;
+    assert_eq!(one, many);
+}
+
+#[test]
+fn by_type_conflicts_are_usage_errors_without_output() {
+    let (_d, root) = typed_sample();
+    for extra in [
+        vec!["--duplicates"],
+        vec!["--largest-files", "3"],
+        vec!["--max-depth", "1"],
+        vec!["--threshold", "1KB"],
+    ] {
+        let mut args = vec![p(&root), "--by-type", "--json"];
+        args.extend(extra.iter());
+        let out = ardisk(&args);
+        assert_eq!(out.status.code(), Some(2), "{extra:?}");
+        assert!(out.stdout.is_empty(), "{extra:?}");
+    }
+}
+
+#[test]
+fn by_type_of_an_empty_directory_is_an_empty_document() {
+    let dir = TempDir::new().unwrap();
+    let root = fs::canonicalize(dir.path()).unwrap();
+    let (doc, _) = json(&[p(&root), "--by-type", "--json"]);
+    assert_eq!(doc["types"], serde_json::json!([]));
+    assert_eq!(
+        doc["summary"],
+        serde_json::json!({"total_bytes": 0, "files": 0, "types": 0})
+    );
+}

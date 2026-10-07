@@ -496,3 +496,157 @@ fn by_type_of_an_empty_directory_is_an_empty_document() {
         serde_json::json!({"total_bytes": 0, "files": 0, "types": 0})
     );
 }
+
+/// Visible and hidden files with distinct sizes.
+fn hidden_sample() -> (TempDir, PathBuf) {
+    let dir = TempDir::new().unwrap();
+    for (rel, len) in [
+        ("src/main.rs", 1_000),
+        (".env", 2_000),
+        (".cache/data/huge.bin", 40_000),
+        ("foo/.cache/x.bin", 8_000),
+        ("foo/visible.txt", 500),
+    ] {
+        let full = dir.path().join(rel);
+        fs::create_dir_all(full.parent().unwrap()).unwrap();
+        fs::write(full, data(5, len)).unwrap();
+    }
+    let root = fs::canonicalize(dir.path()).unwrap();
+    (dir, root)
+}
+
+#[test]
+fn hidden_entries_are_counted_by_default_and_skipped_with_no_hidden() {
+    let (_d, root) = hidden_sample();
+    let (all, _) = json(&[p(&root), "--json", "--apparent-size", "--summarize"]);
+    assert_eq!(all["filters"]["no_hidden"], false);
+    assert_eq!(all["summary"]["files"], 5);
+
+    let (vis, _) = json(&[
+        p(&root),
+        "--json",
+        "--apparent-size",
+        "--summarize",
+        "--no-hidden",
+    ]);
+    assert_eq!(vis["filters"]["no_hidden"], true);
+    assert_eq!(vis["summary"]["files"], 2);
+}
+
+#[test]
+fn no_hidden_works_in_every_mode() {
+    let (_d, root) = hidden_sample();
+
+    let (doc, _) = json(&[
+        p(&root),
+        "--json",
+        "--apparent-size",
+        "--largest-files",
+        "10",
+        "--no-hidden",
+    ]);
+    let paths: Vec<&str> = doc["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| e["path"].as_str().unwrap())
+        .collect();
+    assert_eq!(paths, ["src/main.rs", "foo/visible.txt"]);
+    assert_eq!(doc["filters"]["no_hidden"], true);
+
+    let (doc, _) = json(&[
+        p(&root),
+        "--json",
+        "--apparent-size",
+        "--by-type",
+        "--no-hidden",
+    ]);
+    assert_eq!(doc["summary"]["files"], 2);
+    assert_eq!(doc["summary"]["total_bytes"], 1_500);
+
+    let (doc, _) = json(&[p(&root), "--json", "--duplicates", "--no-hidden"]);
+    assert_eq!(doc["mode"], "duplicates");
+    assert_eq!(doc["filters"]["no_hidden"], true);
+    assert_eq!(doc["summary"]["groups"], 0);
+
+    let (doc, _) = json(&[p(&root), "--json", "--no-hidden"]);
+    let paths: Vec<&str> = doc["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| e["path"].as_str().unwrap())
+        .collect();
+    assert!(
+        paths
+            .iter()
+            .all(|p| !p.split('/').any(|c| c.starts_with('.') && c != "."))
+    );
+    assert!(paths.contains(&"foo"));
+}
+
+#[test]
+fn hidden_duplicates_are_found_by_default_and_hidden_by_no_hidden() {
+    let dir = TempDir::new().unwrap();
+    for rel in ["a/x.bin", ".h/y.bin"] {
+        let full = dir.path().join(rel);
+        fs::create_dir_all(full.parent().unwrap()).unwrap();
+        fs::write(full, data(7, 9_000)).unwrap();
+    }
+    let root = fs::canonicalize(dir.path()).unwrap();
+    let (doc, _) = json(&[p(&root), "--json", "--duplicates"]);
+    assert_eq!(doc["summary"]["groups"], 1);
+    let (doc, _) = json(&[p(&root), "--json", "--duplicates", "--no-hidden"]);
+    assert_eq!(doc["summary"]["groups"], 0);
+}
+
+#[test]
+fn no_hidden_and_no_ignore_are_independent_flags() {
+    let dir = TempDir::new().unwrap();
+    for (rel, len) in [
+        (".git/pack", 100),
+        ("node_modules/i.js", 200),
+        ("src/a.rs", 400),
+        (".env", 800),
+    ] {
+        let full = dir.path().join(rel);
+        fs::create_dir_all(full.parent().unwrap()).unwrap();
+        fs::write(full, data(1, len)).unwrap();
+    }
+    let root = fs::canonicalize(dir.path()).unwrap();
+    let total = |extra: &[&str]| -> u64 {
+        let mut args = vec![p(&root), "--json", "--by-type", "--apparent-size"];
+        args.extend(extra);
+        json(&args).0["summary"]["total_bytes"].as_u64().unwrap()
+    };
+    assert_eq!(total(&[]), 400 + 800);
+    assert_eq!(total(&["--no-hidden"]), 400);
+    assert_eq!(total(&["--no-ignore"]), 100 + 200 + 400 + 800);
+    assert_eq!(total(&["--no-hidden", "--no-ignore"]), 200 + 400);
+}
+
+#[test]
+fn a_hidden_scan_root_is_still_scanned_with_no_hidden() {
+    let (_d, root) = hidden_sample();
+    let hidden_root = root.join(".cache");
+    let (doc, _) = json(&[
+        p(&hidden_root),
+        "--json",
+        "--apparent-size",
+        "--by-type",
+        "--no-hidden",
+    ]);
+    assert_eq!(doc["summary"]["files"], 1);
+    assert_eq!(doc["summary"]["total_bytes"], 40_000);
+}
+
+#[test]
+fn no_hidden_output_does_not_depend_on_the_worker_count() {
+    let (_d, root) = hidden_sample();
+    for extra in [vec![], vec!["--largest-files", "5"], vec!["--by-type"]] {
+        let mut one = vec![p(&root), "--json", "--no-hidden", "-j", "1"];
+        let mut many = vec![p(&root), "--json", "--no-hidden", "-j", "8"];
+        one.extend(extra.iter());
+        many.extend(extra.iter());
+        assert_eq!(json(&one).0, json(&many).0, "differs for {extra:?}");
+    }
+}

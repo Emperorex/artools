@@ -1,6 +1,5 @@
 use ardisk::{
-    Collect, DEFAULT_IGNORES, ScanOutput, aggregate_sizes, build_config_with_exclude,
-    build_exclude_matcher,
+    Collect, DEFAULT_IGNORES, ScanConfig, ScanOutput, aggregate_sizes, build_exclude_matcher,
     duplicates::{DuplicateReport, find_duplicates},
     format_size, parallel_scan_report,
     report::{
@@ -18,6 +17,7 @@ use std::{
     fs,
     io::{self, Write},
     path::PathBuf,
+    sync::Arc,
     time::Instant,
 };
 
@@ -227,6 +227,14 @@ struct Args {
     /// Do not respect .gitignore / .ignore files (scan everything)
     #[arg(long = "no-ignore")]
     no_ignore: bool,
+
+    /// Skip hidden files and directories (names starting with '.'). A hidden
+    /// directory is not entered, so everything below it is skipped too. The
+    /// path you scan is never skipped, even if it is hidden. Independent of
+    /// --no-ignore: hidden entries are included by default, like du; use
+    /// --no-ignore to count .git, node_modules and other ignored entries.
+    #[arg(long = "no-hidden")]
+    no_hidden: bool,
 }
 
 /// Builds the set of directory names to skip, given `--no-ignore` and any
@@ -272,14 +280,15 @@ fn main() {
         }
     };
 
-    let config = build_config_with_exclude(
+    let config = Arc::new(ScanConfig {
         ignore_dirs,
         include_pattern,
-        args.debug,
-        args.apparent_size,
-        !args.no_ignore,
+        debug: args.debug,
+        apparent_size: args.apparent_size,
+        respect_gitignore: !args.no_ignore,
         exclude,
-    );
+        skip_hidden: args.no_hidden,
+    });
 
     let start_time = Instant::now();
 
@@ -353,6 +362,7 @@ fn main() {
                 exclude: args.exclude.clone(),
                 ignore: args.ignore.clone(),
                 no_ignore: args.no_ignore,
+                no_hidden: args.no_hidden,
             },
         };
         let stdout = io::stdout();
@@ -619,6 +629,36 @@ mod tests {
                 "--by-type must conflict with {:?}",
                 extra
             );
+        }
+    }
+
+    #[test]
+    fn no_hidden_is_off_by_default_and_parses() {
+        assert!(!Args::try_parse_from(["ardisk", "."]).unwrap().no_hidden);
+        assert!(
+            Args::try_parse_from(["ardisk", ".", "--no-hidden"])
+                .unwrap()
+                .no_hidden
+        );
+    }
+
+    #[test]
+    fn no_hidden_combines_with_every_mode_and_filter() {
+        for extra in [
+            vec!["--by-type"],
+            vec!["--duplicates"],
+            vec!["--largest-files", "5"],
+            vec!["--json"],
+            vec!["--no-ignore"],
+            vec!["--ignore", "vendor"],
+            vec!["--exclude", "*.log"],
+            vec!["--include", "*.rs"],
+        ] {
+            let mut argv = vec!["ardisk", ".", "--no-hidden"];
+            argv.extend(extra.iter());
+            let args = Args::try_parse_from(&argv)
+                .unwrap_or_else(|e| panic!("{argv:?} should parse: {e}"));
+            assert!(args.no_hidden);
         }
     }
 

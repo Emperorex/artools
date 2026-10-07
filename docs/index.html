@@ -543,13 +543,18 @@
         <span class="tool-name"><span class="ar">ar</span>disk</span>
         <span class="tool-alt">replaces du</span>
       </div>
-      <p class="tool-desc">Bottom-up parallel disk usage analysis. Shows the heaviest directories first with accurate rollup sizes using a single-pass DP algorithm.</p>
+      <p class="tool-desc">Bottom-up parallel disk usage analysis. Shows the heaviest directories first with accurate rollup sizes using a single-pass DP algorithm. Also lists the largest files, groups duplicates, and breaks usage down by file type, with JSON output for scripts.</p>
       <div class="tool-flags">
         <span class="flag">--top N</span>
         <span class="flag">--max-depth</span>
         <span class="flag">--threshold</span>
         <span class="flag">--include</span>
+        <span class="flag">--exclude</span>
         <span class="flag">--summarize</span>
+        <span class="flag">--largest-files</span>
+        <span class="flag">--by-type</span>
+        <span class="flag">--duplicates</span>
+        <span class="flag">--json</span>
       </div>
     </div>
 
@@ -616,6 +621,15 @@
         <br>
         <br><span class="uc-comment"># Show only directories over 1GB</span>
         <br><span class="uc-cmd">ardisk</span> <span class="uc-arg">/</span> <span class="uc-flag">--threshold</span> <span class="uc-arg">1GB</span>
+        <br>
+        <br><span class="uc-comment"># The 20 largest files</span>
+        <br><span class="uc-cmd">ardisk</span> <span class="uc-arg">~</span> <span class="uc-flag">--largest-files</span> <span class="uc-arg">20</span>
+        <br>
+        <br><span class="uc-comment"># Which file types take the space?</span>
+        <br><span class="uc-cmd">ardisk</span> <span class="uc-arg">~</span> <span class="uc-flag">--by-type</span>
+        <br>
+        <br><span class="uc-comment"># Find duplicate files (report only)</span>
+        <br><span class="uc-cmd">ardisk</span> <span class="uc-arg">~</span> <span class="uc-flag">--duplicates</span> <span class="uc-flag">--min-size</span> <span class="uc-arg">1MB</span>
       </div>
     </div>
 

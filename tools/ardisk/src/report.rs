@@ -137,6 +137,9 @@ pub struct Filters {
     pub ignore: Vec<String>,
     /// `--no-ignore`: built-in ignores and `.gitignore` rules were off.
     pub no_ignore: bool,
+    /// `--no-hidden`: hidden files and directories (names starting with `.`)
+    /// were skipped.
+    pub no_hidden: bool,
 }
 
 /// Facts about the run that are common to every mode.

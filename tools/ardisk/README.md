@@ -37,6 +37,7 @@ ardisk [OPTIONS] [PATH]
 | `--json`            | —     | —         | Print the result as one JSON document on stdout (see [JSON output](#json-output)) |
 | `--include PATTERN` | —     | —         | Only count files matching this glob pattern (e.g. `"*.rs"`, `"*.mp4"`) |
 | `--exclude GLOB`    | —     | —         | Exclude files/dirs matching a gitignore-style glob; repeatable (see [Excluding paths](#excluding-paths)) |
+| `--no-hidden`       | —     | —         | Skip files and directories whose name starts with `.` (see [Hidden files](#hidden-files)) |
 | `--apparent-size`   | —     | —         | Use logical file sizes instead of block allocation — matches `du -sh`  |
 | `--jobs N`          | `-j`  | CPU-aware | Number of parallel worker threads (1–128; default is half the available cores, clamped to 1–16) |
 | `--debug`           | `-d`  | —         | Print scan statistics and errors to stderr                             |
@@ -49,6 +50,23 @@ Supported in `--threshold`: `B`, `KB`, `MB`, `GB`, `TB` (case-insensitive).
 ardisk . --threshold 500MB
 ardisk . --threshold 1.5GB
 ```
+
+## Hidden files
+
+Like `du`, ardisk counts hidden files and directories (names starting with `.`) by default, so totals match `du -sh`. Pass `--no-hidden` to leave them out:
+
+```bash
+ardisk ~ --no-hidden             # only non-dot entries
+ardisk ~ --by-type               # includes ~/.cache, ~/.cargo, ...
+ardisk ~/project --no-ignore     # also counts .git
+```
+
+- A hidden directory is **not entered**, so everything below it is skipped, whatever the names down there are.
+- `--no-hidden` and `--no-ignore` are independent: `--no-ignore` re-enables `.git`, `node_modules` and `.gitignore`d paths, `--no-hidden` removes dot-entries. Use both for "everything that is not a dotfile".
+- Works with every mode (`--by-type`, `--largest-files`, `--duplicates`, `--json`) and with `--ignore`, `--include` and `--exclude`; an entry is counted only if every filter lets it through.
+- A hard link whose hidden name is skipped is still counted through its visible name.
+- The scan root is never skipped: `ardisk ~/.cache --no-hidden` scans `~/.cache`, but not its dot-entries.
+- Only the leading dot matters (`.env`, `.cache`); the Windows "hidden" attribute is not consulted.
 
 ## Default ignores
 
@@ -197,7 +215,7 @@ Every document is one object with the same header:
 | `mode`           | `"directories"`, `"largest_files"`, `"duplicates"` or `"by_type"` |
 | `root`           | Canonical absolute path that was scanned |
 | `size_mode`      | `"disk"` (block allocation, the default) or `"apparent"` (logical length, `--apparent-size`). Always `"apparent"` for `duplicates`. |
-| `filters`        | `include` (string or `null`), `exclude` (array), `ignore` (array, extra `--ignore` names only), `no_ignore` (bool) |
+| `filters`        | `include` (string or `null`), `exclude` (array), `ignore` (array, extra `--ignore` names only), `no_ignore` (bool), `no_hidden` (bool) |
 | `params`         | Options that shape the result, mode-specific (below) |
 | `summary`        | Totals for the **whole scan**, mode-specific (below) |
 | `entries` / `groups` / `types` | The listed items |
@@ -215,7 +233,7 @@ The list obeys the same limits as the text report: `--top` (default 20) for dire
   "mode": "directories",
   "root": "/home/me/project",
   "size_mode": "disk",
-  "filters": { "include": null, "exclude": ["target/**"], "ignore": [], "no_ignore": false },
+  "filters": { "include": null, "exclude": ["target/**"], "ignore": [], "no_ignore": false, "no_hidden": false },
   "params": { "top": 20, "max_depth": null, "threshold_bytes": null },
   "summary": { "total_bytes": 1073741824, "files": 15230, "directories": 842 },
   "entries": [

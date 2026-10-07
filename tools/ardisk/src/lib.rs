@@ -238,6 +238,13 @@ pub struct ScanConfig {
     /// User-supplied `--exclude` patterns, compiled with gitignore semantics
     /// and rooted at the scan root. See [`build_exclude_matcher`].
     pub exclude: Option<Gitignore>,
+    /// `--no-hidden`: skip files and directories whose name starts with `.`.
+    /// A hidden directory is not entered, so nothing below it is scanned,
+    /// whatever the names down there are. Independent of the ignore rules
+    /// (`ignore_dirs`, `respect_gitignore`) and of `exclude`: an entry is
+    /// scanned only if every filter lets it through. The scan root itself is
+    /// never skipped, even if its own name starts with a dot.
+    pub skip_hidden: bool,
 }
 
 /// Builds a `ScanConfig` from the given parameters.
@@ -275,6 +282,7 @@ pub fn build_config_with_exclude(
         apparent_size,
         respect_gitignore,
         exclude,
+        skip_hidden: false,
     })
 }
 
@@ -610,6 +618,13 @@ pub fn scan_directory(
         let file_name = os_file_name.to_string_lossy();
         let entry_path = entry.path();
         let is_dir = file_type.is_dir();
+
+        // --no-hidden: checked on the entry's own name only. Skipping a
+        // directory here means it is never queued, so its contents are not
+        // scanned either. Cheap, so it runs before the pattern matchers.
+        if config.skip_hidden && file_name.starts_with('.') {
+            continue;
+        }
 
         // --exclude is independent of .gitignore handling: it applies even
         // with --no-ignore, and a `!pattern` in a .gitignore can't undo it.

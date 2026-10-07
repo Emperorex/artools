@@ -1550,6 +1550,7 @@ fn json_echoes_filters_and_apparent_size_mode() {
             exclude: vec!["*.log".into(), "target/**".into()],
             ignore: vec!["vendor".into()],
             no_ignore: true,
+            no_hidden: true,
         },
     };
     let all = dir_maps(&root, &[("", 1)]);
@@ -1569,6 +1570,7 @@ fn json_echoes_filters_and_apparent_size_mode() {
     );
     assert_eq!(doc["filters"]["ignore"], serde_json::json!(["vendor"]));
     assert_eq!(doc["filters"]["no_ignore"], true);
+    assert_eq!(doc["filters"]["no_hidden"], true);
 }
 
 #[test]
@@ -2176,4 +2178,238 @@ fn json_by_type_reports_apparent_size_mode() {
     m.apparent_size = true;
     let (doc, _) = to_json(|w| write_by_type(w, &m, 20, false, &TypeTable::default()));
     assert_eq!(doc["size_mode"], "apparent");
+}
+
+// ── --no-hidden ──────────────────────────────────────────────────────────────
+
+/// Scan config with `--no-hidden` and the ignore rules switched as asked.
+fn hidden_config(skip_hidden: bool, respect_ignores: bool) -> std::sync::Arc<ardisk::ScanConfig> {
+    let ignore_dirs: HashSet<String> = if respect_ignores {
+        DEFAULT_IGNORES.iter().map(|s| s.to_string()).collect()
+    } else {
+        HashSet::new()
+    };
+    std::sync::Arc::new(ardisk::ScanConfig {
+        ignore_dirs,
+        include_pattern: None,
+        debug: false,
+        apparent_size: true,
+        respect_gitignore: respect_ignores,
+        exclude: None,
+        skip_hidden,
+    })
+}
+
+/// Sizes are distinct powers of two so a total identifies exactly which files
+/// were counted.
+fn hidden_tree() -> (TempDir, PathBuf) {
+    make_sized_tree(&[
+        ("src/main.rs", 1),
+        ("README.md", 2),
+        (".env", 4),
+        (".cache/data/huge.bin", 8),
+        ("foo/.cache/x.bin", 16),
+        ("foo/visible.txt", 32),
+        (".git/objects/pack", 64),
+        ("node_modules/pkg/i.js", 128),
+    ])
+}
+
+fn total_of(root: &Path, skip_hidden: bool, respect_ignores: bool, workers: usize) -> u64 {
+    let (_raw, content, _) = parallel_scan_collect(
+        root.to_path_buf(),
+        workers,
+        hidden_config(skip_hidden, respect_ignores),
+        Collect::Nothing,
+    );
+    content.values().sum()
+}
+
+#[test]
+fn hidden_is_included_by_default_like_du() {
+    let (_d, root) = hidden_tree();
+    // default ignores drop .git and node_modules, hidden stays: 1+2+4+8+16+32
+    assert_eq!(total_of(&root, false, true, 2), 63);
+}
+
+#[test]
+fn no_hidden_skips_dotfiles_and_dot_directories_recursively() {
+    let (_d, root) = hidden_tree();
+    // only src/main.rs, README.md, foo/visible.txt
+    assert_eq!(total_of(&root, true, true, 2), 1 + 2 + 32);
+}
+
+#[test]
+fn no_hidden_is_independent_of_no_ignore() {
+    let (_d, root) = hidden_tree();
+    // --no-ignore alone: everything
+    assert_eq!(total_of(&root, false, false, 2), 255);
+    // both: hidden still skipped, node_modules now visible
+    assert_eq!(total_of(&root, true, false, 2), 1 + 2 + 32 + 128);
+}
+
+#[test]
+fn no_hidden_does_not_enter_hidden_directories() {
+    let (_d, root) = hidden_tree();
+    let (raw, _content, _) = parallel_scan_collect(
+        root.clone(),
+        2,
+        hidden_config(true, false),
+        Collect::Nothing,
+    );
+    assert!(raw.contains_key(&root.join("foo")));
+    assert!(!raw.contains_key(&root.join(".cache")));
+    assert!(!raw.contains_key(&root.join(".cache/data")));
+    assert!(!raw.contains_key(&root.join("foo/.cache")));
+    assert!(!raw.contains_key(&root.join(".git")));
+}
+
+#[test]
+fn no_hidden_never_skips_the_scan_root_even_if_it_is_hidden() {
+    let (_d, root) = hidden_tree();
+    let hidden_root = root.join(".cache");
+    let (raw, content, _) = parallel_scan_collect(
+        hidden_root.clone(),
+        2,
+        hidden_config(true, true),
+        Collect::Nothing,
+    );
+    // The root is scanned; its non-hidden subdirectory is too.
+    assert!(raw.contains_key(&hidden_root));
+    assert_eq!(content.values().sum::<u64>(), 8);
+
+    // Non-hidden children of a hidden root are scanned; hidden ones are not.
+    let (_d2, r2) =
+        make_sized_tree(&[(".top/a.txt", 5), (".top/.b/c.txt", 7), (".top/d/e.txt", 9)]);
+    let top = r2.join(".top");
+    let (_raw, content, _) =
+        parallel_scan_collect(top.clone(), 2, hidden_config(true, true), Collect::Nothing);
+    let total: u64 = content.values().sum();
+    assert_eq!(total, 5 + 9);
+}
+
+#[test]
+fn no_hidden_applies_to_every_collection_mode() {
+    let (_d, root) = make_sized_tree(&[
+        ("a/one.bin", 10),
+        ("a/.two.bin", 10),
+        (".h/three.bin", 10),
+        ("b/four.bin", 10),
+    ]);
+    let names = |files: &[FileEntry]| -> Vec<String> {
+        let mut v: Vec<String> = files
+            .iter()
+            .map(|f| f.path.strip_prefix(&root).unwrap().display().to_string())
+            .collect();
+        v.sort();
+        v
+    };
+
+    let out = ardisk::parallel_scan_report(
+        root.clone(),
+        2,
+        hidden_config(true, true),
+        Collect::Largest(10),
+    );
+    assert_eq!(names(&out.files), ["a/one.bin", "b/four.bin"]);
+    assert_eq!(out.file_count, 2);
+
+    let out = ardisk::parallel_scan_report(
+        root.clone(),
+        2,
+        hidden_config(true, true),
+        Collect::Duplicates { min_len: 1 },
+    );
+    assert_eq!(names(&out.files), ["a/one.bin", "b/four.bin"]);
+
+    let out =
+        ardisk::parallel_scan_report(root.clone(), 2, hidden_config(true, true), Collect::ByType);
+    assert_eq!(out.types.total_files, 2);
+    assert_eq!(out.types.total_bytes, 20);
+
+    // and without the flag all four are seen
+    let out = ardisk::parallel_scan_report(
+        root.clone(),
+        2,
+        hidden_config(false, true),
+        Collect::Largest(10),
+    );
+    assert_eq!(out.files.len(), 4);
+}
+
+#[test]
+fn no_hidden_composes_with_ignore_exclude_and_include() {
+    let (_d, root) = make_sized_tree(&[
+        ("keep/a.log", 1),
+        ("keep/b.txt", 2),
+        ("keep/.c.txt", 4),
+        ("vendor/d.txt", 8),
+        ("gen/e.txt", 16),
+        (".h/f.txt", 32),
+    ]);
+    let exclude = build_exclude_matcher(&root, &["gen/**".to_string()]).unwrap();
+    let config = std::sync::Arc::new(ardisk::ScanConfig {
+        ignore_dirs: ["vendor".to_string()].into_iter().collect(),
+        include_pattern: Some(Pattern::new("*.txt").unwrap()),
+        debug: false,
+        apparent_size: true,
+        respect_gitignore: true,
+        exclude,
+        skip_hidden: true,
+    });
+    let (_raw, content, _) = parallel_scan_collect(root.clone(), 2, config, Collect::Nothing);
+    // a.log: --include; .c.txt and .h: hidden; vendor: --ignore; gen/*: --exclude
+    assert_eq!(content.get(&root).copied().unwrap_or(0), 0);
+    assert_eq!(content.get(&root.join("keep")).copied(), Some(2));
+    assert_eq!(content.get(&root.join("vendor")).copied(), None);
+}
+
+#[cfg(unix)]
+#[test]
+fn skipped_hidden_hard_link_does_not_consume_the_inode() {
+    let (_d, root) = make_sized_tree(&[("real.bin", 100)]);
+    // The hidden name is walked first or second depending on directory order;
+    // either way the visible name must be counted exactly once.
+    fs::hard_link(root.join("real.bin"), root.join(".alias.bin")).unwrap();
+    for workers in [1, 4] {
+        let out = ardisk::parallel_scan_report(
+            root.clone(),
+            workers,
+            hidden_config(true, true),
+            Collect::Largest(10),
+        );
+        assert_eq!(out.file_count, 1, "workers={workers}");
+        assert_eq!(out.files.len(), 1);
+        assert_eq!(out.files[0].path, root.join("real.bin"));
+        assert_eq!(out.content_sizes.get(&root).copied(), Some(100));
+    }
+    // Without the flag the pair still counts once.
+    let out = ardisk::parallel_scan_report(
+        root.clone(),
+        2,
+        hidden_config(false, true),
+        Collect::Largest(10),
+    );
+    assert_eq!(out.file_count, 1);
+}
+
+#[test]
+fn no_hidden_result_does_not_depend_on_worker_count() {
+    let (_d, root) = hidden_tree();
+    let baseline = total_of(&root, true, false, 1);
+    for workers in [2, 3, 8] {
+        assert_eq!(total_of(&root, true, false, workers), baseline);
+    }
+}
+
+#[test]
+fn only_a_leading_dot_makes_a_name_hidden() {
+    let (_d, root) = make_sized_tree(&[
+        ("a.b", 1),
+        ("trailing.", 2),
+        ("dir.d/x", 4),
+        (".lead", 8),
+        ("..double", 16),
+    ]);
+    assert_eq!(total_of(&root, true, true, 2), 1 + 2 + 4);
 }

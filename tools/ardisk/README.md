@@ -34,6 +34,7 @@ ardisk [OPTIONS] [PATH]
 | `--by-type`         | —     | —         | Show files and total size per file extension, with each type's share (see [Breakdown by file type](#breakdown-by-file-type)) |
 | `--duplicates`      | —     | —         | Report groups of files with identical content; read-only (see [Finding duplicate files](#finding-duplicate-files)) |
 | `--min-size SIZE`   | —     | `1B`      | With `--duplicates`: ignore files smaller than `SIZE` (e.g. `1MB`) |
+| `--inodes`          | —     | —         | Count inodes instead of bytes, like `du --inodes` (see [Counting inodes](#counting-inodes)) |
 | `--json`            | —     | —         | Print the result as one JSON document on stdout (see [JSON output](#json-output)) |
 | `--include PATTERN` | —     | —         | Only count files matching this glob pattern (e.g. `"*.rs"`, `"*.mp4"`) |
 | `--exclude GLOB`    | —     | —         | Exclude files/dirs matching a gitignore-style glob; repeatable (see [Excluding paths](#excluding-paths)) |
@@ -191,6 +192,34 @@ Groups are formed from the 256-bit hash plus the length. Files are not additiona
 
 `--duplicates` replaces the directory report, so it cannot be combined with `--largest-files`, `--max-depth` or `--threshold`.
 
+## Counting inodes
+
+When a filesystem fails with "No space left on device" while `df` still shows free space, it has usually run out of **inodes**, not bytes. `--inodes` counts them per directory, like `du --inodes`:
+
+```bash
+ardisk /var --inodes --top 5
+ardisk /var --inodes --threshold 10000   # only directories with >= 10000 inodes
+ardisk /var --inodes -s                  # just the total
+```
+
+```
+    412873  /var
+    398212  /var/lib
+    391004  /var/lib/docker
+      6120  /var/cache
+      ...
+```
+
+- Every directory (the scanned one included), regular file, symlink and special file counts as **1**, whatever its size. Symlinks are counted but never followed.
+- A hard-linked inode counts once per scan, as in `du`.
+- Counts roll up: a directory's number includes everything below it. The list is sorted by count, biggest first; ties are ordered by path.
+- `--threshold` is a plain whole number here (`10000`), not a size.
+- Works with `--top`, `--max-depth`, `--summarize`, `--json`, `--include` (matched against file and symlink names; directories always cost their own inode), `--exclude`, `--ignore`, `--no-ignore` and `--no-hidden`. By default `.git`, `node_modules` and `.gitignore`d paths are skipped as usual, so use `--no-ignore` to match `du --inodes` exactly.
+- Cannot be combined with `--by-type`, `--duplicates`, `--largest-files`, `--min-size` or `--apparent-size`.
+- Directories that cannot be read are not counted (use `--debug` to see them).
+
+In JSON the document has `"mode": "inodes"`, no `size_mode`, `params.threshold_inodes`, `summary.total_inodes` and entries of the form `{ "path": "var/lib", "inodes": 398212, "depth": 2, "kind": "directory" }`.
+
 ## JSON output
 
 `--json` changes only the **output format**. It does not turn on `--largest-files`, `--duplicates` or `--by-type`; it serializes the result of whichever mode you picked:
@@ -212,9 +241,9 @@ Every document is one object with the same header:
 | Key              | Meaning |
 |------------------|---------|
 | `schema_version` | Integer. Changes only for incompatible changes. New keys may be added without a bump, so ignore keys you don't know. |
-| `mode`           | `"directories"`, `"largest_files"`, `"duplicates"` or `"by_type"` |
+| `mode`           | `"directories"`, `"largest_files"`, `"duplicates"`, `"by_type"` or `"inodes"` |
 | `root`           | Canonical absolute path that was scanned |
-| `size_mode`      | `"disk"` (block allocation, the default) or `"apparent"` (logical length, `--apparent-size`). Always `"apparent"` for `duplicates`. |
+| `size_mode`      | Absent for `inodes`. `"disk"` (block allocation, the default) or `"apparent"` (logical length, `--apparent-size`). Always `"apparent"` for `duplicates`. |
 | `filters`        | `include` (string or `null`), `exclude` (array), `ignore` (array, extra `--ignore` names only), `no_ignore` (bool), `no_hidden` (bool) |
 | `params`         | Options that shape the result, mode-specific (below) |
 | `summary`        | Totals for the **whole scan**, mode-specific (below) |

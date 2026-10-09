@@ -3,8 +3,8 @@ use ardisk::{
     duplicates::{DuplicateReport, find_duplicates},
     format_size, parallel_scan_report,
     report::{
-        DirectoryQuery, DirectorySummary, Filters, ReportMeta, render_by_type_text,
-        select_directories, write_by_type, write_directories, write_duplicates,
+        DirectoryQuery, DirectorySummary, Filters, InodeSummary, ReportMeta, render_by_type_text,
+        select_directories, write_by_type, write_directories, write_duplicates, write_inodes,
         write_largest_files,
     },
 };
@@ -20,6 +20,16 @@ use std::{
     sync::Arc,
     time::Instant,
 };
+
+/// Parses `--threshold` under `--inodes`: a plain number of inodes.
+fn parse_count(s: &str) -> Result<u64, String> {
+    s.trim().parse::<u64>().map_err(|_| {
+        format!(
+            "Invalid threshold '{}'. With --inodes use a whole number, e.g. 10000.",
+            s.trim()
+        )
+    })
+}
 
 /// Parses a human-readable size string into bytes.
 /// Supported suffixes: B, KB, MB, GB, TB (case-insensitive).
@@ -178,7 +188,7 @@ struct Args {
         // error when the required flag conflicts with another flag that is
         // present, so --min-size would be silently accepted (and ignored)
         // next to every mode that conflicts with --duplicates.
-        conflicts_with_all = ["largest_files", "by_type", "max_depth", "threshold"],
+        conflicts_with_all = ["largest_files", "by_type", "inodes", "max_depth", "threshold"],
         value_parser = parse_threshold
     )]
     min_size: Option<u64>,
@@ -205,6 +215,20 @@ struct Args {
         conflicts_with_all = ["largest_files", "duplicates", "max_depth", "threshold"]
     )]
     by_type: bool,
+
+    /// Count inodes instead of bytes, like `du --inodes`: useful when a
+    /// filesystem runs out of inodes rather than space. Every directory
+    /// (the scanned one included), file, symlink and special file counts as
+    /// one; a hard-linked inode counts once. Shows the directories with the
+    /// most inodes. --threshold is then a plain number (e.g. 10000). Respects
+    /// --include (files and symlinks by name), --exclude, --ignore,
+    /// --no-hidden and .gitignore; works with --top, --max-depth, --summarize
+    /// and --json.
+    #[arg(
+        long,
+        conflicts_with_all = ["largest_files", "duplicates", "by_type", "apparent_size", "min_size"]
+    )]
+    inodes: bool,
 
     /// Use logical file sizes instead of physical block allocation.
     /// Matches the output of du -sh on macOS and Linux.
@@ -288,6 +312,7 @@ fn main() {
         respect_gitignore: !args.no_ignore,
         exclude,
         skip_hidden: args.no_hidden,
+        inodes: args.inodes,
     });
 
     let start_time = Instant::now();
@@ -332,9 +357,14 @@ fn main() {
 
     let duration = start_time.elapsed();
 
-    // Parse --threshold if provided, exit early on invalid input
+    // Parse --threshold if provided, exit early on invalid input. With
+    // --inodes it is a plain count, otherwise a size.
     let threshold_bytes: Option<u64> = match &args.threshold {
-        Some(t) => match parse_threshold(t) {
+        Some(t) => match if args.inodes {
+            parse_count(t)
+        } else {
+            parse_threshold(t)
+        } {
             Ok(bytes) => Some(bytes),
             Err(e) => {
                 eprintln!("{}", format!("error: {}", e).red());
@@ -367,7 +397,16 @@ fn main() {
         };
         let stdout = io::stdout();
         let mut out = io::BufWriter::new(stdout.lock());
-        let written = if let Some(report) = &duplicate_report {
+        let written = if args.inodes {
+            let selection =
+                select_directories(&aggregated_sizes, &aggregated_content, &target_path, &query);
+            let summary = InodeSummary {
+                total_inodes: root_total,
+                files: file_count,
+                directories: raw_sizes.len() as u64,
+            };
+            write_inodes(&mut out, &meta, &query, &selection, summary)
+        } else if let Some(report) = &duplicate_report {
             warn_unreadable(report, args.debug);
             write_duplicates(&mut out, &meta, args.top, args.summarize, min_len, report)
         } else if args.by_type {
@@ -410,7 +449,9 @@ fn main() {
         }
     } else {
         if args.debug {
-            let title = if args.duplicates {
+            let title = if args.inodes {
+                "=== Inodes per Directory ==="
+            } else if args.duplicates {
                 "=== Duplicate Files ==="
             } else if args.by_type {
                 "=== File Types ==="
@@ -432,6 +473,20 @@ fn main() {
             // the per-directory report.
             for file in &largest_files {
                 println!("{:>10}  {}", format_size(file.size), file.path.display());
+            }
+        } else if args.inodes {
+            if args.summarize {
+                println!("{:>10}  {}", root_total, target_path.display());
+            } else {
+                let selection = select_directories(
+                    &aggregated_sizes,
+                    &aggregated_content,
+                    &target_path,
+                    &query,
+                );
+                for (path, count) in &selection.entries {
+                    println!("{:>10}  {}", count, path.display());
+                }
             }
         } else if args.summarize {
             // --summarize: print only the root total and exit
@@ -629,6 +684,51 @@ mod tests {
                 "--by-type must conflict with {:?}",
                 extra
             );
+        }
+    }
+
+    #[test]
+    fn inodes_parses_and_combines_with_directory_report_options() {
+        assert!(!Args::try_parse_from(["ardisk", "."]).unwrap().inodes);
+        for extra in [
+            vec![],
+            vec!["--json"],
+            vec!["--summarize"],
+            vec!["--top", "5"],
+            vec!["--max-depth", "2"],
+            vec!["--threshold", "1000"],
+            vec!["--no-hidden", "--no-ignore"],
+            vec!["--include", "*.rs", "--exclude", "*.log", "--ignore", "x"],
+        ] {
+            let mut argv = vec!["ardisk", ".", "--inodes"];
+            argv.extend(extra.iter());
+            let args = Args::try_parse_from(&argv)
+                .unwrap_or_else(|e| panic!("{argv:?} should parse: {e}"));
+            assert!(args.inodes);
+        }
+    }
+
+    #[test]
+    fn inodes_conflicts_with_every_other_mode_and_with_sizes() {
+        for extra in [
+            vec!["--by-type"],
+            vec!["--duplicates"],
+            vec!["--largest-files", "3"],
+            vec!["--apparent-size"],
+            vec!["--duplicates", "--min-size", "1MB"],
+        ] {
+            let mut argv = vec!["ardisk", ".", "--inodes"];
+            argv.extend(extra.iter());
+            assert!(Args::try_parse_from(&argv).is_err(), "{argv:?}");
+        }
+    }
+
+    #[test]
+    fn inode_threshold_is_a_plain_whole_number() {
+        assert_eq!(super::parse_count(" 10000 "), Ok(10_000));
+        assert_eq!(super::parse_count("0"), Ok(0));
+        for bad in ["", "1MB", "1.5", "-3", "1e3", "ten"] {
+            assert!(super::parse_count(bad).is_err(), "{bad:?}");
         }
     }
 

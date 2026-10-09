@@ -650,3 +650,97 @@ fn no_hidden_output_does_not_depend_on_the_worker_count() {
         assert_eq!(json(&one).0, json(&many).0, "differs for {extra:?}");
     }
 }
+
+fn inode_sample() -> (TempDir, PathBuf) {
+    let dir = TempDir::new().unwrap();
+    for rel in ["a/1", "a/2", "a/b/3", "c/4", ".h/5", "node_modules/6"] {
+        let full = dir.path().join(rel);
+        fs::create_dir_all(full.parent().unwrap()).unwrap();
+        fs::write(full, data(1, 10)).unwrap();
+    }
+    let root = fs::canonicalize(dir.path()).unwrap();
+    (dir, root)
+}
+
+#[test]
+fn inodes_mode_prints_one_inodes_document() {
+    let (_d, root) = inode_sample();
+    let (doc, stderr) = json(&[p(&root), "--json", "--inodes"]);
+    assert_eq!(stderr, "");
+    assert_eq!(doc["schema_version"], 1);
+    assert_eq!(doc["mode"], "inodes");
+    assert!(doc.get("size_mode").is_none(), "no sizes involved");
+    // root, a, a/b, c, .h + 5 files (node_modules is ignored)
+    assert_eq!(doc["summary"]["total_inodes"], 10);
+    assert_eq!(doc["summary"]["files"], 5);
+    assert_eq!(doc["summary"]["directories"], 5);
+    let entries = doc["entries"].as_array().unwrap();
+    assert_eq!(entries[0]["path"], ".");
+    assert_eq!(entries[0]["inodes"], 10);
+    assert_eq!(entries[1]["path"], "a");
+    assert_eq!(entries[1]["inodes"], 5);
+    assert!(entries[0].get("bytes").is_none());
+    assert_eq!(doc["params"]["threshold_inodes"], serde_json::Value::Null);
+}
+
+#[test]
+fn inodes_text_output_is_plain_integers() {
+    let (_d, root) = inode_sample();
+    let out = ardisk(&[p(&root), "--inodes", "--no-ignore", "-s"]);
+    assert!(out.status.success());
+    let text = String::from_utf8(out.stdout).unwrap();
+    assert_eq!(text.trim(), format!("12  {}", p(&root)));
+}
+
+#[test]
+fn inodes_threshold_top_depth_and_hidden() {
+    let (_d, root) = inode_sample();
+    let (doc, _) = json(&[p(&root), "--json", "--inodes", "--threshold", "5"]);
+    let paths: Vec<&str> = doc["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| e["path"].as_str().unwrap())
+        .collect();
+    assert_eq!(paths, [".", "a"]);
+    assert_eq!(doc["params"]["threshold_inodes"], 5);
+
+    let (doc, _) = json(&[
+        p(&root),
+        "--json",
+        "--inodes",
+        "--max-depth",
+        "0",
+        "--no-hidden",
+    ]);
+    assert_eq!(doc["entries"].as_array().unwrap().len(), 1);
+    assert_eq!(doc["summary"]["total_inodes"], 8);
+    assert_eq!(doc["filters"]["no_hidden"], true);
+}
+
+#[test]
+fn inodes_rejects_sizes_and_incompatible_modes() {
+    let (_d, root) = inode_sample();
+    for extra in [
+        vec!["--by-type"],
+        vec!["--duplicates"],
+        vec!["--largest-files", "3"],
+        vec!["--apparent-size"],
+        vec!["--threshold", "1MB"],
+        vec!["--threshold", "-1"],
+    ] {
+        let mut args = vec![p(&root), "--json", "--inodes"];
+        args.extend(extra.iter());
+        let out = ardisk(&args);
+        assert!(!out.status.success(), "{args:?} should be rejected");
+        assert!(out.stdout.is_empty());
+    }
+}
+
+#[test]
+fn inodes_output_does_not_depend_on_the_worker_count() {
+    let (_d, root) = inode_sample();
+    let one = json(&[p(&root), "--json", "--inodes", "--no-ignore", "-j", "1"]).0;
+    let many = json(&[p(&root), "--json", "--inodes", "--no-ignore", "-j", "8"]).0;
+    assert_eq!(one, many);
+}

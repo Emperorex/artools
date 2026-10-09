@@ -2197,6 +2197,7 @@ fn hidden_config(skip_hidden: bool, respect_ignores: bool) -> std::sync::Arc<ard
         respect_gitignore: respect_ignores,
         exclude: None,
         skip_hidden,
+        inodes: false,
     })
 }
 
@@ -2356,6 +2357,7 @@ fn no_hidden_composes_with_ignore_exclude_and_include() {
         respect_gitignore: true,
         exclude,
         skip_hidden: true,
+        inodes: false,
     });
     let (_raw, content, _) = parallel_scan_collect(root.clone(), 2, config, Collect::Nothing);
     // a.log: --include; .c.txt and .h: hidden; vendor: --ignore; gen/*: --exclude
@@ -2412,4 +2414,125 @@ fn only_a_leading_dot_makes_a_name_hidden() {
         ("..double", 16),
     ]);
     assert_eq!(total_of(&root, true, true, 2), 1 + 2 + 4);
+}
+
+// ── --inodes ─────────────────────────────────────────────────────────────────
+
+fn inode_config(
+    respect_ignores: bool,
+    skip_hidden: bool,
+    include: Option<&str>,
+) -> std::sync::Arc<ardisk::ScanConfig> {
+    let ignore_dirs: HashSet<String> = if respect_ignores {
+        DEFAULT_IGNORES.iter().map(|s| s.to_string()).collect()
+    } else {
+        HashSet::new()
+    };
+    std::sync::Arc::new(ardisk::ScanConfig {
+        ignore_dirs,
+        include_pattern: include.map(|p| Pattern::new(p).unwrap()),
+        debug: false,
+        apparent_size: false,
+        respect_gitignore: respect_ignores,
+        exclude: None,
+        skip_hidden,
+        inodes: true,
+    })
+}
+
+/// Aggregated per-directory inode counts.
+fn inode_counts(
+    root: &Path,
+    config: std::sync::Arc<ardisk::ScanConfig>,
+    workers: usize,
+) -> HashMap<PathBuf, u64> {
+    let (raw, _content, _) =
+        parallel_scan_collect(root.to_path_buf(), workers, config, Collect::Nothing);
+    aggregate_sizes(&raw, root)
+}
+
+#[test]
+fn inodes_count_directories_and_files_including_the_root() {
+    // root, a, a/b, c = 4 directories + 4 files, whatever the file sizes are
+    let (_d, root) = make_sized_tree(&[("a/1", 10), ("a/2", 0), ("a/b/3", 5_000_000), ("c/4", 1)]);
+    let n = inode_counts(&root, inode_config(true, false, None), 2);
+    assert_eq!(n[&root], 8);
+    assert_eq!(n[&root.join("a")], 5); // a, 1, 2, b, 3
+    assert_eq!(n[&root.join("a/b")], 2);
+    assert_eq!(n[&root.join("c")], 2);
+}
+
+#[test]
+fn inodes_count_an_empty_directory_as_one() {
+    let (_d, root) = make_sized_tree(&[("f", 1)]);
+    fs::create_dir(root.join("empty")).unwrap();
+    let n = inode_counts(&root, inode_config(true, false, None), 1);
+    assert_eq!(n[&root.join("empty")], 1);
+    assert_eq!(n[&root], 3);
+}
+
+#[cfg(unix)]
+#[test]
+fn inodes_count_symlinks_and_hard_links_like_du() {
+    let (_d, root) = make_sized_tree(&[("a/real", 10)]);
+    std::os::unix::fs::symlink("a", root.join("dir-link")).unwrap();
+    std::os::unix::fs::symlink("nowhere", root.join("dangling")).unwrap();
+    fs::hard_link(root.join("a/real"), root.join("a/alias")).unwrap();
+    for workers in [1, 4] {
+        let n = inode_counts(&root, inode_config(true, false, None), workers);
+        // root + a + real (alias is the same inode) + 2 symlinks; the
+        // symlinked directory is not entered.
+        assert_eq!(n[&root], 5, "workers={workers}");
+        assert_eq!(n[&root.join("a")], 2);
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn byte_reports_still_skip_symlinks() {
+    let (_d, root) = make_sized_tree(&[("a/real", 10)]);
+    std::os::unix::fs::symlink("a/real", root.join("link")).unwrap();
+    let out = ardisk::parallel_scan_report(
+        root.clone(),
+        2,
+        build_config(HashSet::new(), None, false, true, false),
+        Collect::Nothing,
+    );
+    assert_eq!(out.file_count, 1);
+    assert_eq!(out.content_sizes.values().sum::<u64>(), 10);
+}
+
+#[test]
+fn inodes_honor_ignore_rules_hidden_and_include() {
+    let (_d, root) = make_sized_tree(&[
+        ("src/a.rs", 1),
+        ("src/b.txt", 1),
+        (".git/x", 1),
+        (".cache/y", 1),
+        ("node_modules/z", 1),
+    ]);
+    // default ignores drop .git and node_modules
+    let n = inode_counts(&root, inode_config(true, false, None), 2);
+    assert_eq!(n[&root], 1 + 3 + 2); // root, src+2 files, .cache+1 file
+    // --no-ignore sees everything
+    let n = inode_counts(&root, inode_config(false, false, None), 2);
+    assert_eq!(n[&root], 1 + 3 + 2 + 2 + 2);
+    // --no-hidden on top of the defaults
+    let n = inode_counts(&root, inode_config(true, true, None), 2);
+    assert_eq!(n[&root], 1 + 3);
+    // --include limits files, directories still cost their own inode
+    let n = inode_counts(&root, inode_config(true, false, Some("*.rs")), 2);
+    assert_eq!(n[&root], 1 + 2 + 1); // root, src+a.rs, .cache (no match)
+}
+
+#[test]
+fn inodes_do_not_depend_on_the_worker_count() {
+    let (_d, root) = hidden_tree();
+    let baseline = inode_counts(&root, inode_config(false, false, None), 1);
+    for workers in [2, 8] {
+        assert_eq!(
+            inode_counts(&root, inode_config(false, false, None), workers),
+            baseline
+        );
+    }
 }

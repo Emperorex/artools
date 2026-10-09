@@ -245,6 +245,11 @@ pub struct ScanConfig {
     /// scanned only if every filter lets it through. The scan root itself is
     /// never skipped, even if its own name starts with a dot.
     pub skip_hidden: bool,
+    /// `--inodes`: count inodes instead of bytes, like `du --inodes`. Every
+    /// entry that passes the filters costs 1: directories (the root
+    /// included), regular files, symlinks and special files. A hard-linked
+    /// inode is counted once per scan. `apparent_size` has no effect.
+    pub inodes: bool,
 }
 
 /// Builds a `ScanConfig` from the given parameters.
@@ -283,6 +288,7 @@ pub fn build_config_with_exclude(
         respect_gitignore,
         exclude,
         skip_hidden: false,
+        inodes: false,
     })
 }
 
@@ -496,6 +502,17 @@ fn size_from_metadata(metadata: &fs::Metadata, apparent_size: bool) -> u64 {
     }
 }
 
+/// What one entry adds to its directory's total: one inode with `--inodes`,
+/// otherwise its size.
+#[inline]
+fn entry_cost(metadata: &fs::Metadata, config: &ScanConfig) -> u64 {
+    if config.inodes {
+        1
+    } else {
+        size_from_metadata(metadata, config.apparent_size)
+    }
+}
+
 /// Builds a single combined matcher from any `.gitignore`/`.ignore` files
 /// present directly in `dir`. Returns `None` if neither file exists (or
 /// exists but contributes zero patterns), so callers can skip extending the
@@ -610,7 +627,9 @@ pub fn scan_directory(
             Err(_) => continue,
         };
 
-        if file_type.is_symlink() {
+        // Symlinks have no size of their own in the byte reports, but they do
+        // occupy an inode, so only `--inodes` looks at them.
+        if file_type.is_symlink() && !config.inodes {
             continue;
         }
 
@@ -682,7 +701,7 @@ pub fn scan_directory(
                 };
 
                 if !already_counted {
-                    let file_size = size_from_metadata(&metadata, config.apparent_size);
+                    let file_size = entry_cost(&metadata, config);
                     local_content_size += file_size;
                     local_dir_size += file_size;
                     if metadata.is_file() {
@@ -697,7 +716,7 @@ pub fn scan_directory(
     // This goes only into the total map, NOT the content map, so that
     // main.rs can still suppress dirs with no matching file content.
     if let Ok(dir_metadata) = fs::metadata(dir_path) {
-        local_dir_size += size_from_metadata(&dir_metadata, config.apparent_size);
+        local_dir_size += entry_cost(&dir_metadata, config);
     }
 
     shared

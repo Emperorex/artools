@@ -50,7 +50,8 @@ pub struct DirectoryQuery {
     pub top: usize,
     /// `--max-depth`: deepest level listed (the root is depth 0).
     pub max_depth: Option<usize>,
-    /// `--threshold`: smallest directory listed, in bytes.
+    /// `--threshold`: smallest directory listed, in bytes (a count of inodes
+    /// with `--inodes`).
     pub threshold_bytes: Option<u64>,
     /// `--include` is active: directories without matching file content are
     /// not listed (unless a threshold is given).
@@ -169,7 +170,9 @@ struct Header<'a> {
     schema_version: u32,
     mode: &'static str,
     root: String,
-    size_mode: &'static str,
+    /// Absent for `inodes`, where no sizes are involved.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    size_mode: Option<&'static str>,
     filters: &'a Filters,
 }
 
@@ -237,7 +240,7 @@ fn header<'a>(
         schema_version: SCHEMA_VERSION,
         mode,
         root: fmt.absolute(&meta.root),
-        size_mode: size_mode(apparent),
+        size_mode: Some(size_mode(apparent)),
         filters: &meta.filters,
     }
 }
@@ -294,6 +297,91 @@ pub fn write_directories<W: Write>(
     let doc = DirectoriesDoc {
         header,
         params: query,
+        summary,
+        entries,
+        truncated: selection.truncated,
+    };
+    emit(w, &doc)?;
+    Ok(fmt.lossy)
+}
+
+/// `--inodes`: totals of an inode count.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct InodeSummary {
+    /// Inodes under the root (the root's own included), as printed by
+    /// `--summarize`.
+    pub total_inodes: u64,
+    /// Regular files counted (hard links once).
+    pub files: u64,
+    /// Directories visited, including the root.
+    pub directories: u64,
+}
+
+#[derive(Serialize)]
+struct InodeParams {
+    top: usize,
+    max_depth: Option<usize>,
+    threshold_inodes: Option<u64>,
+}
+
+#[derive(Serialize)]
+struct InodeItem {
+    path: String,
+    inodes: u64,
+    depth: usize,
+    kind: &'static str,
+}
+
+#[derive(Serialize)]
+struct InodesDoc<'a> {
+    #[serde(flatten)]
+    header: Header<'a>,
+    params: InodeParams,
+    summary: InodeSummary,
+    entries: Vec<InodeItem>,
+    truncated: bool,
+}
+
+/// Writes the `inodes` document. `selection` holds inode counts (the
+/// `--threshold` in `query` is a count too). Returns the number of paths
+/// that were not valid UTF-8.
+pub fn write_inodes<W: Write>(
+    w: &mut W,
+    meta: &ReportMeta,
+    query: &DirectoryQuery,
+    selection: &DirectorySelection,
+    summary: InodeSummary,
+) -> io::Result<usize> {
+    let mut fmt = PathFmt {
+        root: &meta.root,
+        lossy: 0,
+    };
+    let header = Header {
+        schema_version: SCHEMA_VERSION,
+        mode: "inodes",
+        root: fmt.absolute(&meta.root),
+        size_mode: None,
+        filters: &meta.filters,
+    };
+    let entries = selection
+        .entries
+        .iter()
+        .map(|(path, inodes)| InodeItem {
+            path: fmt.rel(path),
+            inodes: *inodes,
+            depth: path
+                .strip_prefix(&meta.root)
+                .map_or(0, |r| r.components().count()),
+            kind: "directory",
+        })
+        .collect();
+    let doc = InodesDoc {
+        header,
+        params: InodeParams {
+            top: query.top,
+            max_depth: query.max_depth,
+            threshold_inodes: query.threshold_bytes,
+        },
         summary,
         entries,
         truncated: selection.truncated,

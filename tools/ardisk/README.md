@@ -80,7 +80,7 @@ The following directories are always skipped:
 
 ## Tree view
 
-`--tree` draws the directory report as a hierarchy, like `dust` or a text-mode `ncdu`. Each directory sits under its parent, siblings are ordered biggest first, and the middle column is the share of the total:
+`--tree` draws the directory report as a hierarchy. Each directory sits under its parent, siblings are ordered biggest first, and the middle column is the share of the total:
 
 ```
 $ ardisk ~/project --tree --top 8

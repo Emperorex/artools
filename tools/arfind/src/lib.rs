@@ -1,3 +1,5 @@
+pub mod age;
+
 use clap::Parser;
 use clap::builder::TypedValueParser as _;
 use colored::Colorize;
@@ -74,9 +76,42 @@ pub struct Args {
     #[arg(long)]
     pub max_depth: Option<usize>,
 
-    /// Additional ignored directories
-    #[arg(long)]
-    pub ignore: Vec<String>,
+    /// Don't descend into directories matching this name or glob (e.g.
+    /// "vendor", "build*"), matched against the directory's name only, like
+    /// argrep's --exclude-dir. The directory itself is still listed; its
+    /// contents are not searched. Repeatable; honored even with --no-ignore.
+    /// Alias: --ignore.
+    #[arg(
+        long = "exclude-dir",
+        visible_alias = "ignore",
+        value_name = "NAME|GLOB"
+    )]
+    pub exclude_dir: Vec<String>,
+
+    /// Exclude files and directories matching a gitignore-style glob
+    /// (repeatable), like ardisk's --exclude: '*.log' matches at any depth,
+    /// 'src/gen' or 'target/**' are anchored to PATH, a trailing '/'
+    /// matches directories only, and 'dir/**' excludes the contents of dir
+    /// but not dir itself. Excluded entries are neither listed nor
+    /// searched. Quote patterns to keep the shell from expanding them.
+    #[arg(long, value_name = "GLOB")]
+    pub exclude: Vec<String>,
+
+    /// Stay on the filesystem of PATH, like find -xdev: directories on
+    /// other filesystems, mounts or APFS volumes are listed but not
+    /// descended into. Unix only.
+    #[arg(short = 'x', long = "one-file-system")]
+    pub one_file_system: bool,
+
+    /// Only match entries last modified at least this long ago, e.g. 30d,
+    /// 6mo, 1y. Units: s, min, h, d, w, mo (30 days), y (365 days).
+    #[arg(long, value_name = "AGE", value_parser = age::parse_age)]
+    pub older_than: Option<age::Age>,
+
+    /// Only match entries modified less than this long ago, e.g. 7d, 12h.
+    /// Together with --older-than it selects a window.
+    #[arg(long, value_name = "AGE", value_parser = age::parse_age)]
+    pub newer_than: Option<age::Age>,
 
     /// Do not respect .gitignore / .ignore files (search everything)
     #[arg(long = "no-ignore")]
@@ -145,6 +180,107 @@ pub struct SearchConfig {
     pub empty_only: bool,
     pub case_insensitive: bool,
     pub respect_gitignore: bool,
+    /// `--exclude-dir` entries containing glob metacharacters; plain names
+    /// live in `ignore_dirs`. Like `ignore_dirs`, a matching directory is
+    /// listed but not descended into.
+    pub ignore_dir_patterns: Vec<Pattern>,
+    /// `--exclude`: gitignore-style patterns rooted at the search root; a
+    /// matching entry is neither listed nor searched. See
+    /// [`build_exclude_matcher`].
+    pub exclude: Option<Gitignore>,
+    /// `-x` / `--one-file-system`: don't descend into directories on a
+    /// different device than the search root (they are still listed).
+    pub one_file_system: bool,
+    /// `--older-than` / `--newer-than`: modification-time test for every
+    /// listed entry. Never stops traversal.
+    pub mtime: age::MtimeFilter,
+}
+
+impl SearchConfig {
+    /// A configuration that matches everything under the defaults (`*`,
+    /// built-in ignores, hidden entries skipped, `.gitignore` respected).
+    /// Convenient for library users and tests; adjust fields as needed.
+    pub fn new(pattern: Pattern) -> Self {
+        SearchConfig {
+            pattern,
+            ignore_dirs: DEFAULT_IGNORES.iter().map(|s| s.to_string()).collect(),
+            max_depth: None,
+            file_type: None,
+            hidden: false,
+            debug: false,
+            size_filter: None,
+            empty_only: false,
+            case_insensitive: false,
+            respect_gitignore: true,
+            ignore_dir_patterns: Vec::new(),
+            exclude: None,
+            one_file_system: false,
+            mtime: age::MtimeFilter::default(),
+        }
+    }
+}
+
+/// Compiles `--exclude` patterns into a single matcher rooted at `root`,
+/// with gitignore syntax and semantics (the same as ardisk's `--exclude`):
+///
+/// * no `/` in the pattern (`*.log`, `target`) -> matches the name at any depth
+/// * a `/` at the start or in the middle (`/foo`, `src/gen`, `target/**`)
+///   -> anchored to `root`
+/// * a trailing `/` (`build/`) -> directories only
+/// * `X/**` -> everything *inside* `X`, but not `X` itself
+/// * `!pattern` -> re-include (cannot rescue entries under an excluded dir)
+///
+/// Each entry is matched on its own path only, so a contents-only pattern
+/// such as `target/**` never stops the search from entering `target`.
+/// Returns `Ok(None)` for an empty pattern list.
+pub fn build_exclude_matcher(
+    root: &Path,
+    patterns: &[String],
+) -> Result<Option<Gitignore>, String> {
+    if patterns.is_empty() {
+        return Ok(None);
+    }
+    let mut builder = GitignoreBuilder::new(root);
+    for pattern in patterns {
+        if pattern.trim().is_empty() {
+            return Err("--exclude pattern must not be empty".to_string());
+        }
+        builder
+            .add_line(None, pattern)
+            .map_err(|e| format!("Invalid --exclude pattern '{}': {}", pattern, e))?;
+    }
+    builder
+        .build()
+        .map(Some)
+        .map_err(|e| format!("Invalid --exclude patterns: {}", e))
+}
+
+/// Device id of `path` (Unix), for `--one-file-system`.
+fn device_of(path: &Path) -> Option<u64> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        fs::metadata(path).ok().map(|m| m.dev())
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        None
+    }
+}
+
+/// Device id from already-fetched metadata (Unix).
+fn device_of_metadata(metadata: &fs::Metadata) -> Option<u64> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        Some(metadata.dev())
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = metadata;
+        None
+    }
 }
 
 /// Shared atomic counters for runtime statistics
@@ -288,6 +424,10 @@ fn check_root(
         }
     }
 
+    if !config.mtime.matches(metadata.modified().ok()) {
+        return None;
+    }
+
     Some(MatchResult {
         path: canonical_root.to_path_buf(),
         is_dir,
@@ -317,6 +457,13 @@ pub fn parallel_find(
         stats.matched_count.fetch_add(1, Ordering::Relaxed);
         let _ = output_tx.send(result);
     }
+
+    // --one-file-system: everything is compared with the root's device.
+    let root_dev = if config.one_file_system {
+        device_of(&canonical_root)
+    } else {
+        None
+    };
 
     task_tx
         .send(Task {
@@ -353,7 +500,15 @@ pub fn parallel_find(
                     }
                 };
 
-                scan_directory(task, &config, &task_tx, &output_tx, &active_tasks, &stats);
+                scan_directory(
+                    task,
+                    &config,
+                    &task_tx,
+                    &output_tx,
+                    &active_tasks,
+                    &stats,
+                    root_dev,
+                );
                 active_tasks.fetch_sub(1, Ordering::SeqCst);
             }
         });
@@ -438,6 +593,7 @@ pub fn scan_directory(
     output_tx: &Sender<MatchResult>,
     active_tasks: &AtomicUsize,
     stats: &SearchStats,
+    root_dev: Option<u64>,
 ) {
     // `--max-depth N` follows `find`'s semantics: depth 0 is the root itself
     // (already tested by `check_root`, before this function is ever called),
@@ -527,6 +683,15 @@ pub fn scan_directory(
 
         let entry_path = entry.path();
 
+        // --exclude: independent of .gitignore handling, so it also applies
+        // with --no-ignore. Matched on the entry's own path only: for
+        // `target/**`, `target` itself is still listed and entered.
+        if let Some(exclude) = &config.exclude
+            && exclude.matched(&entry_path, is_dir).is_ignore()
+        {
+            continue;
+        }
+
         if config.respect_gitignore && is_path_ignored(&ignore_stack, &entry_path, is_dir) {
             continue;
         }
@@ -597,7 +762,18 @@ pub fn scan_directory(
                     true // size filter does not apply to directories or symlinks
                 };
 
-                if size_ok {
+                // --older-than / --newer-than: the entry's own mtime (a
+                // symlink's, not its target's, like find without -L).
+                let age_ok = !config.mtime.is_active() || {
+                    if metadata_cache.is_none() {
+                        metadata_cache = entry.metadata().ok();
+                    }
+                    config
+                        .mtime
+                        .matches(metadata_cache.as_ref().and_then(|m| m.modified().ok()))
+                };
+
+                if size_ok && age_ok {
                     stats.matched_count.fetch_add(1, Ordering::Relaxed);
                     let _ = output_tx.send(MatchResult {
                         path: entry_path.clone(),
@@ -608,7 +784,31 @@ pub fn scan_directory(
         }
 
         if is_dir && !is_symlink {
-            if config.ignore_dirs.contains(file_name.as_ref()) {
+            if config.ignore_dirs.contains(file_name.as_ref())
+                || config
+                    .ignore_dir_patterns
+                    .iter()
+                    .any(|p| p.matches(&file_name))
+            {
+                continue;
+            }
+
+            // -x: a directory on another device is a mount point (or another
+            // APFS volume). It was listed above like any directory; it is
+            // just not entered, as with find -xdev.
+            if let Some(dev) = root_dev
+                && entry.metadata().ok().as_ref().and_then(device_of_metadata) != Some(dev)
+            {
+                if config.debug {
+                    eprintln!(
+                        "{}",
+                        format!(
+                            "arfind: {}: on another filesystem, not descending (--one-file-system)",
+                            entry_path.display()
+                        )
+                        .yellow()
+                    );
+                }
                 continue;
             }
 
@@ -677,6 +877,50 @@ mod tests {
              of how many cores the machine reports: got {}",
             args.jobs
         );
+    }
+
+    #[test]
+    fn new_flags_parse() {
+        let a = Args::try_parse_from([
+            "arfind",
+            ".",
+            "-x",
+            "--exclude",
+            "*.log",
+            "--exclude",
+            "target/**",
+            "--exclude-dir",
+            "build*",
+            "--ignore",
+            "vendor",
+            "--older-than",
+            "30d",
+            "--newer-than",
+            "1y",
+        ])
+        .unwrap();
+        assert!(a.one_file_system);
+        assert_eq!(a.exclude, ["*.log", "target/**"]);
+        assert_eq!(a.exclude_dir, ["build*", "vendor"]);
+        assert_eq!(a.older_than.unwrap().text, "30d");
+        assert_eq!(a.newer_than.unwrap().text, "1y");
+
+        let a = Args::try_parse_from(["arfind", ".", "--one-file-system"]).unwrap();
+        assert!(a.one_file_system && a.exclude.is_empty() && a.older_than.is_none());
+    }
+
+    #[test]
+    fn ambiguous_or_unitless_ages_are_rejected() {
+        for bad in ["1m", "7", "1.5d", "soon"] {
+            assert!(
+                Args::try_parse_from(["arfind", ".", "--older-than", bad]).is_err(),
+                "{bad}"
+            );
+            assert!(
+                Args::try_parse_from(["arfind", ".", "--newer-than", bad]).is_err(),
+                "{bad}"
+            );
+        }
     }
 
     #[test]

@@ -51,6 +51,10 @@ fn collect_names(
         empty_only: false,
         case_insensitive: false,
         respect_gitignore: false,
+        ignore_dir_patterns: Vec::new(),
+        exclude: None,
+        one_file_system: false,
+        mtime: Default::default(),
     });
 
     let stats = SearchStats::new();
@@ -242,6 +246,10 @@ fn stats_count_files_and_dirs_correctly() {
         empty_only: false,
         case_insensitive: false,
         respect_gitignore: false,
+        ignore_dir_patterns: Vec::new(),
+        exclude: None,
+        one_file_system: false,
+        mtime: Default::default(),
     });
 
     let stats = SearchStats::new();
@@ -280,6 +288,10 @@ fn stats_count_root_even_when_max_depth_stops_recursion() {
         empty_only: false,
         case_insensitive: false,
         respect_gitignore: false,
+        ignore_dir_patterns: Vec::new(),
+        exclude: None,
+        one_file_system: false,
+        mtime: Default::default(),
     });
 
     let stats = SearchStats::new();
@@ -311,6 +323,10 @@ fn stats_count_child_dir_examined_even_when_not_recursed_into() {
         empty_only: false,
         case_insensitive: false,
         respect_gitignore: false,
+        ignore_dir_patterns: Vec::new(),
+        exclude: None,
+        one_file_system: false,
+        mtime: Default::default(),
     });
 
     let stats = SearchStats::new();
@@ -441,6 +457,10 @@ fn multiple_workers_produce_same_results_as_single_worker() {
             empty_only: false,
             case_insensitive: false,
             respect_gitignore: false,
+            ignore_dir_patterns: Vec::new(),
+            exclude: None,
+            one_file_system: false,
+            mtime: Default::default(),
         });
         let results: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
         let results_clone = Arc::clone(&results);
@@ -515,6 +535,10 @@ fn size_min_filters_small_files() {
         empty_only: false,
         case_insensitive: false,
         respect_gitignore: false,
+        ignore_dir_patterns: Vec::new(),
+        exclude: None,
+        one_file_system: false,
+        mtime: Default::default(),
     });
 
     let names = collect_with_config(root, config);
@@ -549,6 +573,10 @@ fn size_max_filters_large_files() {
         empty_only: false,
         case_insensitive: false,
         respect_gitignore: false,
+        ignore_dir_patterns: Vec::new(),
+        exclude: None,
+        one_file_system: false,
+        mtime: Default::default(),
     });
 
     let names = collect_with_config(root, config);
@@ -583,6 +611,10 @@ fn size_filter_does_not_affect_directories() {
         empty_only: false,
         case_insensitive: false,
         respect_gitignore: false,
+        ignore_dir_patterns: Vec::new(),
+        exclude: None,
+        one_file_system: false,
+        mtime: Default::default(),
     });
 
     let names = collect_with_config(root, config);
@@ -610,6 +642,10 @@ fn empty_finds_zero_byte_files() {
         empty_only: true,
         case_insensitive: false,
         respect_gitignore: false,
+        ignore_dir_patterns: Vec::new(),
+        exclude: None,
+        one_file_system: false,
+        mtime: Default::default(),
     });
 
     let names = collect_with_config(root, config);
@@ -636,6 +672,10 @@ fn empty_finds_empty_directories() {
         empty_only: true,
         case_insensitive: false,
         respect_gitignore: false,
+        ignore_dir_patterns: Vec::new(),
+        exclude: None,
+        one_file_system: false,
+        mtime: Default::default(),
     });
 
     let names = collect_with_config(root, config);
@@ -665,6 +705,10 @@ fn empty_false_returns_all_files() {
         empty_only: false,
         case_insensitive: false,
         respect_gitignore: false,
+        ignore_dir_patterns: Vec::new(),
+        exclude: None,
+        one_file_system: false,
+        mtime: Default::default(),
     });
 
     let names = collect_with_config(root, config);
@@ -686,6 +730,10 @@ fn config_with_gitignore(pattern: &str, respect_gitignore: bool) -> Arc<SearchCo
         empty_only: false,
         case_insensitive: false,
         respect_gitignore,
+        ignore_dir_patterns: Vec::new(),
+        exclude: None,
+        one_file_system: false,
+        mtime: Default::default(),
     })
 }
 
@@ -754,4 +802,283 @@ fn dot_ignore_file_is_also_respected() {
     let names = collect_with_config(root, config_with_gitignore("*", true));
     assert!(names.contains(&"keep.txt".to_string()));
     assert!(!names.contains(&"secret.txt".to_string()));
+}
+
+// ── --exclude / --exclude-dir / -x / --older-than / --newer-than ─────────────
+
+/// Runs a search with `config` and returns the matched paths relative to
+/// `root` ("." for the root itself), sorted.
+fn run_rel(root: &std::path::Path, config: SearchConfig) -> Vec<String> {
+    let results: Arc<Mutex<Vec<PathBuf>>> = Arc::new(Mutex::new(Vec::new()));
+    let sink = Arc::clone(&results);
+    parallel_find(
+        root.to_path_buf(),
+        4,
+        Arc::new(config),
+        SearchStats::new(),
+        move |item| {
+            sink.lock().unwrap().push(item.path);
+        },
+    );
+    let mut v: Vec<String> = results
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|p| {
+            let rel = p.strip_prefix(root).unwrap();
+            if rel.as_os_str().is_empty() {
+                ".".to_string()
+            } else {
+                rel.display().to_string()
+            }
+        })
+        .collect();
+    v.sort();
+    v
+}
+
+fn any() -> SearchConfig {
+    SearchConfig::new(Pattern::new("*").unwrap())
+}
+
+fn excluding(root: &std::path::Path, patterns: &[&str]) -> SearchConfig {
+    let patterns: Vec<String> = patterns.iter().map(|s| s.to_string()).collect();
+    SearchConfig {
+        exclude: arfind::build_exclude_matcher(root, &patterns).unwrap(),
+        ..any()
+    }
+}
+
+fn exclude_tree() -> (TempDir, PathBuf) {
+    make_tree(&[
+        "src/main.rs",
+        "src/gen/x.rs",
+        "target/debug/app",
+        "logs/a.log",
+        "logs/old/b.log",
+        "x.log/inner.txt",
+        "readme.md",
+    ])
+}
+
+#[test]
+fn exclude_basename_glob_hides_matching_files_and_dirs_at_any_depth() {
+    let (_d, root) = exclude_tree();
+    let found = run_rel(&root, excluding(&root, &["*.log"]));
+    assert!(!found.iter().any(|p| p.ends_with(".log")), "{found:?}");
+    // Like gitignore, a directory named x.log matches too, contents and all.
+    assert!(!found.iter().any(|p| p.starts_with("x.log")), "{found:?}");
+    assert!(found.contains(&"logs/old".to_string()));
+}
+
+#[test]
+fn exclude_contents_pattern_keeps_the_directory_itself() {
+    let (_d, root) = exclude_tree();
+    let found = run_rel(&root, excluding(&root, &["target/**"]));
+    assert!(found.contains(&"target".to_string()), "{found:?}");
+    assert!(!found.iter().any(|p| p.starts_with("target/")), "{found:?}");
+}
+
+#[test]
+fn exclude_anchored_path_and_dir_only_patterns() {
+    let (_d, root) = exclude_tree();
+    let found = run_rel(&root, excluding(&root, &["src/gen"]));
+    assert!(found.contains(&"src/main.rs".to_string()));
+    assert!(!found.iter().any(|p| p.starts_with("src/gen")), "{found:?}");
+
+    // Trailing slash: directories only.
+    let found = run_rel(&root, excluding(&root, &["logs/"]));
+    assert!(!found.iter().any(|p| p.starts_with("logs")), "{found:?}");
+    assert!(found.contains(&"readme.md".to_string()));
+}
+
+#[test]
+fn exclude_applies_even_with_no_ignore_and_never_hides_the_root() {
+    let (_d, root) = exclude_tree();
+    let name = root.file_name().unwrap().to_string_lossy().to_string();
+    let config = SearchConfig {
+        ignore_dirs: HashSet::new(),
+        respect_gitignore: false,
+        ..excluding(&root, &[name.as_str(), "*.rs"])
+    };
+    let found = run_rel(&root, config);
+    assert!(
+        found.contains(&".".to_string()),
+        "the root is always a candidate"
+    );
+    assert!(!found.iter().any(|p| p.ends_with(".rs")), "{found:?}");
+}
+
+#[test]
+fn exclude_dir_globs_list_the_directory_but_skip_its_contents() {
+    let (_d, root) = make_tree(&["build1/o.o", "build2/p.o", "src/a.rs", "vendor/lib/v.go"]);
+    let config = SearchConfig {
+        ignore_dirs: ["vendor".to_string()].into_iter().collect(),
+        ignore_dir_patterns: vec![Pattern::new("build*").unwrap()],
+        ..any()
+    };
+    let found = run_rel(&root, config);
+    assert_eq!(
+        found,
+        [".", "build1", "build2", "src", "src/a.rs", "vendor"]
+    );
+}
+
+const DAY: u64 = 86_400;
+
+fn set_mtime(path: &std::path::Path, now: std::time::SystemTime, days: u64) {
+    let t = now - std::time::Duration::from_secs(days * DAY);
+    // Directories need to be opened read-only to set their times.
+    let f = if path.is_dir() {
+        fs::File::open(path).unwrap()
+    } else {
+        fs::File::options().write(true).open(path).unwrap()
+    };
+    f.set_modified(t).unwrap();
+}
+
+fn aged(now: std::time::SystemTime, older: Option<u64>, newer: Option<u64>) -> SearchConfig {
+    let d = |n: u64| std::time::Duration::from_secs(n * DAY);
+    SearchConfig {
+        mtime: arfind::age::MtimeFilter::new(now, older.map(d), newer.map(d)),
+        ..any()
+    }
+}
+
+fn aged_tree(now: std::time::SystemTime) -> (TempDir, PathBuf) {
+    let (d, root) = make_tree(&["old/a.zip", "old/b.jpg", "mid/c.log", "new/d.txt"]);
+    for (rel, days) in [
+        ("old/a.zip", 800),
+        ("old/b.jpg", 400),
+        ("mid/c.log", 40),
+        ("new/d.txt", 3),
+        // Directories have their own mtimes; set them explicitly so the
+        // test does not depend on when it runs.
+        ("old", 500),
+        ("mid", 40),
+        ("new", 3),
+    ] {
+        set_mtime(&root.join(rel), now, days);
+    }
+    set_mtime(&root, now, 1);
+    (d, root)
+}
+
+#[test]
+fn older_than_matches_files_and_directories_by_their_own_mtime() {
+    let now = std::time::SystemTime::now();
+    let (_d, root) = aged_tree(now);
+    let found = run_rel(&root, aged(now, Some(365), None));
+    // `old` is listed (it is 500 days old) and its contents are still
+    // searched; `mid` and `new` are not listed but are searched too.
+    assert_eq!(found, ["old", "old/a.zip", "old/b.jpg"]);
+}
+
+#[test]
+fn newer_than_and_window() {
+    let now = std::time::SystemTime::now();
+    let (_d, root) = aged_tree(now);
+    assert_eq!(
+        run_rel(&root, aged(now, None, Some(7))),
+        [".", "new", "new/d.txt"]
+    );
+    assert_eq!(
+        run_rel(&root, aged(now, Some(30), Some(450))),
+        ["mid", "mid/c.log", "old/b.jpg"]
+    );
+}
+
+#[test]
+fn age_filter_with_type_filter_matches_find_mtime_semantics() {
+    let now = std::time::SystemTime::now();
+    let (_d, root) = aged_tree(now);
+    let config = SearchConfig {
+        file_type: Some("f".to_string()),
+        ..aged(now, Some(30), None)
+    };
+    assert_eq!(
+        run_rel(&root, config),
+        ["mid/c.log", "old/a.zip", "old/b.jpg"]
+    );
+}
+
+#[test]
+fn older_and_newer_with_the_same_age_split_entries_exactly() {
+    let now = std::time::SystemTime::now();
+    let (_d, root) = aged_tree(now);
+    let all = run_rel(&root, any());
+    for days in [1, 3, 40, 400] {
+        let mut both = run_rel(&root, aged(now, Some(days), None));
+        both.extend(run_rel(&root, aged(now, None, Some(days))));
+        both.sort();
+        assert_eq!(both, all, "days={days}");
+    }
+}
+
+/// A directory with a mount point directly inside it, if this system has
+/// one handy (Linux /dev usually does). Tests below skip without one.
+#[cfg(unix)]
+fn nested_mount() -> Option<(PathBuf, PathBuf)> {
+    use std::os::unix::fs::MetadataExt;
+    for (parent, child) in [
+        ("/dev", "/dev/shm"),
+        ("/dev", "/dev/pts"),
+        ("/dev", "/dev/mqueue"),
+    ] {
+        let (Ok(p), Ok(c)) = (fs::metadata(parent), fs::symlink_metadata(child)) else {
+            continue;
+        };
+        if c.is_dir() && p.dev() != c.dev() {
+            return Some((PathBuf::from(parent), PathBuf::from(child)));
+        }
+    }
+    None
+}
+
+#[cfg(unix)]
+#[test]
+fn one_file_system_lists_mount_points_but_does_not_enter_them() {
+    let Some((parent, mount)) = nested_mount() else {
+        eprintln!("no nested mount point found; skipping");
+        return;
+    };
+    let base = || SearchConfig {
+        hidden: true,
+        respect_gitignore: false,
+        ignore_dirs: HashSet::new(),
+        max_depth: Some(3),
+        ..any()
+    };
+    let rel_mount = mount.strip_prefix(&parent).unwrap().display().to_string();
+    let off = run_rel(&parent, base());
+    let on = run_rel(
+        &parent,
+        SearchConfig {
+            one_file_system: true,
+            ..base()
+        },
+    );
+    assert!(
+        on.contains(&rel_mount),
+        "the mount point itself is listed, like find -xdev"
+    );
+    assert!(
+        !on.iter().any(|p| p.starts_with(&format!("{rel_mount}/"))),
+        "nothing below {mount:?} with -x"
+    );
+    // Everything -x lists is also listed without it.
+    assert!(on.iter().all(|p| off.contains(p)));
+}
+
+#[test]
+fn one_file_system_changes_nothing_on_a_single_filesystem() {
+    let (_d, root) = exclude_tree();
+    let on = run_rel(
+        &root,
+        SearchConfig {
+            one_file_system: true,
+            ..any()
+        },
+    );
+    assert_eq!(on, run_rel(&root, any()));
 }

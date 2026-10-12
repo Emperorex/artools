@@ -1,12 +1,17 @@
-use arfind::{Args, DEFAULT_IGNORES, SearchConfig, SearchStats, SizeFilter, parallel_find};
+use arfind::{
+    Args, DEFAULT_IGNORES, SearchConfig, SearchStats, SizeFilter,
+    age::{MtimeFilter, check_window},
+    build_exclude_matcher, parallel_find,
+};
 use clap::Parser;
 use colored::Colorize;
 use glob::Pattern;
 use std::{
     collections::HashSet,
+    fs,
     path::PathBuf,
     sync::{Arc, atomic::Ordering},
-    time::Instant,
+    time::{Instant, SystemTime},
 };
 
 /// Parses a size string with optional +/- prefix into a SizeFilter.
@@ -96,14 +101,35 @@ fn parse_size_bytes(s: &str) -> Result<u64, String> {
 /// (`.git`, `node_modules`, `__pycache__`), but an explicit `--ignore` is
 /// still honored either way, since that's the user asking for something
 /// specific rather than the tool's automatic noise filtering.
-fn build_ignore_dirs(no_ignore: bool, extra: Vec<String>) -> HashSet<String> {
-    let mut ignore_dirs: HashSet<String> = if no_ignore {
+///
+/// Entries containing a glob metacharacter (`*`, `?`, `[`) become patterns;
+/// plain names stay on the fast exact-lookup path (same split as argrep).
+fn build_ignore_dirs(
+    no_ignore: bool,
+    extra: Vec<String>,
+) -> Result<(HashSet<String>, Vec<Pattern>), String> {
+    let mut names: HashSet<String> = if no_ignore {
         HashSet::new()
     } else {
         DEFAULT_IGNORES.iter().map(|s| s.to_string()).collect()
     };
-    ignore_dirs.extend(extra);
-    ignore_dirs
+    let mut patterns = Vec::new();
+    for entry in extra {
+        if entry.contains(['*', '?', '[']) {
+            patterns.push(Pattern::new(&entry).map_err(|e| {
+                format!("Invalid glob pattern for --exclude-dir: '{}': {}", entry, e)
+            })?);
+        } else {
+            names.insert(entry);
+        }
+    }
+    Ok((names, patterns))
+}
+
+/// Prints `error: ...` in red and exits with status 1.
+fn fail(message: &str) -> ! {
+    eprintln!("{}", format!("error: {}", message).red());
+    std::process::exit(1);
 }
 
 fn main() {
@@ -125,7 +151,24 @@ fn main() {
         std::process::exit(1);
     }
 
-    let ignore_dirs = build_ignore_dirs(args.no_ignore, args.ignore);
+    let (ignore_dirs, ignore_dir_patterns) =
+        build_ignore_dirs(args.no_ignore, args.exclude_dir).unwrap_or_else(|e| fail(&e));
+
+    // --exclude patterns are anchored at the canonical root, the same path
+    // the search reports entries under.
+    let canonical_root = fs::canonicalize(&args.path).unwrap_or_else(|_| PathBuf::from(&args.path));
+    let exclude =
+        build_exclude_matcher(&canonical_root, &args.exclude).unwrap_or_else(|e| fail(&e));
+
+    check_window(args.older_than.as_ref(), args.newer_than.as_ref()).unwrap_or_else(|e| fail(&e));
+
+    if args.one_file_system && !cfg!(unix) {
+        eprintln!(
+            "{}",
+            "arfind: --one-file-system is only supported on Unix-like systems; searching normally"
+                .yellow()
+        );
+    }
 
     let pattern = Pattern::new(&args.name).expect("Invalid glob pattern");
 
@@ -151,6 +194,14 @@ fn main() {
         empty_only: args.empty,
         case_insensitive: args.case_insensitive,
         respect_gitignore: !args.no_ignore,
+        ignore_dir_patterns,
+        exclude,
+        one_file_system: args.one_file_system,
+        mtime: MtimeFilter::new(
+            SystemTime::now(),
+            args.older_than.as_ref().map(|a| a.duration),
+            args.newer_than.as_ref().map(|a| a.duration),
+        ),
     });
 
     let stats = SearchStats::new();
@@ -295,7 +346,7 @@ mod tests {
 
     #[test]
     fn default_ignores_included_when_not_no_ignore() {
-        let dirs = build_ignore_dirs(false, vec![]);
+        let (dirs, _) = build_ignore_dirs(false, vec![]).unwrap();
         assert!(dirs.contains(".git"));
         assert!(dirs.contains("node_modules"));
         assert!(dirs.contains("__pycache__"));
@@ -303,7 +354,7 @@ mod tests {
 
     #[test]
     fn no_ignore_excludes_default_ignores() {
-        let dirs = build_ignore_dirs(true, vec![]);
+        let (dirs, _) = build_ignore_dirs(true, vec![]).unwrap();
         assert!(!dirs.contains(".git"));
         assert!(!dirs.contains("node_modules"));
         assert!(!dirs.contains("__pycache__"));
@@ -312,16 +363,31 @@ mod tests {
 
     #[test]
     fn explicit_ignore_honored_alongside_defaults() {
-        let dirs = build_ignore_dirs(false, vec!["vendor".to_string()]);
+        let (dirs, _) = build_ignore_dirs(false, vec!["vendor".to_string()]).unwrap();
         assert!(dirs.contains(".git"));
         assert!(dirs.contains("vendor"));
     }
 
     #[test]
     fn explicit_ignore_honored_even_with_no_ignore() {
-        let dirs = build_ignore_dirs(true, vec!["vendor".to_string()]);
+        let (dirs, _) = build_ignore_dirs(true, vec!["vendor".to_string()]).unwrap();
         assert!(!dirs.contains(".git"));
         assert!(dirs.contains("vendor"));
         assert_eq!(dirs.len(), 1);
+    }
+
+    #[test]
+    fn exclude_dir_globs_become_patterns_and_names_stay_names() {
+        let (names, patterns) =
+            build_ignore_dirs(true, vec!["vendor".into(), "build*".into(), "tmp?".into()]).unwrap();
+        assert_eq!(names.len(), 1);
+        assert!(names.contains("vendor"));
+        let globs: Vec<&str> = patterns.iter().map(|p| p.as_str()).collect();
+        assert_eq!(globs, ["build*", "tmp?"]);
+    }
+
+    #[test]
+    fn invalid_exclude_dir_glob_is_an_error() {
+        assert!(build_ignore_dirs(false, vec!["[oops".into()]).is_err());
     }
 }

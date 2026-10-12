@@ -1,5 +1,6 @@
 pub mod duplicates;
 pub mod report;
+pub mod tree;
 pub mod types;
 
 use colored::Colorize;
@@ -796,7 +797,13 @@ pub fn format_size_plain(bytes: u64) -> String {
 /// Formats raw bytes into human-readable strings (e.g., KB, MB, GB, TB),
 /// coloured by magnitude when the terminal supports it.
 pub fn format_size(bytes: u64) -> String {
-    let (tier, text) = size_text(bytes);
+    paint_size(bytes, size_text(bytes).1)
+}
+
+/// Colours `text` (normally `bytes` formatted, possibly padded) the way
+/// [`format_size`] colours that size.
+pub fn paint_size(bytes: u64, text: String) -> String {
+    let (tier, _) = size_text(bytes);
     match tier {
         SizeTier::Tb => text.magenta().bold().to_string(),
         SizeTier::Gb => text.cyan().to_string(),

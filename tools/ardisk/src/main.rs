@@ -1,12 +1,13 @@
 use ardisk::{
     Collect, DEFAULT_IGNORES, ScanConfig, ScanOutput, aggregate_sizes, build_exclude_matcher,
     duplicates::{DuplicateReport, find_duplicates},
-    format_size, parallel_scan_report,
+    format_size, format_size_plain, paint_size, parallel_scan_report,
     report::{
         DirectoryQuery, DirectorySummary, Filters, InodeSummary, ReportMeta, render_by_type_text,
         select_directories, write_by_type, write_directories, write_duplicates, write_inodes,
         write_largest_files,
     },
+    tree::{render_tree_text, tree_lines},
 };
 use clap::Parser;
 use clap::builder::TypedValueParser as _;
@@ -215,6 +216,17 @@ struct Args {
         conflicts_with_all = ["largest_files", "duplicates", "max_depth", "threshold"]
     )]
     by_type: bool,
+
+    /// Show the directory report as a tree (like dust or ncdu, in plain
+    /// text): each directory under its parent, biggest first, with its share
+    /// of the total. Lists the same directories as the flat report, so
+    /// --top, --max-depth, --threshold and --include work as usual; combine
+    /// with --inodes to draw inode counts. Text only.
+    #[arg(
+        long,
+        conflicts_with_all = ["largest_files", "duplicates", "by_type", "summarize", "json"]
+    )]
+    tree: bool,
 
     /// Count inodes instead of bytes, like `du --inodes`: useful when a
     /// filesystem runs out of inodes rather than space. Every directory
@@ -449,7 +461,9 @@ fn main() {
         }
     } else {
         if args.debug {
-            let title = if args.inodes {
+            let title = if args.tree {
+                "=== Directory Tree ==="
+            } else if args.inodes {
                 "=== Inodes per Directory ==="
             } else if args.duplicates {
                 "=== Duplicate Files ==="
@@ -474,6 +488,28 @@ fn main() {
             for file in &largest_files {
                 println!("{:>10}  {}", format_size(file.size), file.path.display());
             }
+        } else if args.tree {
+            let selection =
+                select_directories(&aggregated_sizes, &aggregated_content, &target_path, &query);
+            let lines = tree_lines(&selection, &target_path);
+            let text = if args.inodes {
+                render_tree_text(
+                    &lines,
+                    root_total,
+                    selection.truncated,
+                    |n| n.to_string(),
+                    |_, t| t,
+                )
+            } else {
+                render_tree_text(
+                    &lines,
+                    root_total,
+                    selection.truncated,
+                    format_size_plain,
+                    paint_size,
+                )
+            };
+            print!("{text}");
         } else if args.inodes {
             if args.summarize {
                 println!("{:>10}  {}", root_total, target_path.display());
@@ -684,6 +720,43 @@ mod tests {
                 "--by-type must conflict with {:?}",
                 extra
             );
+        }
+    }
+
+    #[test]
+    fn tree_parses_and_combines_with_directory_report_options() {
+        assert!(!Args::try_parse_from(["ardisk", "."]).unwrap().tree);
+        for extra in [
+            vec![],
+            vec!["--top", "50"],
+            vec!["--max-depth", "2"],
+            vec!["--threshold", "1GB"],
+            vec!["--inodes"],
+            vec!["--inodes", "--threshold", "1000"],
+            vec!["--apparent-size"],
+            vec!["--no-hidden", "--no-ignore"],
+            vec!["--include", "*.rs", "--exclude", "*.log", "--ignore", "x"],
+        ] {
+            let mut argv = vec!["ardisk", ".", "--tree"];
+            argv.extend(extra.iter());
+            let args = Args::try_parse_from(&argv)
+                .unwrap_or_else(|e| panic!("{argv:?} should parse: {e}"));
+            assert!(args.tree);
+        }
+    }
+
+    #[test]
+    fn tree_conflicts_with_other_modes_summarize_and_json() {
+        for extra in [
+            vec!["--by-type"],
+            vec!["--duplicates"],
+            vec!["--largest-files", "3"],
+            vec!["--summarize"],
+            vec!["--json"],
+        ] {
+            let mut argv = vec!["ardisk", ".", "--tree"];
+            argv.extend(extra.iter());
+            assert!(Args::try_parse_from(&argv).is_err(), "{argv:?}");
         }
     }
 

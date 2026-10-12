@@ -31,6 +31,7 @@ ardisk [OPTIONS] [PATH]
 | `--threshold SIZE`  | —     | —         | Only show directories larger than this size (e.g. `100MB`, `1GB`)      |
 | `--summarize`       | `-s`  | —         | Print only the grand total for the root directory                      |
 | `--tree`            | —     | —         | Draw the directory report as a tree, biggest first (see [Tree view](#tree-view)) |
+| `--bar[=WHEN]`      | —     | `auto`    | Usage bar and percentage next to each directory: `auto` (terminal only), `always`, `never`; `--bar` alone means `always` (see [Usage bars](#usage-bars)) |
 | `--largest-files N` | —     | —         | List the `N` largest individual files instead of the directory report (see [Finding the largest files](#finding-the-largest-files)) |
 | `--by-type`         | —     | —         | Show files and total size per file extension, with each type's share (see [Breakdown by file type](#breakdown-by-file-type)) |
 | `--duplicates`      | —     | —         | Report groups of files with identical content; read-only (see [Finding duplicate files](#finding-duplicate-files)) |
@@ -146,6 +147,23 @@ The following directories are always skipped:
 - `.git`
 - `node_modules`
 - `__pycache__`
+
+## Usage bars
+
+In a terminal, the directory list shows how big each directory is compared with the scanned root:
+
+```
+$ ardisk /usr --top 4
+   6.68 GB  ██████████ 100%  /usr
+   3.10 GB  █████░░░░░  46%  /usr/lib
+   2.21 GB  ███░░░░░░░  33%  /usr/share
+ 912.40 MB  █░░░░░░░░░  13%  /usr/local
+```
+
+- `--bar=auto` (the default) draws bars only when stdout is a terminal. Piped or redirected output keeps the plain `SIZE  PATH` lines, so existing scripts are unaffected.
+- `--bar` (or `--bar=always`) forces them, e.g. for `ardisk ~ --bar | less`. `--bar=never` turns them off.
+- Percentages are relative to the scanned root and match `--tree`. Bars are 10 cells wide, rounded to the nearest cell.
+- Works with `--inodes` (shares of the inode count). Applies to the directory list only. `--tree` already shows percentages, and an explicit `--bar` is rejected together with `--tree`, `--json`, `--summarize`, `--largest-files`, `--duplicates` and `--by-type`.
 
 ## Tree view
 

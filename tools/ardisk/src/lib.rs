@@ -222,6 +222,9 @@ pub struct ScanShared {
     /// per invocation, mirroring GNU `du`'s behavior. Shared across all worker
     /// threads for the entire traversal, not just per-directory.
     pub seen_inodes: Mutex<HashSet<(u64, u64)>>,
+    /// Device of the scan root when `--one-file-system` is on: directories
+    /// on any other device are not entered.
+    pub root_dev: Option<u64>,
 }
 
 /// Configuration shared across worker threads
@@ -251,6 +254,11 @@ pub struct ScanConfig {
     /// included), regular files, symlinks and special files. A hard-linked
     /// inode is counted once per scan. `apparent_size` has no effect.
     pub inodes: bool,
+    /// `-x` / `--one-file-system`: do not enter a directory that lives on a
+    /// different device (filesystem, APFS volume, mount) than the scan root,
+    /// like `du -x` and `find -xdev`. Such a directory is skipped entirely,
+    /// the mount point included. Unix only; ignored elsewhere.
+    pub one_file_system: bool,
 }
 
 /// Builds a `ScanConfig` from the given parameters.
@@ -290,6 +298,7 @@ pub fn build_config_with_exclude(
         exclude,
         skip_hidden: false,
         inodes: false,
+        one_file_system: false,
     })
 }
 
@@ -419,6 +428,11 @@ pub fn parallel_scan_report(
         raw_sizes: Mutex::new(HashMap::new()),
         content_sizes: Mutex::new(HashMap::new()),
         seen_inodes: Mutex::new(HashSet::new()),
+        root_dev: if config.one_file_system {
+            device_of(&root)
+        } else {
+            None
+        },
     });
 
     shared
@@ -500,6 +514,35 @@ fn size_from_metadata(metadata: &fs::Metadata, apparent_size: bool) -> u64 {
     {
         let _ = apparent_size;
         metadata.len()
+    }
+}
+
+/// Device id of `path`, or `None` where that is not available (non-Unix, or
+/// the path cannot be stat'ed).
+fn device_of(path: &Path) -> Option<u64> {
+    #[cfg(unix)]
+    {
+        fs::metadata(path).ok().map(|m| m.dev())
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        None
+    }
+}
+
+/// Whether a directory entry lives on device `dev`. An entry that cannot be
+/// stat'ed counts as foreign, so `--one-file-system` never wanders into
+/// something it cannot identify.
+fn same_device(entry: &fs::DirEntry, dev: u64) -> bool {
+    #[cfg(unix)]
+    {
+        entry.metadata().is_ok_and(|m| m.dev() == dev)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (entry, dev);
+        true
     }
 }
 
@@ -665,6 +708,22 @@ pub fn scan_directory(
             if config.ignore_dirs.contains(file_name.as_ref()) {
                 continue;
             }
+            // --one-file-system: a directory on another device is a mount
+            // point (or an APFS volume / firmlink target); skip it whole.
+            // `entry.metadata()` does not follow symlinks, and for a mount
+            // point it reports the mounted filesystem's device.
+            if let Some(root_dev) = shared.root_dev
+                && !same_device(&entry, root_dev)
+            {
+                if config.debug {
+                    eprintln!(
+                        "{}: {}: on another filesystem, skipped (--one-file-system)",
+                        "ardisk".yellow(),
+                        entry_path.display()
+                    );
+                }
+                continue;
+            }
             shared.active_tasks.fetch_add(1, Ordering::SeqCst);
             let _ = shared.task_tx.send(Task {
                 path: entry_path,
@@ -679,6 +738,12 @@ pub fn scan_directory(
             }
 
             if let Ok(metadata) = entry.metadata() {
+                // --one-file-system: like `du -x`, also drop a non-directory
+                // that is on another device (e.g. a bind-mounted file).
+                #[cfg(unix)]
+                if shared.root_dev.is_some_and(|dev| metadata.dev() != dev) {
+                    continue;
+                }
                 // Hard-link dedup: if this inode has multiple links, only
                 // count its size the first time we see it across the whole
                 // traversal (GNU `du` semantics for a single invocation).

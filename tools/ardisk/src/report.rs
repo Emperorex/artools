@@ -141,6 +141,8 @@ pub struct Filters {
     /// `--no-hidden`: hidden files and directories (names starting with `.`)
     /// were skipped.
     pub no_hidden: bool,
+    /// `-x` / `--one-file-system`: other filesystems were not entered.
+    pub one_file_system: bool,
 }
 
 /// Facts about the run that are common to every mode.

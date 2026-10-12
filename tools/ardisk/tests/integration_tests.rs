@@ -1551,6 +1551,7 @@ fn json_echoes_filters_and_apparent_size_mode() {
             ignore: vec!["vendor".into()],
             no_ignore: true,
             no_hidden: true,
+            one_file_system: true,
         },
     };
     let all = dir_maps(&root, &[("", 1)]);
@@ -1571,6 +1572,7 @@ fn json_echoes_filters_and_apparent_size_mode() {
     assert_eq!(doc["filters"]["ignore"], serde_json::json!(["vendor"]));
     assert_eq!(doc["filters"]["no_ignore"], true);
     assert_eq!(doc["filters"]["no_hidden"], true);
+    assert_eq!(doc["filters"]["one_file_system"], true);
 }
 
 #[test]
@@ -2198,6 +2200,7 @@ fn hidden_config(skip_hidden: bool, respect_ignores: bool) -> std::sync::Arc<ard
         exclude: None,
         skip_hidden,
         inodes: false,
+        one_file_system: false,
     })
 }
 
@@ -2358,6 +2361,7 @@ fn no_hidden_composes_with_ignore_exclude_and_include() {
         exclude,
         skip_hidden: true,
         inodes: false,
+        one_file_system: false,
     });
     let (_raw, content, _) = parallel_scan_collect(root.clone(), 2, config, Collect::Nothing);
     // a.log: --include; .c.txt and .h: hidden; vendor: --ignore; gen/*: --exclude
@@ -2437,6 +2441,7 @@ fn inode_config(
         exclude: None,
         skip_hidden,
         inodes: true,
+        one_file_system: false,
     })
 }
 
@@ -2535,4 +2540,130 @@ fn inodes_do_not_depend_on_the_worker_count() {
             baseline
         );
     }
+}
+
+// ── -x / --one-file-system ──────────────────────────────────────────────────
+
+fn xdev_config(one_file_system: bool, inodes: bool) -> std::sync::Arc<ardisk::ScanConfig> {
+    std::sync::Arc::new(ardisk::ScanConfig {
+        ignore_dirs: HashSet::new(),
+        include_pattern: None,
+        debug: false,
+        apparent_size: true,
+        respect_gitignore: false,
+        exclude: None,
+        skip_hidden: false,
+        inodes,
+        one_file_system,
+    })
+}
+
+#[test]
+fn one_file_system_changes_nothing_on_a_single_filesystem() {
+    let (_d, root) = hidden_tree();
+    let modes: [fn() -> Collect; 4] = [
+        || Collect::Nothing,
+        || Collect::Largest(5),
+        || Collect::ByType,
+        || Collect::Duplicates { min_len: 1 },
+    ];
+    for mode in modes {
+        for inodes in [false, true] {
+            let off =
+                ardisk::parallel_scan_report(root.clone(), 2, xdev_config(false, inodes), mode());
+            let on =
+                ardisk::parallel_scan_report(root.clone(), 2, xdev_config(true, inodes), mode());
+            assert_eq!(off.raw_sizes, on.raw_sizes);
+            assert_eq!(off.content_sizes, on.content_sizes);
+            assert_eq!(off.file_count, on.file_count);
+            assert_eq!(off.types, on.types);
+            let paths = |v: &[FileEntry]| {
+                let mut p: Vec<PathBuf> = v.iter().map(|f| f.path.clone()).collect();
+                p.sort();
+                p
+            };
+            assert_eq!(paths(&off.files), paths(&on.files));
+        }
+    }
+}
+
+/// Finds a directory `parent` that directly contains a mount point `child`
+/// (a subdirectory on another device). Returns `None` where the system has
+/// no suitable small one, in which case the test below is skipped.
+#[cfg(unix)]
+fn find_nested_mount() -> Option<(PathBuf, PathBuf)> {
+    use std::os::unix::fs::MetadataExt;
+    for (parent, child) in [
+        ("/dev", "/dev/shm"),
+        ("/dev", "/dev/pts"),
+        ("/dev", "/dev/mqueue"),
+    ] {
+        let (Ok(p), Ok(c)) = (fs::metadata(parent), fs::symlink_metadata(child)) else {
+            continue;
+        };
+        if c.is_dir() && p.dev() != c.dev() {
+            return Some((PathBuf::from(parent), PathBuf::from(child)));
+        }
+    }
+    None
+}
+
+#[cfg(unix)]
+#[test]
+fn one_file_system_does_not_enter_a_mount_point() {
+    let Some((parent, mount)) = find_nested_mount() else {
+        eprintln!("no nested mount point found; skipping");
+        return;
+    };
+    let off = ardisk::parallel_scan_report(
+        parent.clone(),
+        2,
+        xdev_config(false, true),
+        Collect::Nothing,
+    );
+    let on =
+        ardisk::parallel_scan_report(parent.clone(), 2, xdev_config(true, true), Collect::Nothing);
+
+    assert!(
+        off.raw_sizes.contains_key(&mount),
+        "{mount:?} is scanned without -x"
+    );
+    assert!(
+        !on.raw_sizes.keys().any(|p| p.starts_with(&mount)),
+        "nothing at or below {mount:?} may be scanned with -x"
+    );
+    // Mount points are not counted either: like `du -x`, the whole entry is
+    // skipped. Every directly nested directory missing from the -x scan
+    // must be on another device, and the totals differ by exactly those.
+    use std::os::unix::fs::MetadataExt;
+    let parent_dev = fs::metadata(&parent).unwrap().dev();
+    let off_agg = aggregate_sizes(&off.raw_sizes, &parent);
+    let on_agg = aggregate_sizes(&on.raw_sizes, &parent);
+    let mut skipped = 0;
+    for dir in off.raw_sizes.keys() {
+        if dir.parent() == Some(parent.as_path()) && !on.raw_sizes.contains_key(dir) {
+            let dev = fs::symlink_metadata(dir).unwrap().dev();
+            assert_ne!(
+                dev, parent_dev,
+                "{dir:?} was skipped but is on the same device"
+            );
+            skipped += off_agg[dir];
+        }
+    }
+    assert!(skipped > 0);
+    assert_eq!(on_agg[&parent], off_agg[&parent] - skipped);
+}
+
+#[cfg(unix)]
+#[test]
+fn one_file_system_still_scans_a_root_that_is_itself_a_mount_point() {
+    let Some((_parent, mount)) = find_nested_mount() else {
+        return;
+    };
+    let off =
+        ardisk::parallel_scan_report(mount.clone(), 2, xdev_config(false, true), Collect::Nothing);
+    let on =
+        ardisk::parallel_scan_report(mount.clone(), 2, xdev_config(true, true), Collect::Nothing);
+    assert!(on.raw_sizes.contains_key(&mount));
+    assert_eq!(on.raw_sizes, off.raw_sizes);
 }

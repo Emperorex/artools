@@ -45,7 +45,23 @@ ardisk [OPTIONS] [PATH]
 | `--one-file-system` | `-x`  | —         | Stay on the filesystem of `PATH`; don't enter other mounts or volumes, like `du -x` (see [Staying on one filesystem](#staying-on-one-filesystem)) |
 | `--apparent-size`   | —     | —         | Use logical file sizes instead of block allocation — matches `du -sh`  |
 | `--jobs N`          | `-j`  | CPU-aware | Number of parallel worker threads (1–128; default is half the available cores, clamped to 1–16) |
+| `--progress`        | —     | —         | Show a live dirs/files/size counter on stderr while scanning (see [Progress](#progress)) |
 | `--debug`           | `-d`  | —         | Print scan statistics and errors to stderr                             |
+
+## Progress
+
+Scanning `/` or `~` can take a while. `--progress` shows a live counter on stderr, so you can see the scan is alive:
+
+```
+$ ardisk ~ --progress
+scanning: 214,880 dirs, 1,902,311 files, 182.40 GB, 41.3s
+```
+
+- On a terminal the line updates in place about ten times a second and is erased before the report is printed.
+- When stderr is redirected (a log file, CI), ardisk writes a plain line every two seconds and a final `scanned: ...` summary, with no control characters.
+- Counts follow the same filters as the report, and the final numbers equal the report's totals. With `--inodes` the size is left out.
+- With `--duplicates`, a `comparing N candidate files...` line is shown while file contents are compared.
+- Only stderr is used, so stdout (including `--json`) is unchanged.
 
 ## Size units
 

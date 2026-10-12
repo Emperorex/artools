@@ -2206,6 +2206,7 @@ fn hidden_config(skip_hidden: bool, respect_ignores: bool) -> std::sync::Arc<ard
         inodes: false,
         one_file_system: false,
         mtime: Default::default(),
+        progress: None,
     })
 }
 
@@ -2368,6 +2369,7 @@ fn no_hidden_composes_with_ignore_exclude_and_include() {
         inodes: false,
         one_file_system: false,
         mtime: Default::default(),
+        progress: None,
     });
     let (_raw, content, _) = parallel_scan_collect(root.clone(), 2, config, Collect::Nothing);
     // a.log: --include; .c.txt and .h: hidden; vendor: --ignore; gen/*: --exclude
@@ -2449,6 +2451,7 @@ fn inode_config(
         inodes: true,
         one_file_system: false,
         mtime: Default::default(),
+        progress: None,
     })
 }
 
@@ -2563,6 +2566,7 @@ fn xdev_config(one_file_system: bool, inodes: bool) -> std::sync::Arc<ardisk::Sc
         inodes,
         one_file_system,
         mtime: Default::default(),
+        progress: None,
     })
 }
 
@@ -2729,6 +2733,7 @@ fn age_config(
         inodes: false,
         one_file_system: false,
         mtime: ardisk::age::MtimeFilter::new(now, older_days.map(d), newer_days.map(d)),
+        progress: None,
     })
 }
 
@@ -2884,4 +2889,34 @@ fn age_filtered_directory_report_hides_directories_without_matching_files() {
         .map(|(p, _)| p.strip_prefix(&root).unwrap().display().to_string())
         .collect();
     assert_eq!(names, ["", "old"]);
+}
+
+// ── --progress ──────────────────────────────────────────────────────────────
+
+#[test]
+fn progress_counters_end_equal_to_the_scan_totals() {
+    let (_d, root) = hidden_tree();
+    for inodes in [false, true] {
+        for workers in [1, 4] {
+            let progress = std::sync::Arc::new(ardisk::progress::ScanProgress::default());
+            let config = std::sync::Arc::new(ardisk::ScanConfig {
+                ignore_dirs: HashSet::new(),
+                include_pattern: None,
+                debug: false,
+                apparent_size: true,
+                respect_gitignore: false,
+                exclude: None,
+                skip_hidden: false,
+                inodes,
+                one_file_system: false,
+                mtime: Default::default(),
+                progress: Some(std::sync::Arc::clone(&progress)),
+            });
+            let out = ardisk::parallel_scan_report(root.clone(), workers, config, Collect::Nothing);
+            let snap = progress.snapshot();
+            assert_eq!(snap.dirs, out.raw_sizes.len() as u64);
+            assert_eq!(snap.files, out.file_count);
+            assert_eq!(snap.amount, aggregate_sizes(&out.raw_sizes, &root)[&root]);
+        }
+    }
 }

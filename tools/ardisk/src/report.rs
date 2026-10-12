@@ -53,8 +53,9 @@ pub struct DirectoryQuery {
     /// `--threshold`: smallest directory listed, in bytes (a count of inodes
     /// with `--inodes`).
     pub threshold_bytes: Option<u64>,
-    /// `--include` is active: directories without matching file content are
-    /// not listed (unless a threshold is given).
+    /// A file filter (`--include`, `--older-than`, `--newer-than`) is
+    /// active: directories without matching file content are not listed
+    /// (unless a threshold is given).
     #[serde(skip)]
     pub include_active: bool,
     /// `--summarize`: list nothing, report totals only.
@@ -143,6 +144,10 @@ pub struct Filters {
     pub no_hidden: bool,
     /// `-x` / `--one-file-system`: other filesystems were not entered.
     pub one_file_system: bool,
+    /// `--older-than` as given, e.g. `"1y"`.
+    pub older_than: Option<String>,
+    /// `--newer-than` as given, e.g. `"7d"`.
+    pub newer_than: Option<String>,
 }
 
 /// Facts about the run that are common to every mode.

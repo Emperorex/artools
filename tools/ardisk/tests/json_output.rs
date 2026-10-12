@@ -757,3 +757,88 @@ fn one_file_system_is_echoed_in_filters() {
     // Same filesystem throughout: same numbers as without -x.
     assert_eq!(short["summary"], off["summary"]);
 }
+
+fn set_age(path: &Path, days: u64) {
+    let t = std::time::SystemTime::now() - std::time::Duration::from_secs(days * 86_400);
+    fs::File::options()
+        .write(true)
+        .open(path)
+        .unwrap()
+        .set_modified(t)
+        .unwrap();
+}
+
+#[test]
+fn older_than_and_newer_than_filter_and_are_echoed() {
+    let (_d, root) = sample();
+    set_age(&root.join("photos/a.raw"), 800);
+    set_age(&root.join("backup/a-copy.raw"), 10);
+    set_age(&root.join("docs/notes.txt"), 2);
+
+    let (doc, _) = json(&[
+        p(&root),
+        "--json",
+        "--largest-files",
+        "10",
+        "--older-than",
+        "1y",
+    ]);
+    assert_eq!(doc["filters"]["older_than"], "1y");
+    assert_eq!(doc["filters"]["newer_than"], Value::Null);
+    let paths: Vec<&str> = doc["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| e["path"].as_str().unwrap())
+        .collect();
+    assert_eq!(paths, ["photos/a.raw"]);
+
+    let (doc, _) = json(&[
+        p(&root),
+        "--json",
+        "--by-type",
+        "--apparent-size",
+        "--newer-than",
+        "1w",
+    ]);
+    assert_eq!(doc["filters"]["newer_than"], "1w");
+    assert_eq!(doc["summary"]["files"], 1);
+    assert_eq!(doc["summary"]["total_bytes"], 3_000);
+
+    // A window: newer than 1 month, older than 1 week.
+    let (doc, _) = json(&[
+        p(&root),
+        "--json",
+        "--largest-files",
+        "10",
+        "--newer-than",
+        "1mo",
+        "--older-than",
+        "1w",
+    ]);
+    let entries = doc["entries"].as_array().unwrap();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0]["path"], "backup/a-copy.raw");
+
+    // Duplicates only see files that pass the filter: the pair is split.
+    let (doc, _) = json(&[p(&root), "--json", "--duplicates", "--older-than", "1y"]);
+    assert_eq!(doc["summary"]["groups"], 0);
+}
+
+#[test]
+fn bad_ages_and_empty_windows_are_errors_without_json() {
+    let (_d, root) = sample();
+    for args in [
+        vec!["--older-than", "1m"],
+        vec!["--older-than", "7"],
+        vec!["--newer-than", "1.5d"],
+        vec!["--older-than", "1y", "--newer-than", "30d"],
+        vec!["--older-than", "7d", "--newer-than", "1w"],
+    ] {
+        let mut full = vec![p(&root), "--json"];
+        full.extend(args.iter());
+        let out = ardisk(&full);
+        assert!(!out.status.success(), "{args:?} should fail");
+        assert!(out.stdout.is_empty(), "{args:?} printed to stdout");
+    }
+}

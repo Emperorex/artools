@@ -1552,6 +1552,8 @@ fn json_echoes_filters_and_apparent_size_mode() {
             no_ignore: true,
             no_hidden: true,
             one_file_system: true,
+            older_than: Some("1y".into()),
+            newer_than: None,
         },
     };
     let all = dir_maps(&root, &[("", 1)]);
@@ -1573,6 +1575,8 @@ fn json_echoes_filters_and_apparent_size_mode() {
     assert_eq!(doc["filters"]["no_ignore"], true);
     assert_eq!(doc["filters"]["no_hidden"], true);
     assert_eq!(doc["filters"]["one_file_system"], true);
+    assert_eq!(doc["filters"]["older_than"], "1y");
+    assert_eq!(doc["filters"]["newer_than"], serde_json::Value::Null);
 }
 
 #[test]
@@ -2201,6 +2205,7 @@ fn hidden_config(skip_hidden: bool, respect_ignores: bool) -> std::sync::Arc<ard
         skip_hidden,
         inodes: false,
         one_file_system: false,
+        mtime: Default::default(),
     })
 }
 
@@ -2362,6 +2367,7 @@ fn no_hidden_composes_with_ignore_exclude_and_include() {
         skip_hidden: true,
         inodes: false,
         one_file_system: false,
+        mtime: Default::default(),
     });
     let (_raw, content, _) = parallel_scan_collect(root.clone(), 2, config, Collect::Nothing);
     // a.log: --include; .c.txt and .h: hidden; vendor: --ignore; gen/*: --exclude
@@ -2442,6 +2448,7 @@ fn inode_config(
         skip_hidden,
         inodes: true,
         one_file_system: false,
+        mtime: Default::default(),
     })
 }
 
@@ -2555,6 +2562,7 @@ fn xdev_config(one_file_system: bool, inodes: bool) -> std::sync::Arc<ardisk::Sc
         skip_hidden: false,
         inodes,
         one_file_system,
+        mtime: Default::default(),
     })
 }
 
@@ -2666,4 +2674,214 @@ fn one_file_system_still_scans_a_root_that_is_itself_a_mount_point() {
         ardisk::parallel_scan_report(mount.clone(), 2, xdev_config(true, true), Collect::Nothing);
     assert!(on.raw_sizes.contains_key(&mount));
     assert_eq!(on.raw_sizes, off.raw_sizes);
+}
+
+// ── --older-than / --newer-than ─────────────────────────────────────────────
+
+const DAY_SECS: u64 = 86_400;
+
+/// Sets a file's mtime to `days` days before `now`.
+fn age_file(path: &Path, now: std::time::SystemTime, days: u64) {
+    let t = now - std::time::Duration::from_secs(days * DAY_SECS);
+    fs::File::options()
+        .write(true)
+        .open(path)
+        .unwrap()
+        .set_modified(t)
+        .unwrap();
+}
+
+/// old/a (800 d), old/b (400 d), mid/c (40 d), new/d (3 d), new/e (0 d)
+fn aged_tree(now: std::time::SystemTime) -> (TempDir, PathBuf) {
+    let (d, root) = make_sized_tree(&[
+        ("old/a.zip", 1000),
+        ("old/b.jpg", 500),
+        ("mid/c.log", 200),
+        ("new/d.txt", 30),
+        ("new/e.txt", 7),
+    ]);
+    for (rel, days) in [
+        ("old/a.zip", 800),
+        ("old/b.jpg", 400),
+        ("mid/c.log", 40),
+        ("new/d.txt", 3),
+        ("new/e.txt", 0),
+    ] {
+        age_file(&root.join(rel), now, days);
+    }
+    (d, root)
+}
+
+fn age_config(
+    now: std::time::SystemTime,
+    older_days: Option<u64>,
+    newer_days: Option<u64>,
+) -> std::sync::Arc<ardisk::ScanConfig> {
+    let d = |n: u64| std::time::Duration::from_secs(n * DAY_SECS);
+    std::sync::Arc::new(ardisk::ScanConfig {
+        ignore_dirs: HashSet::new(),
+        include_pattern: None,
+        debug: false,
+        apparent_size: true,
+        respect_gitignore: true,
+        exclude: None,
+        skip_hidden: false,
+        inodes: false,
+        one_file_system: false,
+        mtime: ardisk::age::MtimeFilter::new(now, older_days.map(d), newer_days.map(d)),
+    })
+}
+
+fn listed(out: &ardisk::ScanOutput, root: &Path) -> Vec<String> {
+    let mut v: Vec<String> = out
+        .files
+        .iter()
+        .map(|f| f.path.strip_prefix(root).unwrap().display().to_string())
+        .collect();
+    v.sort();
+    v
+}
+
+#[test]
+fn older_than_keeps_only_old_files_in_every_mode() {
+    let now = std::time::SystemTime::now();
+    let (_d, root) = aged_tree(now);
+    let cfg = || age_config(now, Some(365), None);
+
+    let out = ardisk::parallel_scan_report(root.clone(), 2, cfg(), Collect::Largest(10));
+    assert_eq!(listed(&out, &root), ["old/a.zip", "old/b.jpg"]);
+    assert_eq!(out.file_count, 2);
+    assert_eq!(out.content_sizes.values().sum::<u64>(), 1500);
+
+    let out = ardisk::parallel_scan_report(root.clone(), 2, cfg(), Collect::ByType);
+    let exts: Vec<_> = out
+        .types
+        .rows
+        .iter()
+        .map(|r| r.extension.clone().unwrap())
+        .collect();
+    assert_eq!(exts, [".zip", ".jpg"]);
+    assert_eq!(out.types.total_bytes, 1500);
+}
+
+#[test]
+fn newer_than_keeps_only_recent_files() {
+    let now = std::time::SystemTime::now();
+    let (_d, root) = aged_tree(now);
+    let out = ardisk::parallel_scan_report(
+        root.clone(),
+        2,
+        age_config(now, None, Some(7)),
+        Collect::Largest(10),
+    );
+    assert_eq!(listed(&out, &root), ["new/d.txt", "new/e.txt"]);
+}
+
+#[test]
+fn older_and_newer_combine_into_a_window() {
+    let now = std::time::SystemTime::now();
+    let (_d, root) = aged_tree(now);
+    let out = ardisk::parallel_scan_report(
+        root.clone(),
+        2,
+        age_config(now, Some(30), Some(500)),
+        Collect::Largest(10),
+    );
+    assert_eq!(listed(&out, &root), ["mid/c.log", "old/b.jpg"]);
+}
+
+#[test]
+fn older_and_newer_with_the_same_age_partition_the_files() {
+    let now = std::time::SystemTime::now();
+    let (_d, root) = aged_tree(now);
+    for days in [1, 3, 40, 365, 1000] {
+        let all = ardisk::parallel_scan_report(
+            root.clone(),
+            2,
+            age_config(now, None, None),
+            Collect::Nothing,
+        );
+        let old = ardisk::parallel_scan_report(
+            root.clone(),
+            2,
+            age_config(now, Some(days), None),
+            Collect::Nothing,
+        );
+        let new = ardisk::parallel_scan_report(
+            root.clone(),
+            2,
+            age_config(now, None, Some(days)),
+            Collect::Nothing,
+        );
+        assert_eq!(
+            old.file_count + new.file_count,
+            all.file_count,
+            "days={days}"
+        );
+        let sum = |o: &ardisk::ScanOutput| o.content_sizes.values().sum::<u64>();
+        assert_eq!(sum(&old) + sum(&new), sum(&all), "days={days}");
+    }
+}
+
+#[test]
+fn age_filter_never_stops_directory_traversal() {
+    let now = std::time::SystemTime::now();
+    let (_d, root) = aged_tree(now);
+    // Only file mtimes matter: directories are always entered, whatever
+    // their own mtime.
+    let out = ardisk::parallel_scan_report(
+        root.clone(),
+        2,
+        age_config(now, Some(365), None),
+        Collect::Nothing,
+    );
+    for dir in ["old", "mid", "new"] {
+        assert!(
+            out.raw_sizes.contains_key(&root.join(dir)),
+            "{dir} must be scanned"
+        );
+    }
+    // Directories without matching files keep only their own entry cost.
+    assert_eq!(out.content_sizes[&root.join("new")], 0);
+}
+
+#[test]
+fn age_filter_counts_inodes_of_matching_files_only() {
+    let now = std::time::SystemTime::now();
+    let (_d, root) = aged_tree(now);
+    let mut cfg = std::sync::Arc::try_unwrap(age_config(now, Some(365), None))
+        .ok()
+        .unwrap();
+    cfg.inodes = true;
+    let (raw, _c, _) =
+        parallel_scan_collect(root.clone(), 2, std::sync::Arc::new(cfg), Collect::Nothing);
+    let agg = aggregate_sizes(&raw, &root);
+    // root + old + mid + new directories, plus the two old files.
+    assert_eq!(agg[&root], 4 + 2);
+}
+
+#[test]
+fn age_filtered_directory_report_hides_directories_without_matching_files() {
+    let now = std::time::SystemTime::now();
+    let (_d, root) = aged_tree(now);
+    let (raw, content, _) = parallel_scan_collect(
+        root.clone(),
+        2,
+        age_config(now, Some(365), None),
+        Collect::Nothing,
+    );
+    let all = aggregate_sizes(&raw, &root);
+    let all_content = aggregate_sizes(&content, &root);
+    let q = DirectoryQuery {
+        top: 20,
+        include_active: true,
+        ..Default::default()
+    };
+    let sel = select_directories(&all, &all_content, &root, &q);
+    let names: Vec<_> = sel
+        .entries
+        .iter()
+        .map(|(p, _)| p.strip_prefix(&root).unwrap().display().to_string())
+        .collect();
+    assert_eq!(names, ["", "old"]);
 }

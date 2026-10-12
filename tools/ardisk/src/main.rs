@@ -4,6 +4,7 @@ use ardisk::{
     aggregate_sizes, build_exclude_matcher,
     duplicates::{DuplicateReport, find_duplicates},
     format_size, format_size_plain, paint_size, parallel_scan_report,
+    progress::{Reporter, ScanProgress, Status, group_digits},
     report::{
         DirectoryQuery, DirectorySummary, Filters, InodeSummary, ReportMeta, render_by_type_text,
         select_directories, write_by_type, write_directories, write_duplicates, write_inodes,
@@ -219,6 +220,15 @@ struct Args {
     )]
     by_type: bool,
 
+    /// Show a live counter of scanned directories, files and size on stderr
+    /// while the scan runs, so you can tell a long scan is alive. On a
+    /// terminal the line updates in place and disappears when the report
+    /// is printed; when stderr is redirected, a line is logged every two
+    /// seconds plus a final summary. Never touches stdout, so it is safe
+    /// with --json.
+    #[arg(long)]
+    progress: bool,
+
     /// Only count files last modified at least this long ago, e.g. 30d, 6mo,
     /// 1y. Units: s, min, h, d, w, mo (30 days), y (365 days). Applies to
     /// files (and symlinks with --inodes), never stops directories from
@@ -352,6 +362,8 @@ fn main() {
         );
     }
 
+    let scan_progress = args.progress.then(|| Arc::new(ScanProgress::default()));
+
     let config = Arc::new(ScanConfig {
         ignore_dirs,
         include_pattern,
@@ -362,6 +374,7 @@ fn main() {
         skip_hidden: args.no_hidden,
         inodes: args.inodes,
         one_file_system: args.one_file_system,
+        progress: scan_progress.clone(),
         mtime: MtimeFilter::new(
             SystemTime::now(),
             args.older_than.as_ref().map(|a| a.duration),
@@ -384,23 +397,40 @@ fn main() {
             None => Collect::Nothing,
         }
     };
+    // Lets later phases (comparing duplicates) report on stderr, too.
+    let status: Option<Status>;
     let ScanOutput {
         raw_sizes,
         content_sizes: raw_content_sizes,
         files: collected_files,
         file_count,
         types,
-    } = parallel_scan_report(target_path.clone(), args.jobs, config, collect);
+    } = {
+        let reporter = scan_progress
+            .as_ref()
+            .map(|p| Reporter::start(Arc::clone(p), args.inodes));
+        let out = parallel_scan_report(target_path.clone(), args.jobs, config, collect);
+        status = reporter.map(Reporter::finish);
+        out
+    };
 
     // Phase 1b (--duplicates only): narrow the candidates down to groups of
     // identical files. This is where almost all of the time goes.
     // The candidate list is moved, not copied: on a big tree it is the
     // largest allocation of the whole run.
     let (largest_files, duplicate_report) = if args.duplicates {
-        (
-            Vec::new(),
-            Some(find_duplicates(collected_files, args.jobs)),
-        )
+        if let Some(status) = &status {
+            status.show(&format!(
+                "comparing {} candidate file{}...",
+                group_digits(collected_files.len() as u64),
+                if collected_files.len() == 1 { "" } else { "s" }
+            ));
+        }
+        let report = find_duplicates(collected_files, args.jobs);
+        if let Some(status) = &status {
+            status.clear();
+        }
+        (Vec::new(), Some(report))
     } else {
         (collected_files, None)
     };

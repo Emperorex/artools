@@ -1,5 +1,6 @@
 pub mod age;
 pub mod duplicates;
+pub mod progress;
 pub mod report;
 pub mod tree;
 pub mod types;
@@ -264,6 +265,8 @@ pub struct ScanConfig {
     /// modification time passes this filter are counted (like
     /// `include_pattern`, it never stops directories from being traversed).
     pub mtime: age::MtimeFilter,
+    /// `--progress`: running totals the scan updates once per directory.
+    pub progress: Option<Arc<progress::ScanProgress>>,
 }
 
 /// Builds a `ScanConfig` from the given parameters.
@@ -305,6 +308,7 @@ pub fn build_config_with_exclude(
         inodes: false,
         one_file_system: false,
         mtime: age::MtimeFilter::default(),
+        progress: None,
     })
 }
 
@@ -669,6 +673,7 @@ pub fn scan_directory(
     };
 
     let mut local_content_size = 0u64; // only matching file bytes
+    let mut local_files = 0u64; // regular files counted, for --progress
     let mut local_dir_size = 0u64; // files + directory inode cost
 
     for entry in entries {
@@ -783,6 +788,7 @@ pub fn scan_directory(
                     local_content_size += file_size;
                     local_dir_size += file_size;
                     if metadata.is_file() {
+                        local_files += 1;
                         collector.observe(file_size, metadata.len(), entry_path);
                     }
                 }
@@ -795,6 +801,12 @@ pub fn scan_directory(
     // main.rs can still suppress dirs with no matching file content.
     if let Ok(dir_metadata) = fs::metadata(dir_path) {
         local_dir_size += entry_cost(&dir_metadata, config);
+    }
+
+    // Same measure as the report's totals (files plus directory entries),
+    // so the final counter matches the root size printed afterwards.
+    if let Some(progress) = &config.progress {
+        progress.add_dir(local_files, local_dir_size);
     }
 
     shared

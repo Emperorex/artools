@@ -30,6 +30,7 @@ ardisk [OPTIONS] [PATH]
 | `--max-depth N`     | —     | unlimited | Maximum depth of directories to display in the report                  |
 | `--threshold SIZE`  | —     | —         | Only show directories larger than this size (e.g. `100MB`, `1GB`)      |
 | `--summarize`       | `-s`  | —         | Print only the grand total for the root directory                      |
+| `--tree`            | —     | —         | Draw the directory report as a tree, biggest first (see [Tree view](#tree-view)) |
 | `--largest-files N` | —     | —         | List the `N` largest individual files instead of the directory report (see [Finding the largest files](#finding-the-largest-files)) |
 | `--by-type`         | —     | —         | Show files and total size per file extension, with each type's share (see [Breakdown by file type](#breakdown-by-file-type)) |
 | `--duplicates`      | —     | —         | Report groups of files with identical content; read-only (see [Finding duplicate files](#finding-duplicate-files)) |
@@ -76,6 +77,29 @@ The following directories are always skipped:
 - `.git`
 - `node_modules`
 - `__pycache__`
+
+## Tree view
+
+`--tree` draws the directory report as a hierarchy. Each directory sits under its parent, siblings are ordered biggest first, and the middle column is the share of the total:
+
+```
+$ ardisk ~/project --tree --top 8
+  1.20 GB  100%  /home/me/project
+900.00 MB   73%  ├── target
+850.00 MB   69%  │   ├── debug
+ 48.00 MB    4%  │   └── release
+300.00 MB   24%  ├── data
+120.00 MB   10%  │   └── raw
+ 14.00 MB    1%  ├── src
+  2.10 MB    0%  └── docs
+(more directories not shown; raise --top to see them)
+```
+
+- It shows **the same directories as the flat report**: the `--top` largest (default 20) across the whole tree, limited by `--max-depth`, `--threshold` and `--include` as usual. A directory is never smaller than its subdirectories, so every listed directory's parent is listed too.
+- `--top` is a total, not per level, so a big branch can be shown deeper than a small one. Use `--max-depth` to keep the tree shallow.
+- With `--inodes` the tree shows inode counts instead of sizes.
+- Only directories are drawn, never individual files; use `--largest-files` for those.
+- Text only: `--tree` cannot be combined with `--json`, `--summarize`, `--largest-files`, `--duplicates` or `--by-type`. In JSON, `entries` already carry each directory's `path` and `depth`.
 
 ## Finding the largest files
 

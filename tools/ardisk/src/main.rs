@@ -1,7 +1,9 @@
 use ardisk::{
     Collect, DEFAULT_IGNORES, ScanConfig, ScanOutput,
     age::{Age, MtimeFilter, check_window, parse_age},
-    aggregate_sizes, build_exclude_matcher,
+    aggregate_sizes,
+    bar::render_list_with_bars,
+    build_exclude_matcher,
     duplicates::{DuplicateReport, find_duplicates},
     format_size, format_size_plain, paint_size, parallel_scan_report,
     progress::{Reporter, ScanProgress, Status, group_digits},
@@ -19,7 +21,7 @@ use glob::Pattern;
 use std::{
     collections::HashSet,
     fs,
-    io::{self, Write},
+    io::{self, IsTerminal, Write},
     path::PathBuf,
     sync::Arc,
     time::{Instant, SystemTime},
@@ -112,6 +114,25 @@ fn default_jobs() -> usize {
 /// machines while keeping a hostile or accidental value from taking down the
 /// process or the machine it runs on.
 const MAX_JOBS: u16 = 128;
+
+/// When to draw usage bars in the flat directory list (`--bar`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+enum BarMode {
+    /// Only when stdout is a terminal.
+    Auto,
+    Always,
+    Never,
+}
+
+impl BarMode {
+    fn enabled(self, stdout_is_terminal: bool) -> bool {
+        match self {
+            BarMode::Auto => stdout_is_terminal,
+            BarMode::Always => true,
+            BarMode::Never => false,
+        }
+    }
+}
 
 /// CLI arguments for ardisk
 #[derive(Parser, Debug)]
@@ -249,6 +270,23 @@ struct Args {
     /// scanning /). Works with every mode. Unix only.
     #[arg(short = 'x', long = "one-file-system")]
     one_file_system: bool,
+
+    /// Draw a usage bar and percentage next to each directory in the list,
+    /// relative to the scanned root: `████░░░░░░  42%`. WHEN is auto (the
+    /// default: only when stdout is a terminal, so piped output keeps the
+    /// plain `SIZE  PATH` lines), always, or never. `--bar` alone means
+    /// always.
+    #[arg(
+        long,
+        value_name = "WHEN",
+        value_enum,
+        default_value_t = BarMode::Auto,
+        num_args = 0..=1,
+        require_equals = true,
+        default_missing_value = "always",
+        conflicts_with_all = ["tree", "largest_files", "duplicates", "by_type", "summarize", "json"]
+    )]
+    bar: BarMode,
 
     /// Show the directory report as a tree (like dust or ncdu, in plain
     /// text): each directory under its parent, biggest first, with its share
@@ -554,6 +592,8 @@ fn main() {
             println!("{}", title.yellow().bold());
         }
 
+        let show_bars = args.bar.enabled(io::stdout().is_terminal());
+
         if let Some(report) = &duplicate_report {
             print_duplicates(report, args.top, args.summarize);
             warn_unreadable(report, args.debug);
@@ -597,8 +637,20 @@ fn main() {
                     &target_path,
                     &query,
                 );
-                for (path, count) in &selection.entries {
-                    println!("{:>10}  {}", count, path.display());
+                if show_bars {
+                    print!(
+                        "{}",
+                        render_list_with_bars(
+                            &selection.entries,
+                            root_total,
+                            |n| n.to_string(),
+                            |_, t| t
+                        )
+                    );
+                } else {
+                    for (path, count) in &selection.entries {
+                        println!("{:>10}  {}", count, path.display());
+                    }
                 }
             }
         } else if args.summarize {
@@ -607,8 +659,20 @@ fn main() {
         } else {
             let selection =
                 select_directories(&aggregated_sizes, &aggregated_content, &target_path, &query);
-            for (path, size) in &selection.entries {
-                println!("{:>10}  {}", format_size(*size), path.display());
+            if show_bars {
+                print!(
+                    "{}",
+                    render_list_with_bars(
+                        &selection.entries,
+                        root_total,
+                        format_size_plain,
+                        paint_size
+                    )
+                );
+            } else {
+                for (path, size) in &selection.entries {
+                    println!("{:>10}  {}", format_size(*size), path.display());
+                }
             }
         }
     }
@@ -797,6 +861,51 @@ mod tests {
                 "--by-type must conflict with {:?}",
                 extra
             );
+        }
+    }
+
+    #[test]
+    fn bar_defaults_to_auto_and_bare_flag_means_always() {
+        use super::BarMode;
+        let parse = |argv: &[&str]| Args::try_parse_from(argv).unwrap();
+        assert_eq!(parse(&["ardisk", "."]).bar, BarMode::Auto);
+        assert_eq!(parse(&["ardisk", ".", "--bar"]).bar, BarMode::Always);
+        assert_eq!(parse(&["ardisk", "--bar", "."]).bar, BarMode::Always);
+        assert_eq!(parse(&["ardisk", "--bar", "."]).path, ".");
+        assert_eq!(parse(&["ardisk", ".", "--bar=never"]).bar, BarMode::Never);
+        assert_eq!(parse(&["ardisk", ".", "--bar=auto"]).bar, BarMode::Auto);
+        assert_eq!(
+            parse(&["ardisk", ".", "--bar", "--inodes"]).bar,
+            BarMode::Always
+        );
+        assert!(Args::try_parse_from(["ardisk", ".", "--bar=sometimes"]).is_err());
+    }
+
+    #[test]
+    fn bar_mode_enabled() {
+        use super::BarMode;
+        assert!(BarMode::Auto.enabled(true));
+        assert!(!BarMode::Auto.enabled(false));
+        assert!(BarMode::Always.enabled(false));
+        assert!(!BarMode::Never.enabled(true));
+    }
+
+    #[test]
+    fn explicit_bar_conflicts_with_non_list_outputs_but_default_does_not() {
+        for extra in [
+            vec!["--tree"],
+            vec!["--json"],
+            vec!["--summarize"],
+            vec!["--by-type"],
+            vec!["--duplicates"],
+            vec!["--largest-files", "3"],
+        ] {
+            let mut argv = vec!["ardisk", ".", "--bar"];
+            argv.extend(extra.iter());
+            assert!(Args::try_parse_from(&argv).is_err(), "{argv:?}");
+            let mut plain = vec!["ardisk", "."];
+            plain.extend(extra.iter());
+            assert!(Args::try_parse_from(&plain).is_ok(), "{plain:?}");
         }
     }
 

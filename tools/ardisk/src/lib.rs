@@ -1,4 +1,5 @@
 pub mod age;
+pub mod bar;
 pub mod duplicates;
 pub mod progress;
 pub mod report;

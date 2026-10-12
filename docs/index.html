@@ -547,20 +547,20 @@
 
     <div class="tool-card">
       <div class="tool-card-header">
-        <span class="tool-name"><span class="ar">ar</span>disk<span class="tool-ver">v0.2.5</span></span>
+        <span class="tool-name"><span class="ar">ar</span>disk<span class="tool-ver">v0.2.6</span></span>
         <span class="tool-alt">replaces du</span>
       </div>
-      <p class="tool-desc">Bottom-up parallel disk usage analysis. Shows the heaviest directories first with accurate rollup sizes using a single-pass DP algorithm. Also lists the largest files, groups duplicates, and breaks usage down by file type, with JSON output for scripts.</p>
+      <p class="tool-desc">Bottom-up parallel disk usage analysis. Shows the heaviest directories first with accurate rollup sizes using a single-pass DP algorithm. Also draws a tree view, lists the largest files, groups duplicates, breaks usage down by file type and counts inodes, with JSON output for scripts.</p>
       <div class="tool-flags">
         <span class="flag">--top N</span>
         <span class="flag">--max-depth</span>
-        <span class="flag">--threshold</span>
-        <span class="flag">--include</span>
+        <span class="flag">--tree</span>
         <span class="flag">--exclude</span>
-        <span class="flag">--summarize</span>
         <span class="flag">--largest-files</span>
         <span class="flag">--by-type</span>
         <span class="flag">--duplicates</span>
+        <span class="flag">--inodes</span>
+        <span class="flag">-x one-fs</span>
         <span class="flag">--json</span>
       </div>
     </div>
@@ -623,6 +623,9 @@
         <span class="uc-comment"># Top 10 heaviest directories</span>
         <br><span class="uc-cmd">ardisk</span> <span class="uc-arg">.</span> <span class="uc-flag">--top</span> <span class="uc-arg">10</span>
         <br>
+        <br><span class="uc-comment"># Same, as a tree, two levels deep</span>
+        <br><span class="uc-cmd">ardisk</span> <span class="uc-arg">.</span> <span class="uc-flag">--tree</span> <span class="uc-flag">--max-depth</span> <span class="uc-arg">2</span>
+        <br>
         <br><span class="uc-comment"># How much space do .mp4 files use?</span>
         <br><span class="uc-cmd">ardisk</span> <span class="uc-arg">~/Movies</span> <span class="uc-flag">--include</span> <span class="uc-arg">"*.mp4"</span> <span class="uc-flag">--summarize</span>
         <br>
@@ -637,6 +640,9 @@
         <br>
         <br><span class="uc-comment"># Find duplicate files (report only)</span>
         <br><span class="uc-cmd">ardisk</span> <span class="uc-arg">~</span> <span class="uc-flag">--duplicates</span> <span class="uc-flag">--min-size</span> <span class="uc-arg">1MB</span>
+        <br>
+        <br><span class="uc-comment"># Out of inodes? Count them, staying on this volume</span>
+        <br><span class="uc-cmd">ardisk</span> <span class="uc-arg">~</span> <span class="uc-flag">-x</span> <span class="uc-flag">--inodes</span>
       </div>
     </div>
 

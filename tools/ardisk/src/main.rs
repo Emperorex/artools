@@ -217,6 +217,13 @@ struct Args {
     )]
     by_type: bool,
 
+    /// Stay on the filesystem of PATH, like du -x and find -xdev: do not
+    /// enter directories on other filesystems, mounts or APFS volumes (on
+    /// macOS that includes firmlinked locations such as /Users when
+    /// scanning /). Works with every mode. Unix only.
+    #[arg(short = 'x', long = "one-file-system")]
+    one_file_system: bool,
+
     /// Show the directory report as a tree (like dust or ncdu, in plain
     /// text): each directory under its parent, biggest first, with its share
     /// of the total. Lists the same directories as the flat report, so
@@ -316,6 +323,14 @@ fn main() {
         }
     };
 
+    if args.one_file_system && !cfg!(unix) {
+        eprintln!(
+            "{}",
+            "ardisk: --one-file-system is only supported on Unix-like systems; scanning normally"
+                .yellow()
+        );
+    }
+
     let config = Arc::new(ScanConfig {
         ignore_dirs,
         include_pattern,
@@ -325,6 +340,7 @@ fn main() {
         exclude,
         skip_hidden: args.no_hidden,
         inodes: args.inodes,
+        one_file_system: args.one_file_system,
     });
 
     let start_time = Instant::now();
@@ -405,6 +421,7 @@ fn main() {
                 ignore: args.ignore.clone(),
                 no_ignore: args.no_ignore,
                 no_hidden: args.no_hidden,
+                one_file_system: args.one_file_system,
             },
         };
         let stdout = io::stdout();
@@ -720,6 +737,33 @@ mod tests {
                 "--by-type must conflict with {:?}",
                 extra
             );
+        }
+    }
+
+    #[test]
+    fn one_file_system_has_short_and_long_forms_and_works_with_every_mode() {
+        assert!(
+            !Args::try_parse_from(["ardisk", "."])
+                .unwrap()
+                .one_file_system
+        );
+        for flag in ["-x", "--one-file-system"] {
+            for extra in [
+                vec![],
+                vec!["--tree"],
+                vec!["--inodes"],
+                vec!["--by-type"],
+                vec!["--duplicates"],
+                vec!["--largest-files", "3"],
+                vec!["--json", "-s"],
+                vec!["--no-hidden", "--no-ignore"],
+            ] {
+                let mut argv = vec!["ardisk", ".", flag];
+                argv.extend(extra.iter());
+                let args = Args::try_parse_from(&argv)
+                    .unwrap_or_else(|e| panic!("{argv:?} should parse: {e}"));
+                assert!(args.one_file_system);
+            }
         }
     }
 

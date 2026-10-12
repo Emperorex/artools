@@ -40,6 +40,7 @@ ardisk [OPTIONS] [PATH]
 | `--include PATTERN` | —     | —         | Only count files matching this glob pattern (e.g. `"*.rs"`, `"*.mp4"`) |
 | `--exclude GLOB`    | —     | —         | Exclude files/dirs matching a gitignore-style glob; repeatable (see [Excluding paths](#excluding-paths)) |
 | `--no-hidden`       | —     | —         | Skip files and directories whose name starts with `.` (see [Hidden files](#hidden-files)) |
+| `--one-file-system` | `-x`  | —         | Stay on the filesystem of `PATH`; don't enter other mounts or volumes, like `du -x` (see [Staying on one filesystem](#staying-on-one-filesystem)) |
 | `--apparent-size`   | —     | —         | Use logical file sizes instead of block allocation — matches `du -sh`  |
 | `--jobs N`          | `-j`  | CPU-aware | Number of parallel worker threads (1–128; default is half the available cores, clamped to 1–16) |
 | `--debug`           | `-d`  | —         | Print scan statistics and errors to stderr                             |
@@ -69,6 +70,28 @@ ardisk ~/project --no-ignore     # also counts .git
 - A hard link whose hidden name is skipped is still counted through its visible name.
 - The scan root is never skipped: `ardisk ~/.cache --no-hidden` scans `~/.cache`, but not its dot-entries.
 - Only the leading dot matters (`.env`, `.cache`); the Windows "hidden" attribute is not consulted.
+
+## Staying on one filesystem
+
+`-x` / `--one-file-system` keeps the scan on the filesystem that `PATH` is on, like `du -x` or `find -xdev`. A directory that belongs to another filesystem (a mount point, an external disk, a network share, another APFS volume) is skipped together with everything inside it, and so is any other entry on a different device. The scanned path itself is always included, even if it is a mount point.
+
+```bash
+ardisk / -x                      # only the root filesystem
+ardisk ~ -x --inodes             # inodes on your home volume, comparable to find -xdev
+ardisk /mnt/backup -x --tree     # the backup disk, without anything mounted inside it
+```
+
+**macOS and APFS.** Since macOS 10.15 the system lives on a read-only volume and your data on a separate *Data* volume, joined by firmlinks. Those firmlinked paths (`/Users`, `/Applications`, `/private` and others) report the Data volume's device, so `ardisk / -x` stops at them and measures only the small system volume. To measure your data, scan the data volume itself:
+
+```bash
+ardisk /System/Volumes/Data -x
+```
+
+Notes:
+
+- Works with every mode (`--tree`, `--inodes`, `--by-type`, `--largest-files`, `--duplicates`, `--json`) and every filter.
+- With `--debug`, each skipped mount point is printed to stderr.
+- Unix-like systems only (Linux, macOS). Elsewhere ardisk prints a warning and scans normally.
 
 ## Default ignores
 
@@ -268,7 +291,7 @@ Every document is one object with the same header:
 | `mode`           | `"directories"`, `"largest_files"`, `"duplicates"`, `"by_type"` or `"inodes"` |
 | `root`           | Canonical absolute path that was scanned |
 | `size_mode`      | Absent for `inodes`. `"disk"` (block allocation, the default) or `"apparent"` (logical length, `--apparent-size`). Always `"apparent"` for `duplicates`. |
-| `filters`        | `include` (string or `null`), `exclude` (array), `ignore` (array, extra `--ignore` names only), `no_ignore` (bool), `no_hidden` (bool) |
+| `filters`        | `include` (string or `null`), `exclude` (array), `ignore` (array, extra `--ignore` names only), `no_ignore` (bool), `no_hidden` (bool), `one_file_system` (bool) |
 | `params`         | Options that shape the result, mode-specific (below) |
 | `summary`        | Totals for the **whole scan**, mode-specific (below) |
 | `entries` / `groups` / `types` | The listed items |
@@ -286,7 +309,7 @@ The list obeys the same limits as the text report: `--top` (default 20) for dire
   "mode": "directories",
   "root": "/home/me/project",
   "size_mode": "disk",
-  "filters": { "include": null, "exclude": ["target/**"], "ignore": [], "no_ignore": false, "no_hidden": false },
+  "filters": { "include": null, "exclude": ["target/**"], "ignore": [], "no_ignore": false, "no_hidden": false, "one_file_system": false },
   "params": { "top": 20, "max_depth": null, "threshold_bytes": null },
   "summary": { "total_bytes": 1073741824, "files": 15230, "directories": 842 },
   "entries": [

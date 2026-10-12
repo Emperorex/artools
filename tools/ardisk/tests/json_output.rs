@@ -744,3 +744,16 @@ fn inodes_output_does_not_depend_on_the_worker_count() {
     let many = json(&[p(&root), "--json", "--inodes", "--no-ignore", "-j", "8"]).0;
     assert_eq!(one, many);
 }
+
+#[test]
+fn one_file_system_is_echoed_in_filters() {
+    let (_d, root) = sample();
+    let (off, _) = json(&[p(&root), "--json", "-s"]);
+    assert_eq!(off["filters"]["one_file_system"], false);
+    let (short, _) = json(&[p(&root), "--json", "-s", "-x"]);
+    let (long, _) = json(&[p(&root), "--json", "-s", "--one-file-system"]);
+    assert_eq!(short["filters"]["one_file_system"], true);
+    assert_eq!(short, long);
+    // Same filesystem throughout: same numbers as without -x.
+    assert_eq!(short["summary"], off["summary"]);
+}

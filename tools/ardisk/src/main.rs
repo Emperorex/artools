@@ -1,5 +1,7 @@
 use ardisk::{
-    Collect, DEFAULT_IGNORES, ScanConfig, ScanOutput, aggregate_sizes, build_exclude_matcher,
+    Collect, DEFAULT_IGNORES, ScanConfig, ScanOutput,
+    age::{Age, MtimeFilter, check_window, parse_age},
+    aggregate_sizes, build_exclude_matcher,
     duplicates::{DuplicateReport, find_duplicates},
     format_size, format_size_plain, paint_size, parallel_scan_report,
     report::{
@@ -19,7 +21,7 @@ use std::{
     io::{self, Write},
     path::PathBuf,
     sync::Arc,
-    time::Instant,
+    time::{Instant, SystemTime},
 };
 
 /// Parses `--threshold` under `--inodes`: a plain number of inodes.
@@ -217,6 +219,20 @@ struct Args {
     )]
     by_type: bool,
 
+    /// Only count files last modified at least this long ago, e.g. 30d, 6mo,
+    /// 1y. Units: s, min, h, d, w, mo (30 days), y (365 days). Applies to
+    /// files (and symlinks with --inodes), never stops directories from
+    /// being scanned, and works with every mode: e.g. --largest-files 20
+    /// --older-than 1y lists big files nobody has touched for a year.
+    #[arg(long, value_name = "AGE", value_parser = parse_age)]
+    older_than: Option<Age>,
+
+    /// Only count files modified less than this long ago, e.g. 7d, 12h.
+    /// Same units as --older-than; together they select a window
+    /// (--newer-than 1y --older-than 30d).
+    #[arg(long, value_name = "AGE", value_parser = parse_age)]
+    newer_than: Option<Age>,
+
     /// Stay on the filesystem of PATH, like du -x and find -xdev: do not
     /// enter directories on other filesystems, mounts or APFS volumes (on
     /// macOS that includes firmlinked locations such as /Users when
@@ -323,6 +339,11 @@ fn main() {
         }
     };
 
+    if let Err(e) = check_window(args.older_than.as_ref(), args.newer_than.as_ref()) {
+        eprintln!("{}", format!("error: {}", e).red());
+        std::process::exit(1);
+    }
+
     if args.one_file_system && !cfg!(unix) {
         eprintln!(
             "{}",
@@ -341,6 +362,11 @@ fn main() {
         skip_hidden: args.no_hidden,
         inodes: args.inodes,
         one_file_system: args.one_file_system,
+        mtime: MtimeFilter::new(
+            SystemTime::now(),
+            args.older_than.as_ref().map(|a| a.duration),
+            args.newer_than.as_ref().map(|a| a.duration),
+        ),
     });
 
     let start_time = Instant::now();
@@ -407,7 +433,9 @@ fn main() {
         top: args.top,
         max_depth: args.max_depth,
         threshold_bytes,
-        include_active: args.include.is_some(),
+        include_active: args.include.is_some()
+            || args.older_than.is_some()
+            || args.newer_than.is_some(),
         summarize: args.summarize,
     };
 
@@ -422,6 +450,8 @@ fn main() {
                 no_ignore: args.no_ignore,
                 no_hidden: args.no_hidden,
                 one_file_system: args.one_file_system,
+                older_than: args.older_than.as_ref().map(|a| a.text.clone()),
+                newer_than: args.newer_than.as_ref().map(|a| a.text.clone()),
             },
         };
         let stdout = io::stdout();
@@ -738,6 +768,31 @@ mod tests {
                 extra
             );
         }
+    }
+
+    #[test]
+    fn age_filters_parse_and_work_with_every_mode() {
+        let args = Args::try_parse_from(["ardisk", "."]).unwrap();
+        assert!(args.older_than.is_none() && args.newer_than.is_none());
+        for extra in [
+            vec![],
+            vec!["--tree"],
+            vec!["--inodes"],
+            vec!["--by-type"],
+            vec!["--duplicates"],
+            vec!["--largest-files", "3"],
+            vec!["--json", "-s"],
+            vec!["--include", "*.log", "-x"],
+        ] {
+            let mut argv = vec!["ardisk", ".", "--older-than", "1y", "--newer-than", "5y"];
+            argv.extend(extra.iter());
+            let args = Args::try_parse_from(&argv)
+                .unwrap_or_else(|e| panic!("{argv:?} should parse: {e}"));
+            assert_eq!(args.older_than.unwrap().text, "1y");
+            assert_eq!(args.newer_than.unwrap().text, "5y");
+        }
+        assert!(Args::try_parse_from(["ardisk", ".", "--older-than", "1m"]).is_err());
+        assert!(Args::try_parse_from(["ardisk", ".", "--newer-than", "soon"]).is_err());
     }
 
     #[test]

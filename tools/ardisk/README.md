@@ -38,6 +38,8 @@ ardisk [OPTIONS] [PATH]
 | `--inodes`          | —     | —         | Count inodes instead of bytes, like `du --inodes` (see [Counting inodes](#counting-inodes)) |
 | `--json`            | —     | —         | Print the result as one JSON document on stdout (see [JSON output](#json-output)) |
 | `--include PATTERN` | —     | —         | Only count files matching this glob pattern (e.g. `"*.rs"`, `"*.mp4"`) |
+| `--older-than AGE`  | —     | —         | Only count files last modified at least `AGE` ago, e.g. `1y`, `6mo`, `30d` (see [Filtering by age](#filtering-by-age)) |
+| `--newer-than AGE`  | —     | —         | Only count files modified less than `AGE` ago, e.g. `7d`, `12h` |
 | `--exclude GLOB`    | —     | —         | Exclude files/dirs matching a gitignore-style glob; repeatable (see [Excluding paths](#excluding-paths)) |
 | `--no-hidden`       | —     | —         | Skip files and directories whose name starts with `.` (see [Hidden files](#hidden-files)) |
 | `--one-file-system` | `-x`  | —         | Stay on the filesystem of `PATH`; don't enter other mounts or volumes, like `du -x` (see [Staying on one filesystem](#staying-on-one-filesystem)) |
@@ -53,6 +55,34 @@ Supported in `--threshold`: `B`, `KB`, `MB`, `GB`, `TB` (case-insensitive).
 ardisk . --threshold 500MB
 ardisk . --threshold 1.5GB
 ```
+
+## Filtering by age
+
+`--older-than` and `--newer-than` count only files by their **modification time** (mtime). That is the classic cleanup question, and it combines with every mode:
+
+```bash
+ardisk ~ --largest-files 20 --older-than 1y   # big files nobody has touched for a year
+ardisk ~/Downloads --by-type --older-than 6mo # what kind of old stuff piles up
+ardisk . --tree --newer-than 7d               # where did this week's growth go?
+ardisk /var/log --newer-than 1y --older-than 30d   # a window: 30 days to 1 year old
+```
+
+| Unit  | Meaning              |
+|-------|----------------------|
+| `s`   | seconds              |
+| `min` | minutes              |
+| `h`   | hours                |
+| `d`   | days                 |
+| `w`   | weeks                |
+| `mo`  | months (30 days)     |
+| `y`   | years (365 days)     |
+
+- An age is a whole number with a unit: `90d`, `18mo`. A bare `m` is rejected because it could mean minutes or months.
+- Ages count back from the moment ardisk starts. `--older-than 30d` keeps files modified **at or before** that point, and `--newer-than 30d` keeps those modified **after** it. So for the same age the two options split all files exactly in two.
+- Together they select a window, which needs `--older-than` shorter than `--newer-than`; anything else is an error, because no file could match.
+- Like `--include`, they only filter **files** (and symlinks with `--inodes`). Directories are always scanned, whatever their own mtime, and the directory report and `--tree` hide directories that contain no matching file.
+- With `--duplicates`, only files that pass the filter are compared, so an old file and its recent copy are not reported as a pair.
+- A file whose mtime cannot be read is not counted while an age filter is active.
 
 ## Hidden files
 
@@ -291,7 +321,7 @@ Every document is one object with the same header:
 | `mode`           | `"directories"`, `"largest_files"`, `"duplicates"`, `"by_type"` or `"inodes"` |
 | `root`           | Canonical absolute path that was scanned |
 | `size_mode`      | Absent for `inodes`. `"disk"` (block allocation, the default) or `"apparent"` (logical length, `--apparent-size`). Always `"apparent"` for `duplicates`. |
-| `filters`        | `include` (string or `null`), `exclude` (array), `ignore` (array, extra `--ignore` names only), `no_ignore` (bool), `no_hidden` (bool), `one_file_system` (bool) |
+| `filters`        | `include` (string or `null`), `exclude` (array), `ignore` (array, extra `--ignore` names only), `no_ignore` (bool), `no_hidden` (bool), `one_file_system` (bool), `older_than` / `newer_than` (string as given, or `null`) |
 | `params`         | Options that shape the result, mode-specific (below) |
 | `summary`        | Totals for the **whole scan**, mode-specific (below) |
 | `entries` / `groups` / `types` | The listed items |
@@ -309,7 +339,7 @@ The list obeys the same limits as the text report: `--top` (default 20) for dire
   "mode": "directories",
   "root": "/home/me/project",
   "size_mode": "disk",
-  "filters": { "include": null, "exclude": ["target/**"], "ignore": [], "no_ignore": false, "no_hidden": false, "one_file_system": false },
+  "filters": { "include": null, "exclude": ["target/**"], "ignore": [], "no_ignore": false, "no_hidden": false, "one_file_system": false, "older_than": null, "newer_than": null },
   "params": { "top": 20, "max_depth": null, "threshold_bytes": null },
   "summary": { "total_bytes": 1073741824, "files": 15230, "directories": 842 },
   "entries": [

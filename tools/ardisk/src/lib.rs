@@ -1,3 +1,4 @@
+pub mod age;
 pub mod duplicates;
 pub mod report;
 pub mod tree;
@@ -259,6 +260,10 @@ pub struct ScanConfig {
     /// like `du -x` and `find -xdev`. Such a directory is skipped entirely,
     /// the mount point included. Unix only; ignored elsewhere.
     pub one_file_system: bool,
+    /// `--older-than` / `--newer-than`: only non-directory entries whose
+    /// modification time passes this filter are counted (like
+    /// `include_pattern`, it never stops directories from being traversed).
+    pub mtime: age::MtimeFilter,
 }
 
 /// Builds a `ScanConfig` from the given parameters.
@@ -299,6 +304,7 @@ pub fn build_config_with_exclude(
         skip_hidden: false,
         inodes: false,
         one_file_system: false,
+        mtime: age::MtimeFilter::default(),
     })
 }
 
@@ -742,6 +748,12 @@ pub fn scan_directory(
                 // that is on another device (e.g. a bind-mounted file).
                 #[cfg(unix)]
                 if shared.root_dev.is_some_and(|dev| metadata.dev() != dev) {
+                    continue;
+                }
+                // --older-than / --newer-than: by modification time. A link
+                // count > 1 does not matter here: all names of an inode
+                // share one mtime.
+                if config.mtime.is_active() && !config.mtime.matches(metadata.modified().ok()) {
                     continue;
                 }
                 // Hard-link dedup: if this inode has multiple links, only

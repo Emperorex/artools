@@ -1,17 +1,19 @@
 use arfind::{
     Args, DEFAULT_IGNORES, SearchConfig, SearchStats, SizeFilter,
     age::{MtimeFilter, check_window},
-    build_exclude_matcher, parallel_find,
+    build_exclude_matcher,
+    exec::{self, ExecTemplate},
+    parallel_find,
     types::NameKindFilter,
 };
-use clap::Parser;
+use clap::{CommandFactory, Parser};
 use colored::Colorize;
 use glob::Pattern;
 use std::{
     collections::HashSet,
-    fs,
+    fs, io,
     path::PathBuf,
-    sync::{Arc, atomic::Ordering},
+    sync::{Arc, Mutex, atomic::Ordering},
     time::{Instant, SystemTime},
 };
 
@@ -206,6 +208,43 @@ fn main() {
         ),
     });
 
+    // Parsed before searching, so a bad command fails fast.
+    let exec = match (&args.exec, &args.exec_batch) {
+        (Some(words), _) => Some(ExecTemplate::parse(words, false)),
+        (None, Some(words)) => Some(ExecTemplate::parse(words, true)),
+        (None, None) => None,
+    }
+    .transpose()
+    .unwrap_or_else(|e| fail(&e));
+    // Everything after --exec belongs to the command, so an arfind option
+    // typed after it (e.g. `--exec rm --dry-run`) would silently go to the
+    // command. Refuse unless the user ended the command with ';' and so
+    // made clear those words are meant for it.
+    if let Some(words) = args.exec.as_ref().or(args.exec_batch.as_ref()) {
+        let raw: Vec<String> = std::env::args().collect();
+        let known: Vec<String> = Args::command()
+            .get_arguments()
+            .flat_map(|a| {
+                a.get_long_and_visible_aliases()
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|l| format!("--{l}"))
+            })
+            .collect();
+        let misplaced = exec::misplaced_options(words, &known);
+        if !misplaced.is_empty() && !exec::command_terminated(&raw) {
+            fail(&format!(
+                "{} after --exec would be passed to the command, not to arfind. \
+                 Put arfind options before --exec, or end the command with ';' \
+                 if they are meant for the command (e.g. --exec rsync --dry-run {{}} host: ';')",
+                misplaced.join(", ")
+            ));
+        }
+    }
+    if args.dry_run && exec.is_none() {
+        fail("--dry-run only applies to --exec or --exec-batch");
+    }
+
     let stats = SearchStats::new();
     let start_time = Instant::now();
     // Passed as given — parallel_find canonicalizes internally, but keeps
@@ -215,15 +254,53 @@ fn main() {
     let root_path = PathBuf::from(&args.path);
     let count_only = args.count;
 
-    parallel_find(root_path, args.jobs, config, stats.clone(), move |item| {
-        if !count_only {
-            if item.is_dir {
-                println!("{}", item.path.display().to_string().blue().bold());
-            } else {
-                println!("{}", item.path.display());
+    let mut exit_code = 0;
+
+    if let Some(template) = exec {
+        // --exec/--exec-batch: collect everything first, so commands that
+        // move or delete files cannot affect the search, then run them in
+        // a stable (sorted) order.
+        let found: Arc<Mutex<Vec<PathBuf>>> = Arc::new(Mutex::new(Vec::new()));
+        let sink = Arc::clone(&found);
+        parallel_find(root_path, args.jobs, config, stats.clone(), move |item| {
+            sink.lock().unwrap().push(item.path);
+        });
+        let mut paths = std::mem::take(&mut *found.lock().unwrap());
+        paths.sort();
+
+        let stdout = io::stdout();
+        let mut out = stdout.lock();
+        match exec::run(&template, &paths, args.dry_run, &mut out) {
+            Ok(summary) if summary.failed > 0 => {
+                eprintln!(
+                    "{}",
+                    format!(
+                        "arfind: {} of {} command{} failed",
+                        summary.failed,
+                        summary.runs,
+                        if summary.runs == 1 { "" } else { "s" }
+                    )
+                    .red()
+                );
+                exit_code = 1;
+            }
+            Ok(_) => {}
+            Err(e) => {
+                eprintln!("{}", format!("error: {}", e).red());
+                exit_code = 1;
             }
         }
-    });
+    } else {
+        parallel_find(root_path, args.jobs, config, stats.clone(), move |item| {
+            if !count_only {
+                if item.is_dir {
+                    println!("{}", item.path.display().to_string().blue().bold());
+                } else {
+                    println!("{}", item.path.display());
+                }
+            }
+        });
+    }
 
     let duration = start_time.elapsed();
 
@@ -253,6 +330,10 @@ fn main() {
                 .bold()
         );
         eprintln!("Execution time:        {:.2?}", duration);
+    }
+
+    if exit_code != 0 {
+        std::process::exit(exit_code);
     }
 }
 

@@ -35,6 +35,9 @@ arfind [OPTIONS] [PATH]
 | `--size SIZE`        | —     | —         | Filter by file size: `100MB` or `+100MB` (larger than), `-1KB` (smaller than)   |
 | `--empty`            | `-e`  | —         | Match only empty files (0 bytes) or empty directories (no children)             |
 | `--count`            | `-c`  | —         | Print total match count instead of paths                                        |
+| `--exec CMD...`      | —     | —         | Run `CMD` once per result, without a shell (see [Running commands](#running-commands)) |
+| `--exec-batch CMD...`| `-X`  | —         | Run `CMD` once with all results as arguments                                    |
+| `--dry-run`          | —     | —         | With `--exec`/`-X`: print the commands instead of running them                  |
 | `--max-depth N`      | —     | unlimited | Maximum directory depth to recurse into                                         |
 | `--exclude GLOB`     | —     | —         | Hide files/dirs matching a gitignore-style glob, e.g. `"*.log"`, `"target/**"`, `"build/"`; repeatable (see [Excluding paths](#excluding-paths)) |
 | `--exclude-dir NAME` | —     | —         | Don't descend into directories with this name or glob (e.g. `vendor`, `"build*"`); repeatable; alias: `--ignore` |
@@ -180,6 +183,48 @@ arfind /System/Volumes/Data -x -t f --size +1GB   # macOS: just the data volume
 
 On macOS, `/` and your data live on separate APFS volumes joined by firmlinks (`/Users`, `/Applications`, ...), so `arfind / -x` stays on the small system volume. Search `/System/Volumes/Data` to cover your files. `-x` is Unix-only; elsewhere arfind prints a warning and searches normally. With `--debug`, each mount point it does not enter is reported on stderr.
 
+## Running commands
+
+`--exec` runs a command for every result, like `find -exec` or `fd -x`. `-X` / `--exec-batch` runs it once with all results, like `find -exec ... +` or `fd -X`:
+
+```bash
+arfind /var/log --name "*.log" --older-than 90d --dry-run --exec rm   # check first
+arfind /var/log --name "*.log" --older-than 90d --exec rm             # then delete
+arfind . --type rust --exec wc -l          # one wc per file
+arfind . --type rust -X wc -l              # one wc for all files, with a total
+arfind . --name "TODO*" -X "$EDITOR"       # open all matches in one editor
+arfind . --extension png --exec convert {} {.}.webp
+```
+
+Everything after `--exec`/`-X` is the command, up to an argument that is exactly `;` (quote it as `';'` or `\;` in the shell) or the end of the line. **Put arfind's own options before `--exec`.**
+
+**Placeholders** (same as `fd`), usable inside an argument (`{.}.bak`):
+
+| Placeholder | Expands to                      | `/src/app/main.rs` |
+|-------------|---------------------------------|--------------------|
+| `{}`        | the path                        | `/src/app/main.rs` |
+| `{/}`       | the file name                   | `main.rs`          |
+| `{//}`      | the parent directory            | `/src/app`         |
+| `{.}`       | the path without its extension  | `/src/app/main`    |
+| `{/.}`      | the file name without extension | `main`             |
+
+Without any placeholder, the path is appended as the last argument. With `-X` only a whole-argument `{}` is allowed, and it marks where the list of paths goes.
+
+### Safety
+
+Running commands on search results is powerful, so arfind adds a few guarantees:
+
+- **No shell.** The command is started directly, with every path as one separate argument. Nothing in a file name is ever interpreted: spaces, quotes, `;`, `$(...)`, backticks and newlines are just characters. For pipes or `&&`, call a shell yourself and pass the path as an argument: `--exec sh -c 'gzip -c "$1" > "$1.gz"' sh {}`.
+- **No option injection.** Results are always absolute paths starting with `/`, so a file named `-rf` can never be mistaken for an option.
+- **Search first, then run.** The whole search finishes before the first command starts, and commands run one at a time in sorted path order. A command that renames, moves or deletes files cannot affect which files are found, so nothing is processed twice or skipped.
+- **The command can't be a result.** `--exec {}` (running the files you found) is rejected.
+- **Options in the wrong place are refused.** In `arfind . --exec rm -f --dry-run`, `--dry-run` would be passed to `rm` and the files deleted for real. If an argument of the command is spelled like one of arfind's long options, arfind refuses to run anything unless the command is ended with `;`, which tells it those words really are for the command (`--exec rsync --dry-run {} host: ';'`).
+- **`--dry-run`** prints each command, shell-quoted, instead of running it.
+- **No results, no command.** `-X` never runs the command with an empty list (unlike plain `xargs`, which would run `rm` with no arguments). Very long lists are split over several runs to stay below the system's argument limit.
+- **Errors are not hidden.** If the program cannot be started (e.g. not found), arfind stops at once. Otherwise every result is processed, failures are counted on stderr (`arfind: 2 of 40 commands failed`) and the exit status is `1`.
+
+Commands inherit arfind's terminal, so interactive programs work. With `--exec` they run one after another (an editor opens once per file); `-X` opens them all at once. Paths are not printed while running commands, and `--count` cannot be combined with them.
+
 ## Examples
 
 ```bash
@@ -238,6 +283,8 @@ arfind /home -j 8 --name "*.txt"
 | Skip directory       | `find . -not -path '*/node_modules/*'` | automatic                            |
 | Respect `.gitignore` | manual (`grep`/exclude flags)          | automatic (`--no-ignore` to disable) |
 | Count results        | `find . \| wc -l`                      | `arfind . --count`                   |
+| Run per result       | `find . -name '*.rs' -exec wc -l {} \;` | `arfind . --type rust --exec wc -l`  |
+| Run once for all     | `find . -name '*.rs' -exec wc -l {} +`  | `arfind . --type rust -X wc -l`      |
 | Find empty files     | `find . -empty -type f`                | `arfind . -t f --empty`              |
 | Find large files     | `find . -size +100M`                   | `arfind . --size +100MB`             |
 | Modified > 30 days   | `find . -mtime +30`                    | `arfind . --older-than 30d`          |
@@ -254,5 +301,5 @@ arfind /home -j 8 --name "*.txt"
 | Code | Meaning                                                  |
 |------|----------------------------------------------------------|
 | `0`  | Success (even if no matches found)                       |
-| `1`  | Invalid `--size`, `--exclude`, `--exclude-dir` or `-t` value, or an empty `--older-than`/`--newer-than` window |
+| `1`  | Invalid `--size`, `--exclude`, `--exclude-dir` or `-t` value, an empty `--older-than`/`--newer-than` window, a rejected `--exec` command, or a command that failed or could not be started |
 | `2`  | Invalid CLI usage — bad or missing flag (e.g. `-j 0`, an unknown `--type`, an empty `--extension`) |

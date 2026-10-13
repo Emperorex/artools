@@ -1,4 +1,5 @@
 pub mod age;
+pub mod exec;
 pub mod types;
 
 use clap::Parser;
@@ -158,6 +159,44 @@ pub struct Args {
     /// Print only the total count of matches instead of paths
     #[arg(short = 'c', long)]
     pub count: bool,
+
+    /// Run a command once for each result instead of printing it, like
+    /// find -exec / fd -x. Everything after --exec up to a ';' argument (or
+    /// the end of the line) is the command. Placeholders: {} path, {/} file
+    /// name, {//} parent directory, {.} path without extension, {/.} file
+    /// name without extension; without any, the path is appended. No shell
+    /// is involved, so file names are never interpreted. The search
+    /// finishes before the first command runs; commands run one at a time,
+    /// in path order.
+    #[arg(
+        long,
+        value_name = "CMD",
+        num_args = 1..,
+        allow_hyphen_values = true,
+        value_terminator = ";",
+        conflicts_with_all = ["count", "exec_batch"]
+    )]
+    pub exec: Option<Vec<String>>,
+
+    /// Run a command once with all results as arguments, like fd -X or
+    /// find -exec ... + (split into several runs if the list is very long).
+    /// '{}' as a whole argument marks where the paths go; otherwise they are
+    /// appended. Nothing runs when there are no results.
+    #[arg(
+        short = 'X',
+        long = "exec-batch",
+        value_name = "CMD",
+        num_args = 1..,
+        allow_hyphen_values = true,
+        value_terminator = ";",
+        conflicts_with = "count"
+    )]
+    pub exec_batch: Option<Vec<String>>,
+
+    /// With --exec/--exec-batch: print the commands that would run (shell
+    /// quoted) instead of running them.
+    #[arg(long)]
+    pub dry_run: bool,
 }
 
 /// Task sent to workers

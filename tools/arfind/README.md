@@ -28,7 +28,10 @@ arfind [OPTIONS] [PATH]
 |----------------------|-------|-----------|---------------------------------------------------------------------------------|
 | `--name PATTERN`     | `-n`  | `*`       | Glob pattern to match filenames (e.g. `"*.rs"`, `"Cargo.*"`)                    |
 | `--case-insensitive` | `-i`  | —         | Match `--name` pattern case-insensitively                                       |
-| `--type TYPE`        | `-t`  | —         | Filter by entry type: `f` (file), `d` (directory), `l` (symlink)                |
+| `--file-type KIND`   | `-t`  | —         | Filter by entry kind: `f` (file), `d` (directory), `l` (symlink)                |
+| `--type NAME`        | —     | —         | Only files of a built-in type, e.g. `rust`, `python`; same names as argrep (see [File types](#file-types)); repeatable |
+| `--type-not NAME`    | —     | —         | Skip files of a built-in type; repeatable; wins over `--type`/`--extension`     |
+| `--extension EXT`    | —     | —         | Only files with this extension, e.g. `rs`, `.md`, `tar.gz` (case-insensitive); repeatable |
 | `--size SIZE`        | —     | —         | Filter by file size: `100MB` or `+100MB` (larger than), `-1KB` (smaller than)   |
 | `--empty`            | `-e`  | —         | Match only empty files (0 bytes) or empty directories (no children)             |
 | `--count`            | `-c`  | —         | Print total match count instead of paths                                        |
@@ -74,6 +77,48 @@ arfind . --name "*.log" --no-ignore
 **Note:** only `.gitignore`/`.ignore` files inside the path you're searching
 are read. `arfind` does not walk up to a repository root for parent ignore
 files, and does not read `.git/info/exclude` or a global git ignore file.
+
+## File types
+
+`--type NAME` selects files by a built-in type. The names and globs are **the same as argrep's `--type`**, so `arfind . --type rust` lists exactly the files `argrep PATTERN . --type rust` would search:
+
+| Type         | Globs                             |
+|--------------|-----------------------------------|
+| `rust`       | `*.rs`                            |
+| `python`     | `*.py`, `*.pyi`                   |
+| `javascript` | `*.js`, `*.jsx`, `*.mjs`, `*.cjs` |
+| `typescript` | `*.ts`, `*.tsx`                   |
+| `json`       | `*.json`                          |
+| `yaml`       | `*.yaml`, `*.yml`                 |
+| `toml`       | `*.toml`                          |
+| `markdown`   | `*.md`                            |
+| `shell`      | `*.sh`, `*.bash`, `*.zsh`         |
+| `go`         | `*.go`                            |
+| `java`       | `*.java`                          |
+| `c`          | `*.c`, `*.h`                      |
+| `cpp`        | `*.cpp`, `*.cc`, `*.cxx`, `*.hpp` |
+| `html`       | `*.html`, `*.htm`                 |
+| `css`        | `*.css`                           |
+| `sql`        | `*.sql`                           |
+| `xml`        | `*.xml`                           |
+
+For anything not in the table, use `--extension EXT` (`rs`, `.md` and `RS` all work, as do compound extensions like `tar.gz`; matching is case-insensitive, and a leading dot is a hidden file, not an extension, so `.env` has none).
+
+```bash
+arfind . --type rust                    # Rust sources
+arfind . --type rust --type toml        # Rust sources and Cargo files
+arfind . --extension log --older-than 30d
+arfind . -t f --type-not markdown       # every file except Markdown
+```
+
+How they combine:
+
+- Several `--type` and `--extension` values are **OR'ed**: a file of any selected type or extension matches.
+- `--type-not` wins over `--type` and `--extension`.
+- They are **AND'ed** with everything else: `--name`, `-t`, `--size`, `--older-than`, ...
+- They select **files only**. While `--type` or `--extension` is active, directories are not listed (they are still searched); `--type-not` never hides a directory.
+- `-t` is short for `--file-type` (entry kind), not for `--type`. `--type f` is an error that points you to `-t f`.
+- An unknown type name is an error listing the known types.
 
 ## Excluding paths
 
@@ -140,6 +185,7 @@ On macOS, `/` and your data live on separate APFS volumes joined by firmlinks (`
 ```bash
 # Find all Rust source files
 arfind . --name "*.rs"
+arfind . --type rust          # same, by type name (as in argrep)
 
 # Find directories named "src" up to depth 2
 arfind . -t d --name "src" --max-depth 2
@@ -187,6 +233,7 @@ arfind /home -j 8 --name "*.txt"
 |----------------------|----------------------------------------|--------------------------------------|
 | Find by name         | `find . -name "*.rs"`                  | `arfind . --name "*.rs"`             |
 | Find files only      | `find . -type f`                       | `arfind . -t f`                      |
+| Find by extensions   | `find . -name '*.rs' -o -name '*.toml'` | `arfind . --extension rs --extension toml` |
 | Limit depth          | `find . -maxdepth 2`                   | `arfind . --max-depth 2`             |
 | Skip directory       | `find . -not -path '*/node_modules/*'` | automatic                            |
 | Respect `.gitignore` | manual (`grep`/exclude flags)          | automatic (`--no-ignore` to disable) |
@@ -207,5 +254,5 @@ arfind /home -j 8 --name "*.txt"
 | Code | Meaning                                                  |
 |------|----------------------------------------------------------|
 | `0`  | Success (even if no matches found)                       |
-| `1`  | Invalid `--size`, `--exclude`, `--exclude-dir` or `--type` value, or an empty `--older-than`/`--newer-than` window |
-| `2`  | Invalid CLI usage — bad or missing flag (e.g. `-j 0`)    |
+| `1`  | Invalid `--size`, `--exclude`, `--exclude-dir` or `-t` value, or an empty `--older-than`/`--newer-than` window |
+| `2`  | Invalid CLI usage — bad or missing flag (e.g. `-j 0`, an unknown `--type`, an empty `--extension`) |

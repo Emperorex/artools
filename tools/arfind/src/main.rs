@@ -2,6 +2,7 @@ use arfind::{
     Args, DEFAULT_IGNORES, SearchConfig, SearchStats, SizeFilter,
     age::{MtimeFilter, check_window},
     build_exclude_matcher, parallel_find,
+    types::NameKindFilter,
 };
 use clap::Parser;
 use colored::Colorize;
@@ -197,6 +198,7 @@ fn main() {
         ignore_dir_patterns,
         exclude,
         one_file_system: args.one_file_system,
+        name_kind: NameKindFilter::new(&args.types, &args.type_not, &args.extension),
         mtime: MtimeFilter::new(
             SystemTime::now(),
             args.older_than.as_ref().map(|a| a.duration),

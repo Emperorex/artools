@@ -1,4 +1,5 @@
 pub mod age;
+pub mod types;
 
 use clap::Parser;
 use clap::builder::TypedValueParser as _;
@@ -117,9 +118,27 @@ pub struct Args {
     #[arg(long = "no-ignore")]
     pub no_ignore: bool,
 
-    /// Filter by type: f (file), d (directory), or l (symlink)
+    /// Filter by entry kind: f (file), d (directory), or l (symlink)
     #[arg(short = 't', long)]
     pub file_type: Option<String>,
+
+    /// Only match files of this built-in type (e.g. rust, python, markdown);
+    /// the same names and globs as argrep's --type. Repeatable: a file of
+    /// ANY selected type matches. OR'ed with --extension, AND'ed with
+    /// --name. Directories are not listed while it is active (they are
+    /// still searched).
+    #[arg(long = "type", value_name = "NAME", value_parser = types::type_name_parser)]
+    pub types: Vec<String>,
+
+    /// Skip files of this built-in type; wins over --type and --extension.
+    /// Repeatable. Never hides directories.
+    #[arg(long = "type-not", value_name = "NAME", value_parser = types::type_name_parser)]
+    pub type_not: Vec<String>,
+
+    /// Only match files with this extension, e.g. rs, .md, tar.gz
+    /// (case-insensitive). Repeatable; OR'ed with --type.
+    #[arg(long, value_name = "EXT", value_parser = types::extension_parser)]
+    pub extension: Vec<String>,
 
     #[arg(short = 'H', long)]
     pub hidden: bool,
@@ -194,6 +213,8 @@ pub struct SearchConfig {
     /// `--older-than` / `--newer-than`: modification-time test for every
     /// listed entry. Never stops traversal.
     pub mtime: age::MtimeFilter,
+    /// `--type`, `--type-not`, `--extension`.
+    pub name_kind: types::NameKindFilter,
 }
 
 impl SearchConfig {
@@ -216,6 +237,7 @@ impl SearchConfig {
             exclude: None,
             one_file_system: false,
             mtime: age::MtimeFilter::default(),
+            name_kind: types::NameKindFilter::default(),
         }
     }
 }
@@ -397,6 +419,11 @@ fn check_root(
         if !type_matches {
             return None;
         }
+    }
+
+    // Like the entries below, the root is tested by its own name.
+    if !config.name_kind.matches(&file_name, is_dir) {
+        return None;
     }
 
     if config.empty_only {
@@ -714,7 +741,7 @@ pub fn scan_directory(
                         || (t == "l" && is_symlink)
                 }
                 None => true,
-            };
+            } && config.name_kind.matches(&file_name, is_dir);
 
             if type_matches {
                 // Metadata is only fetched lazily, at most once per entry, and
@@ -907,6 +934,34 @@ mod tests {
 
         let a = Args::try_parse_from(["arfind", ".", "--one-file-system"]).unwrap();
         assert!(a.one_file_system && a.exclude.is_empty() && a.older_than.is_none());
+    }
+
+    #[test]
+    fn type_and_extension_flags_parse() {
+        let a = Args::try_parse_from([
+            "arfind",
+            ".",
+            "--type",
+            "rust",
+            "--type",
+            "toml",
+            "--type-not",
+            "markdown",
+            "--extension",
+            ".RS",
+            "--extension",
+            "tar.gz",
+            "-t",
+            "f",
+        ])
+        .unwrap();
+        assert_eq!(a.types, ["rust", "toml"]);
+        assert_eq!(a.type_not, ["markdown"]);
+        assert_eq!(a.extension, ["rs", "tar.gz"]);
+        assert_eq!(a.file_type.as_deref(), Some("f"));
+        assert!(Args::try_parse_from(["arfind", ".", "--type", "cobol"]).is_err());
+        assert!(Args::try_parse_from(["arfind", ".", "--type", "f"]).is_err());
+        assert!(Args::try_parse_from(["arfind", ".", "--file-type", "f"]).is_ok());
     }
 
     #[test]

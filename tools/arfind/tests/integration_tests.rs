@@ -55,6 +55,7 @@ fn collect_names(
         exclude: None,
         one_file_system: false,
         mtime: Default::default(),
+        name_kind: Default::default(),
     });
 
     let stats = SearchStats::new();
@@ -250,6 +251,7 @@ fn stats_count_files_and_dirs_correctly() {
         exclude: None,
         one_file_system: false,
         mtime: Default::default(),
+        name_kind: Default::default(),
     });
 
     let stats = SearchStats::new();
@@ -292,6 +294,7 @@ fn stats_count_root_even_when_max_depth_stops_recursion() {
         exclude: None,
         one_file_system: false,
         mtime: Default::default(),
+        name_kind: Default::default(),
     });
 
     let stats = SearchStats::new();
@@ -327,6 +330,7 @@ fn stats_count_child_dir_examined_even_when_not_recursed_into() {
         exclude: None,
         one_file_system: false,
         mtime: Default::default(),
+        name_kind: Default::default(),
     });
 
     let stats = SearchStats::new();
@@ -461,6 +465,7 @@ fn multiple_workers_produce_same_results_as_single_worker() {
             exclude: None,
             one_file_system: false,
             mtime: Default::default(),
+            name_kind: Default::default(),
         });
         let results: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
         let results_clone = Arc::clone(&results);
@@ -539,6 +544,7 @@ fn size_min_filters_small_files() {
         exclude: None,
         one_file_system: false,
         mtime: Default::default(),
+        name_kind: Default::default(),
     });
 
     let names = collect_with_config(root, config);
@@ -577,6 +583,7 @@ fn size_max_filters_large_files() {
         exclude: None,
         one_file_system: false,
         mtime: Default::default(),
+        name_kind: Default::default(),
     });
 
     let names = collect_with_config(root, config);
@@ -615,6 +622,7 @@ fn size_filter_does_not_affect_directories() {
         exclude: None,
         one_file_system: false,
         mtime: Default::default(),
+        name_kind: Default::default(),
     });
 
     let names = collect_with_config(root, config);
@@ -646,6 +654,7 @@ fn empty_finds_zero_byte_files() {
         exclude: None,
         one_file_system: false,
         mtime: Default::default(),
+        name_kind: Default::default(),
     });
 
     let names = collect_with_config(root, config);
@@ -676,6 +685,7 @@ fn empty_finds_empty_directories() {
         exclude: None,
         one_file_system: false,
         mtime: Default::default(),
+        name_kind: Default::default(),
     });
 
     let names = collect_with_config(root, config);
@@ -709,6 +719,7 @@ fn empty_false_returns_all_files() {
         exclude: None,
         one_file_system: false,
         mtime: Default::default(),
+        name_kind: Default::default(),
     });
 
     let names = collect_with_config(root, config);
@@ -734,6 +745,7 @@ fn config_with_gitignore(pattern: &str, respect_gitignore: bool) -> Arc<SearchCo
         exclude: None,
         one_file_system: false,
         mtime: Default::default(),
+        name_kind: Default::default(),
     })
 }
 
@@ -1081,4 +1093,100 @@ fn one_file_system_changes_nothing_on_a_single_filesystem() {
         },
     );
     assert_eq!(on, run_rel(&root, any()));
+}
+
+// ── --type / --type-not / --extension ───────────────────────────────────────
+
+fn typed(types: &[&str], type_not: &[&str], ext: &[&str]) -> SearchConfig {
+    let s = |v: &[&str]| v.iter().map(|x| x.to_string()).collect::<Vec<_>>();
+    SearchConfig {
+        name_kind: arfind::types::NameKindFilter::new(&s(types), &s(type_not), &s(ext)),
+        ..any()
+    }
+}
+
+fn typed_tree() -> (TempDir, PathBuf) {
+    make_tree(&[
+        "src/main.rs",
+        "src/lib.rs",
+        "src/notes.md",
+        "Cargo.toml",
+        "README.md",
+        "dist/app.tar.gz",
+        "dir.rs/inside.txt",
+        "scripts/run.sh",
+    ])
+}
+
+#[test]
+fn type_selects_files_of_that_type_and_no_directories() {
+    let (_d, root) = typed_tree();
+    let found = run_rel(&root, typed(&["rust"], &[], &[]));
+    // dir.rs is a directory named like a Rust file: not listed, but searched.
+    assert_eq!(found, ["src/lib.rs", "src/main.rs"]);
+}
+
+#[test]
+fn several_types_and_extensions_are_ored() {
+    let (_d, root) = typed_tree();
+    let found = run_rel(&root, typed(&["rust", "shell"], &[], &["toml"]));
+    assert_eq!(
+        found,
+        ["Cargo.toml", "scripts/run.sh", "src/lib.rs", "src/main.rs"]
+    );
+}
+
+#[test]
+fn compound_extension() {
+    let (_d, root) = typed_tree();
+    assert_eq!(
+        run_rel(&root, typed(&[], &[], &["tar.gz"])),
+        ["dist/app.tar.gz"]
+    );
+    assert_eq!(
+        run_rel(&root, typed(&[], &[], &["gz"])),
+        ["dist/app.tar.gz"]
+    );
+}
+
+#[test]
+fn type_not_hides_only_files_of_that_type() {
+    let (_d, root) = typed_tree();
+    let found = run_rel(&root, typed(&[], &["markdown"], &[]));
+    assert!(!found.iter().any(|p| p.ends_with(".md")), "{found:?}");
+    assert!(
+        found.contains(&"src".to_string()),
+        "directories stay listed"
+    );
+    assert!(found.contains(&"Cargo.toml".to_string()));
+}
+
+#[test]
+fn type_combines_with_name_and_kind_filters() {
+    let (_d, root) = typed_tree();
+    let config = SearchConfig {
+        pattern: Pattern::new("lib*").unwrap(),
+        file_type: Some("f".to_string()),
+        ..typed(&["rust"], &[], &[])
+    };
+    assert_eq!(run_rel(&root, config), ["src/lib.rs"]);
+}
+
+#[test]
+fn a_file_given_as_the_root_is_tested_by_type_too() {
+    let (_d, root) = typed_tree();
+    let file = root.join("Cargo.toml");
+    let hits = |c: SearchConfig| {
+        let out: Arc<Mutex<Vec<PathBuf>>> = Arc::new(Mutex::new(Vec::new()));
+        let sink = Arc::clone(&out);
+        parallel_find(file.clone(), 1, Arc::new(c), SearchStats::new(), move |m| {
+            sink.lock().unwrap().push(m.path)
+        });
+        Arc::try_unwrap(out).unwrap().into_inner().unwrap()
+    };
+    assert_eq!(
+        hits(typed(&["toml"], &[], &[])),
+        std::slice::from_ref(&file)
+    );
+    assert!(hits(typed(&["rust"], &[], &[])).is_empty());
 }

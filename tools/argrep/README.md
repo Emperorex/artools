@@ -86,6 +86,39 @@ How `-o` interacts with other flags:
 - **`-v`**: rejected as a CLI error (`-o` and `-v` can't be combined) — `-v` selects whole lines that *don't* contain a match, so there'd be nothing for `-o` to extract.
 - **`-A`/`-B`/`-C`**: have no effect and print a warning, same as GNU grep — context doesn't make sense when only the matched fragment (not the surrounding line) is being printed.
 
+Use `-r`/`--replace` to see matching lines with every match replaced, like `rg --replace` or `sed 's/…/…/g'` limited to matching lines. **Only the output changes: files are never written.**
+
+```
+argrep 'unwrap\(\)' src/ --type rust -r 'expect("...")'   # preview a refactor
+argrep -F 'http://' . -r 'https://'                        # literal text
+argrep '(\w+)@(\w+)' . -r '$2 at $1'                       # capture groups
+cat app.log | argrep 'ERROR' -r 'WARN'                     # pipeline filter
+argrep 'debug!\(' src/ -r ''                               # delete the match
+```
+
+In the replacement (same syntax as ripgrep):
+
+| Write        | Inserts                                       |
+|--------------|-----------------------------------------------|
+| `$0`         | the whole match                               |
+| `$1`, `$2` … | a capture group                               |
+| `${name}`    | a named group `(?P<name>…)`                    |
+| `${1}x`      | group 1 followed by `x` (`$1x` would mean a group named `1x`) |
+| `$$`         | a literal `$`                                 |
+
+Every non-overlapping match on the line is replaced. A reference to a group the pattern doesn't have, such as `$5` in `-r 'cost $5'` or `$1a`, is an error rather than a silent blank, and the message tells you to write `$$5` or `${1}a`.
+
+How `-r` interacts with other flags:
+
+- **`-o`**: prints each match's replacement on its own line (`argrep '(\w+)@(\w+)' -o -r '$2'` lists the hosts).
+- **`-n`, `-i`, `-w`, `-x`, `-F`, `-e`, `-m`**: work as usual. With several `-e` patterns, group numbers count across all of them, left to right.
+- **`-A`/`-B`/`-C`**: matching lines are replaced, context lines are shown as they are (like ripgrep).
+- **`-l`, `-L`, `-c`, `-v`, `-q`, `--files`**: rejected, since none of them prints the matched content.
+- Replaced lines are printed exactly, without trimming trailing spaces, so a deleted match at the end of a line stays visible.
+- Exit codes don't change.
+
+Coming from GNU grep, note that `-r` here is **replace**, not recursive (argrep is always recursive). `argrep -r foo .` reads as "replace with `foo` every match of `.`". It only ever changes what is printed, but the output won't be what you expected.
+
 Use `-L`/`--files-without-match` to print only the files that contain **no** match at all — the opposite of `-l`. Useful for finding files missing a required header, checking a migration is complete, CI checks, or spotting files that don't yet conform to a rule:
 
 ```
@@ -285,6 +318,7 @@ This is aimed squarely at rotated logs — `logrotate` compresses old logs as gz
 | `--context NUM`         | `-C`  | —                 | Show NUM lines of leading and trailing context around matches (max 100,000)                                                                              |
 | `--invert`              | `-v`  | —                 | Print lines that do NOT match the query (conflicts with `-o`)                                                                                            |
 | `--only-matching`       | `-o`  | —                 | Print only the matched text, one occurrence per line (conflicts with `-v`; no effect with `-A`/`-B`/`-C`, warns)                                         |
+| `--replace TEXT`        | `-r`  | —                 | Print matching lines with every match replaced by `TEXT` (`$1`, `${name}`, `$$`); output only, files are never changed |
 | `--max-count NUM`       | `-m`  | unlimited         | Stop searching a file after NUM matching lines (must be >= 1)                                                                                            |
 | `--files-with-matches`  | `-l`  | —                 | Print only filenames of files containing a match (conflicts with `-c`, `-L`)                                                                             |
 | `--files-without-match` | `-L`  | —                 | Print only filenames of files containing NO match (conflicts with `-l`, `-c`)                                                                            |
@@ -448,6 +482,7 @@ argrep -z 'OutOfMemoryError' /var/log/app/*.log.gz
 | Fixed string           | `grep -rF "query" .`                           | `argrep -F "query" .`                         |
 | Whole word             | `grep -rw "query" .`                           | `argrep -w "query" .`                         |
 | Whole line             | `grep -rx "query" .`                           | `argrep -x "query" .`                         |
+| Replace in output      | `grep -r "old" . \| sed 's/old/new/g'`         | `argrep "old" . -r "new"`                     |
 | Quiet (exit code only) | `grep -rq "query" .`                           | `argrep -q "query" .`                         |
 | Only matched text      | `grep -rho "query" .`                          | `argrep -o "query" .`                         |
 | Limit matches          | `grep -rm 1 "query" .`                         | `argrep -m 1 "query" .`                       |

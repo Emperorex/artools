@@ -1,6 +1,6 @@
 use argrep::{
     DEFAULT_IGNORES, MatchOptions, SearchConfig, SearchStats, build_matcher, build_matcher_multi,
-    parallel_grep, sanitize_for_display,
+    check_replacement, parallel_grep, replace_matches, replaced_matches, sanitize_for_display,
 };
 use clap::Parser;
 use clap::builder::TypedValueParser as _;
@@ -438,6 +438,7 @@ struct Args {
     #[arg(
         long = "files",
         conflicts_with_all = [
+            "replace",
             "files_with_matches",
             "files_without_match",
             "count_per_file",
@@ -452,6 +453,27 @@ struct Args {
         ]
     )]
     files: bool,
+
+    /// Show matching lines with every match replaced by REPLACEMENT, like
+    /// ripgrep's --replace. Only the output changes: files are never
+    /// written. In REPLACEMENT, $0 is the whole match, $1.. the groups,
+    /// ${name} a named group, ${1}x a group followed by text, and $$ a
+    /// literal $. With -o, each match's replacement is printed on its own
+    /// line. Context lines (-A/-B/-C) are shown unchanged.
+    #[arg(
+        short = 'r',
+        long = "replace",
+        value_name = "REPLACEMENT",
+        allow_hyphen_values = true,
+        conflicts_with_all = [
+            "files_with_matches",
+            "files_without_match",
+            "count_per_file",
+            "invert",
+            "quiet",
+        ]
+    )]
+    replace: Option<String>,
 }
 
 /// Splits `--exclude-dir`/`--ignore` entries (plus the built-in defaults,
@@ -610,6 +632,13 @@ fn main() {
         }
     };
 
+    if let Some(replacement) = &args.replace
+        && let Err(e) = check_replacement(&regex, replacement)
+    {
+        eprintln!("{}", format!("error: {}", e).red());
+        std::process::exit(1);
+    }
+
     let (ignore_dirs, ignore_dir_patterns) =
         build_ignore_dirs(args.no_ignore, args.exclude_dir, args.quiet);
 
@@ -692,6 +721,7 @@ fn main() {
         quiet: args.quiet,
         only_matching: args.only_matching,
         max_count: args.max_count.map(|v| v as usize),
+        replace: args.replace.clone(),
     });
 
     let stats = SearchStats::new();
@@ -911,8 +941,15 @@ fn grep_stdin(config: &argrep::SearchConfig, stats: &argrep::SearchStats) {
                 // main.rs already zeroed before_context/after_context (and
                 // warned) if -o was combined with -A/-B/-C, so has_context
                 // is always false whenever this branch runs.
-                for m in config.regex.find_iter(&line) {
-                    print_stdin_line(m.as_str(), line_num, false, config);
+                if let Some(replacement) = &config.replace {
+                    for text in replaced_matches(&config.regex, &line, replacement) {
+                        let len = text.len();
+                        print_stdin_highlighted(&text, &[(0, len)], line_num, config);
+                    }
+                } else {
+                    for m in config.regex.find_iter(&line) {
+                        print_stdin_line(m.as_str(), line_num, false, config);
+                    }
                 }
                 last_printed_line = line_num;
                 has_printed_anything = true;
@@ -936,7 +973,13 @@ fn grep_stdin(config: &argrep::SearchConfig, stats: &argrep::SearchStats) {
                     }
                 }
 
-                print_stdin_line(&line, line_num, false, config);
+                match &config.replace {
+                    Some(replacement) => {
+                        let r = replace_matches(&config.regex, &line, replacement);
+                        print_stdin_highlighted(&r.text, &r.spans, line_num, config);
+                    }
+                    None => print_stdin_line(&line, line_num, false, config),
+                }
                 last_printed_line = line_num;
                 has_printed_anything = true;
                 after_remaining = after_ctx;
@@ -1008,6 +1051,42 @@ fn highlight_matches(line: &str, regex: &Regex) -> String {
     highlighted.push_str(&line[last_end..]);
 
     highlighted
+}
+
+/// Highlights the given byte ranges of `text` (already sanitized), as
+/// produced by --replace. Ranges past the end (e.g. after trimming) are
+/// clamped.
+fn highlight_spans(text: &str, spans: &[(usize, usize)]) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut last = 0;
+    for &(start, end) in spans {
+        let (start, end) = (start.min(text.len()), end.min(text.len()));
+        if start < last || start >= end {
+            continue;
+        }
+        out.push_str(&text[last..start]);
+        out.push_str(&text[start..end].red().bold().to_string());
+        last = end;
+    }
+    out.push_str(&text[last..]);
+    out
+}
+
+/// Prints a --replace result on the stdin path.
+fn print_stdin_highlighted(
+    text: &str,
+    spans: &[(usize, usize)],
+    line_num: usize,
+    config: &argrep::SearchConfig,
+) {
+    // Not trimmed: with --replace the exact text matters (a replacement
+    // may end in, or leave behind, trailing spaces).
+    let shown = highlight_spans(text, spans);
+    if config.line_number {
+        println!("{}:{}", line_num.to_string().green(), shown);
+    } else {
+        println!("{}", shown);
+    }
 }
 
 fn print_stdin_line(line: &str, line_num: usize, is_context: bool, config: &argrep::SearchConfig) {
@@ -1082,6 +1161,12 @@ fn print_result(
 
         let content = if result.is_context {
             result.line_content.trim_end().to_string()
+        } else if let Some(spans) = &result.highlights {
+            // --replace: highlight the inserted text, not regex matches
+            // (the pattern may not even match the replaced line).
+            // Not trimmed, unlike normal output: the replaced line is shown
+            // exactly as it would read.
+            highlight_spans(&result.line_content, spans)
         } else {
             highlight_matches(&result.line_content, regex)
                 .trim_end()
@@ -1099,6 +1184,49 @@ mod tests {
         smart_case_ignore_case, type_globs,
     };
     use clap::Parser;
+
+    // ── -r / --replace ───────────────────────────────────────────────────────
+
+    #[test]
+    fn replace_parses_short_long_empty_and_dash_values() {
+        let a = Args::try_parse_from(["argrep", "foo", ".", "-r", "bar"]).unwrap();
+        assert_eq!(a.replace.as_deref(), Some("bar"));
+        let a = Args::try_parse_from(["argrep", "foo", "--replace", ""]).unwrap();
+        assert_eq!(a.replace.as_deref(), Some(""));
+        let a = Args::try_parse_from(["argrep", "foo", "-r", "-x-"]).unwrap();
+        assert_eq!(a.replace.as_deref(), Some("-x-"));
+        assert!(
+            Args::try_parse_from(["argrep", "foo"])
+                .unwrap()
+                .replace
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn replace_works_with_output_shaping_flags() {
+        for extra in [
+            &["-o"][..],
+            &["-n"],
+            &["-C", "2"],
+            &["-i", "-w"],
+            &["-F"],
+            &["-m", "3"],
+        ] {
+            let mut argv = vec!["argrep", "foo", ".", "-r", "X"];
+            argv.extend_from_slice(extra);
+            assert!(Args::try_parse_from(&argv).is_ok(), "{argv:?}");
+        }
+    }
+
+    #[test]
+    fn replace_conflicts_with_modes_that_print_no_content() {
+        for flag in ["-l", "-L", "-c", "-v", "-q"] {
+            let r = Args::try_parse_from(["argrep", "foo", ".", "-r", "X", flag]);
+            assert!(r.is_err(), "-r with {flag} must be rejected");
+        }
+        assert!(Args::try_parse_from(["argrep", "--files", ".", "-r", "X"]).is_err());
+    }
 
     // ── -j / --jobs boundary ─────────────────────────────────────────────────
     // `0` workers means the task queue is never drained, silently producing

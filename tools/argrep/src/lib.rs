@@ -75,6 +75,127 @@ pub fn sanitize_for_display(s: &str) -> Cow<'_, str> {
     Cow::Owned(out)
 }
 
+/// A line after --replace, ready for display.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Replaced {
+    /// The line with every match replaced, sanitized for the terminal.
+    pub text: String,
+    /// Byte ranges of `text` that came from the replacement (for
+    /// highlighting). Empty replacements leave no range.
+    pub spans: Vec<(usize, usize)>,
+}
+
+/// Replaces every non-overlapping match of `regex` in `line` with
+/// `replacement` (expanded per match: `$0`, `$1`, `${name}`, `$$`), the
+/// same way ripgrep's --replace and `Regex::replace_all` do. The original
+/// text between matches and the inserted text are sanitized separately,
+/// so the highlight ranges stay exact.
+pub fn replace_matches(regex: &Regex, line: &str, replacement: &str) -> Replaced {
+    let mut text = String::with_capacity(line.len());
+    let mut spans = Vec::new();
+    let mut last = 0;
+    let mut expanded = String::new();
+    for caps in regex.captures_iter(line) {
+        let m = caps.get(0).expect("group 0 always participates");
+        text.push_str(&sanitize_for_display(&line[last..m.start()]));
+        expanded.clear();
+        caps.expand(replacement, &mut expanded);
+        let start = text.len();
+        text.push_str(&sanitize_for_display(&expanded));
+        if text.len() > start {
+            spans.push((start, text.len()));
+        }
+        last = m.end();
+    }
+    text.push_str(&sanitize_for_display(&line[last..]));
+    Replaced { text, spans }
+}
+
+/// With -o and --replace: the expansion of each match on its own.
+pub fn replaced_matches(regex: &Regex, line: &str, replacement: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut expanded = String::new();
+    for caps in regex.captures_iter(line) {
+        expanded.clear();
+        caps.expand(replacement, &mut expanded);
+        out.push(sanitize_for_display(&expanded).into_owned());
+    }
+    out
+}
+
+/// Checks that every group a replacement refers to exists in `regex`.
+///
+/// The regex crate silently expands an unknown group to nothing, which
+/// turns two everyday mistakes into quietly wrong output: a literal dollar
+/// amount (`cost $5`, with no fifth group) and a group number followed by
+/// text (`$1a` is read as a group *named* `1a`). Both are reported here,
+/// with the fix (`$$5`, `${1}a`).
+///
+/// Syntax, as in the regex crate: `$$` is a literal `$`; `${name}` and
+/// `$name` refer to a group, where `name` is the longest run of
+/// `[A-Za-z0-9_]`; a `$` followed by anything else is a literal `$`.
+pub fn check_replacement(regex: &Regex, replacement: &str) -> Result<(), String> {
+    let groups = regex.captures_len(); // including group 0
+    let names: Vec<&str> = regex.capture_names().flatten().collect();
+    let bytes = replacement.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] != b'$' {
+            i += 1;
+            continue;
+        }
+        if bytes.get(i + 1) == Some(&b'$') {
+            i += 2;
+            continue;
+        }
+        let (name, braced, next) = if bytes.get(i + 1) == Some(&b'{') {
+            match replacement[i + 2..].find('}') {
+                Some(end) => (&replacement[i + 2..i + 2 + end], true, i + 3 + end),
+                None => {
+                    i += 1;
+                    continue;
+                }
+            }
+        } else {
+            let len = replacement[i + 1..]
+                .bytes()
+                .take_while(|b| b.is_ascii_alphanumeric() || *b == b'_')
+                .count();
+            (&replacement[i + 1..i + 1 + len], false, i + 1 + len)
+        };
+        if name.is_empty() {
+            i = next.max(i + 1);
+            continue;
+        }
+        let known = match name.parse::<usize>() {
+            Ok(n) => n < groups,
+            Err(_) => names.contains(&name),
+        };
+        if !known {
+            let have = match groups - 1 {
+                0 => "the pattern has no capture groups".to_string(),
+                1 => "the pattern has 1 capture group".to_string(),
+                n => format!("the pattern has {n} capture groups"),
+            };
+            let mut hint = String::new();
+            let digits = name.bytes().take_while(u8::is_ascii_digit).count();
+            if !braced && digits > 0 && digits < name.len() {
+                hint = format!(
+                    "; to put text right after a group write ${{{}}}{}",
+                    &name[..digits],
+                    &name[digits..]
+                );
+            }
+            return Err(format!(
+                "replacement refers to group '{name}', but {have}{hint}; \
+                 write $$ for a literal $"
+            ));
+        }
+        i = next;
+    }
+    Ok(())
+}
+
 /// Returns true if `path`'s extension marks it as gzip-compressed, the
 /// only format -z/--search-compressed currently decompresses: `.gz` or
 /// `.tgz` (matching on the extension is a filename heuristic, not
@@ -226,6 +347,11 @@ pub struct SearchConfig {
     /// grep's documented behavior. None means unlimited (the previous,
     /// only behavior before this field existed).
     pub max_count: Option<usize>,
+    /// -r/--replace: in the output, replace every match on a matching line
+    /// with this template (`$0`, `$1`, `${name}`, `$$` for a literal `$`,
+    /// as in ripgrep). Only what is printed changes; files are never
+    /// written. Validated by [`check_replacement`] before a search starts.
+    pub replace: Option<String>,
 }
 
 /// Shared statistics counters
@@ -307,6 +433,10 @@ pub struct MatchResult {
     pub is_context: bool,
     /// True if this result is a group separator ("--") between non-adjacent matches
     pub is_separator: bool,
+    /// With --replace: byte ranges of `line_content` that hold replacement
+    /// text, for highlighting. `None` means "highlight the regex matches",
+    /// the normal case.
+    pub highlights: Option<Vec<(usize, usize)>>,
 }
 
 /// Options controlling how `build_matcher` compiles the CLI query into a
@@ -746,6 +876,7 @@ fn emit_file_listing(file_path: &Path, output_tx: &crossbeam_channel::Sender<Mat
         count: None,
         is_context: false,
         is_separator: false,
+        highlights: None,
     });
 }
 
@@ -933,6 +1064,7 @@ pub fn grep_file(
                     count: None,
                     is_context: false,
                     is_separator: false,
+                    highlights: None,
                 });
                 break;
             } else if config.files_without_match {
@@ -951,15 +1083,32 @@ pub fn grep_file(
                     // -o was combined with -A/-B/-C, matching GNU grep's
                     // own documented behavior for that combination
                     // ("these options have no effect").
-                    for m in config.regex.find_iter(line) {
-                        let _ = output_tx.send(MatchResult {
-                            file_path: file_path.to_path_buf(),
-                            line_num,
-                            line_content: sanitize_for_display(m.as_str()).to_string(),
-                            count: None,
-                            is_context: false,
-                            is_separator: false,
-                        });
+                    if let Some(replacement) = &config.replace {
+                        // -o with -r: each match's expansion on its own line.
+                        for text in replaced_matches(&config.regex, line, replacement) {
+                            let len = text.len();
+                            let _ = output_tx.send(MatchResult {
+                                file_path: file_path.to_path_buf(),
+                                line_num,
+                                line_content: text,
+                                count: None,
+                                is_context: false,
+                                is_separator: false,
+                                highlights: Some(if len > 0 { vec![(0, len)] } else { vec![] }),
+                            });
+                        }
+                    } else {
+                        for m in config.regex.find_iter(line) {
+                            let _ = output_tx.send(MatchResult {
+                                file_path: file_path.to_path_buf(),
+                                line_num,
+                                line_content: sanitize_for_display(m.as_str()).to_string(),
+                                count: None,
+                                is_context: false,
+                                is_separator: false,
+                                highlights: None,
+                            });
+                        }
                     }
                     last_printed_line = line_num;
                     has_printed_anything = true;
@@ -979,6 +1128,7 @@ pub fn grep_file(
                                 count: None,
                                 is_context: false,
                                 is_separator: true,
+                                highlights: None,
                             });
                         }
 
@@ -991,20 +1141,30 @@ pub fn grep_file(
                                     count: None,
                                     is_context: true,
                                     is_separator: false,
+                                    highlights: None,
                                 });
                                 last_printed_line = b_num;
                             }
                         }
                     }
 
-                    // Normal mode: emit matching line
+                    // Normal mode: emit matching line (with -r, the
+                    // replaced line; context lines stay as they are).
+                    let (line_content, highlights) = match &config.replace {
+                        Some(replacement) => {
+                            let r = replace_matches(&config.regex, line, replacement);
+                            (r.text, Some(r.spans))
+                        }
+                        None => (clean_line.to_string(), None),
+                    };
                     let _ = output_tx.send(MatchResult {
                         file_path: file_path.to_path_buf(),
                         line_num,
-                        line_content: clean_line.to_string(),
+                        line_content,
                         count: None,
                         is_context: false,
                         is_separator: false,
+                        highlights,
                     });
                     last_printed_line = line_num;
                     has_printed_anything = true;
@@ -1035,6 +1195,7 @@ pub fn grep_file(
                     count: None,
                     is_context: true,
                     is_separator: false,
+                    highlights: None,
                 });
                 last_printed_line = line_num;
                 after_remaining -= 1;
@@ -1058,6 +1219,7 @@ pub fn grep_file(
             count: Some(match_count),
             is_context: false,
             is_separator: false,
+            highlights: None,
         });
     }
 
@@ -1078,6 +1240,7 @@ pub fn grep_file(
             count: None,
             is_context: false,
             is_separator: false,
+            highlights: None,
         });
     }
 }
@@ -1440,5 +1603,107 @@ mod build_matcher_multi_tests {
             MatchOptions::default(),
         );
         assert!(result.is_err());
+    }
+}
+
+#[cfg(test)]
+mod replace_tests {
+    use super::{
+        MatchOptions, build_matcher, build_matcher_multi, check_replacement, replace_matches,
+        replaced_matches,
+    };
+
+    fn re(p: &str) -> regex::Regex {
+        build_matcher(p, MatchOptions::default()).unwrap()
+    }
+
+    #[test]
+    fn replaces_every_non_overlapping_match_and_records_spans() {
+        let r = replace_matches(&re("foo"), "foo bar foo", "X");
+        assert_eq!(r.text, "X bar X");
+        assert_eq!(r.spans, [(0, 1), (6, 7)]);
+    }
+
+    #[test]
+    fn groups_names_whole_match_and_dollar_escape() {
+        let r = replace_matches(&re(r"(\w+)@(\w+)"), "alice@host x", "$2 at $1");
+        assert_eq!(r.text, "host at alice x");
+        let r = replace_matches(&re(r"(?P<u>\w+)@(?P<h>\w+)"), "a@b", "${h}/${u}");
+        assert_eq!(r.text, "b/a");
+        assert_eq!(replace_matches(&re("o"), "foo", "[$0]").text, "f[o][o]");
+        assert_eq!(
+            replace_matches(&re(r"(\d+)"), "cost 5", "$$$1").text,
+            "cost $5"
+        );
+        assert_eq!(replace_matches(&re(r"(\d)"), "7", "${1}a").text, "7a");
+    }
+
+    #[test]
+    fn empty_replacement_deletes_and_leaves_no_span() {
+        let r = replace_matches(&re("foo"), "foo bar foo", "");
+        assert_eq!(r.text, " bar ");
+        assert!(r.spans.is_empty());
+    }
+
+    #[test]
+    fn fixed_strings_and_multi_patterns() {
+        let f = build_matcher(
+            "unwrap()",
+            MatchOptions {
+                fixed_strings: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            replace_matches(&f, "x.unwrap()", "expect(\"..\")").text,
+            "x.expect(\"..\")"
+        );
+        // -e patterns are wrapped in non-capturing groups, so the user's
+        // group numbers are kept across alternatives.
+        let m = build_matcher_multi(
+            &[r"(\d+)px".to_string(), r"(\d+)em".to_string()],
+            MatchOptions::default(),
+        )
+        .unwrap();
+        assert_eq!(replace_matches(&m, "4px 2em", "<$1|$2>").text, "<4|> <|2>");
+    }
+
+    #[test]
+    fn unicode_and_control_characters() {
+        assert_eq!(replace_matches(&re("ö"), "töt", "oe").text, "toet");
+        // The inserted text is sanitized like everything else printed.
+        let r = replace_matches(&re("x"), "axb", "\u{1b}[31m");
+        assert_eq!(r.text, "a\\x1b[31mb");
+        assert_eq!(r.spans, [(1, 9)]);
+    }
+
+    #[test]
+    fn only_matching_variant_returns_one_expansion_per_match() {
+        assert_eq!(
+            replaced_matches(&re(r"(\w+)@(\w+)"), "a@b c@d", "$2"),
+            ["b", "d"]
+        );
+    }
+
+    #[test]
+    fn replacement_validation() {
+        let one = re(r"(\w+)");
+        assert!(check_replacement(&one, "$1 $0 ${1} $$ $$5 plain").is_ok());
+        assert!(check_replacement(&one, "trailing $").is_ok());
+        assert!(check_replacement(&one, "$-x ${unclosed").is_ok());
+        let err = check_replacement(&one, "cost $5").unwrap_err();
+        assert!(err.contains("group '5'") && err.contains("$$"), "{err}");
+        let err = check_replacement(&one, "$1a").unwrap_err();
+        assert!(err.contains("${1}a"), "{err}");
+        assert!(check_replacement(&one, "${2}").is_err());
+        assert!(
+            check_replacement(&re("x"), "$1")
+                .unwrap_err()
+                .contains("no capture groups")
+        );
+        let named = re(r"(?P<host>\w+)");
+        assert!(check_replacement(&named, "${host} $host $1").is_ok());
+        assert!(check_replacement(&named, "$hostname").is_err());
     }
 }

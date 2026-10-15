@@ -206,3 +206,43 @@ fn unsafe_or_meaningless_commands_are_rejected_before_searching() {
     let out = arfind(&root, &[".", "--exec", "echo", ";", "-X", "echo"]);
     assert_eq!(out.status.code(), Some(2));
 }
+
+#[test]
+fn basename_starting_with_dash_is_not_an_option() {
+    // SAST F4: `{/}` of a file named "--version" used to make `ls` print
+    // its version instead of listing the file.
+    let (_dir, root) = tree(&["--version", "-rf.txt"]);
+    let out = arfind(&root, &[".", "-t", "f", "--exec", "ls", "{/}", ";"]);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !stdout.contains("coreutils") && !stdout.contains("version "),
+        "{stdout}"
+    );
+    // ls runs in arfind's working directory (the tree root) and is given
+    // ./NAME, so it finds and lists both files.
+    let mut lines: Vec<&str> = stdout.lines().collect();
+    lines.sort();
+    assert_eq!(lines, ["./--version", "./-rf.txt"], "stderr: {stderr}");
+    assert!(out.status.success(), "stderr: {stderr}");
+}
+
+#[test]
+fn dry_run_shows_the_dot_slash_prefix() {
+    let (_dir, root) = tree(&["-rf.txt"]);
+    let out = arfind(
+        &root,
+        &[
+            ".",
+            "-t",
+            "f",
+            "--dry-run",
+            "--exec",
+            "rm",
+            "{/}",
+            "{/.}",
+            ";",
+        ],
+    );
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "rm ./-rf.txt ./-rf\n");
+}

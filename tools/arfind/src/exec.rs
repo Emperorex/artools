@@ -5,9 +5,13 @@
 //! * **No shell.** The command is started directly (`execve`), with every
 //!   argument passed as its own string. Nothing in a file name (spaces,
 //!   quotes, `;`, `$(...)`, newlines) is ever interpreted.
-//! * **No option injection.** arfind reports absolute paths, so a result
-//!   always starts with `/` and can never be mistaken for an option such as
-//!   `-rf`. [`ExecTemplate`] relies on that and debug-asserts it.
+//! * **No option injection.** arfind reports absolute paths, so `{}`,
+//!   `{//}` and `{.}` always start with `/` and can never be mistaken for an
+//!   option such as `-rf` ([`ExecTemplate::args_for`] debug-asserts this).
+//!   `{/}` and `{/.}` are bare file names and can start with `-`, so when
+//!   one of them begins an argument and its expansion starts with `-`, it
+//!   is written as `./-rf`, the same way `find -execdir` does. The command
+//!   then sees a relative path, never an option.
 //! * **Never runs what it found.** A placeholder in the program position
 //!   (`--exec {}`) is rejected: arfind runs a command *on* files, not the
 //!   files themselves.
@@ -95,14 +99,27 @@ impl ArgTemplate {
 
     fn expand(&self, path: &Path) -> OsString {
         let mut out = OsString::new();
-        for piece in &self.0 {
+        for (i, piece) in self.0.iter().enumerate() {
             match piece {
                 Piece::Text(t) => out.push(t),
-                Piece::Hole(ph) => out.push(expand_placeholder(*ph, path)),
+                Piece::Hole(ph) => {
+                    let value = expand_placeholder(*ph, path);
+                    // Only the start of an argument is read as an option. A
+                    // file name there that starts with '-' gets "./" in
+                    // front, so `{/}` of "--version" is "./--version".
+                    if i == 0 && starts_with_dash(&value) {
+                        out.push("./");
+                    }
+                    out.push(value);
+                }
             }
         }
         out
     }
+}
+
+fn starts_with_dash(s: &OsStr) -> bool {
+    s.as_encoded_bytes().first() == Some(&b'-')
 }
 
 fn expand_placeholder(ph: Placeholder, path: &Path) -> OsString {
@@ -467,6 +484,45 @@ mod tests {
                 "pre-Makefile.bak"
             ]
         );
+    }
+
+    #[test]
+    fn basename_placeholders_cannot_become_options() {
+        let t = ExecTemplate::parse(&words(&["ls", "{/}", "{/.}", "x{/}", "--file={/}"]), false)
+            .unwrap();
+        assert_eq!(
+            strs(&t.args_for(Path::new("/d/--version"))),
+            [
+                "./--version",
+                "./--version",
+                "x--version",
+                "--file=--version"
+            ]
+        );
+        assert_eq!(
+            strs(&t.args_for(Path::new("/d/-rf.txt"))),
+            ["./-rf.txt", "./-rf", "x-rf.txt", "--file=-rf.txt"]
+        );
+        assert_eq!(
+            strs(&t.args_for(Path::new("/d/-"))),
+            ["./-", "./-", "x-", "--file=-"]
+        );
+        // Names that don't start with '-' are left alone.
+        assert_eq!(
+            strs(&t.args_for(Path::new("/d/a-b.rs"))),
+            ["a-b.rs", "a-b", "xa-b.rs", "--file=a-b.rs"]
+        );
+    }
+
+    #[test]
+    fn no_expanded_argument_starts_with_a_dash_unless_the_user_wrote_it() {
+        let all = ["{}", "{/}", "{//}", "{.}", "{/.}", "{/}.bak", "{/.}{/}"];
+        let t = ExecTemplate::parse(&words(&[&["echo"][..], &all].concat()), false).unwrap();
+        for name in ["/d/-rf", "/d/--help", "/-x/-y.z", "/d/-.", "/d/--"] {
+            for arg in t.args_for(Path::new(name)) {
+                assert!(!starts_with_dash(&arg), "{name}: {arg:?}");
+            }
+        }
     }
 
     #[test]

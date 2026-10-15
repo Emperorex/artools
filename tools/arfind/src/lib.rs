@@ -696,7 +696,7 @@ pub fn scan_directory(
             if config.debug {
                 eprintln!(
                     "{}",
-                    format!("arfind: {}: {}", task.path.display(), err).red()
+                    format!("arfind: {}: {}", arcommon::display_path(&task.path), err).red()
                 );
             }
             return;
@@ -870,7 +870,7 @@ pub fn scan_directory(
                         "{}",
                         format!(
                             "arfind: {}: on another filesystem, not descending (--one-file-system)",
-                            entry_path.display()
+                            arcommon::display_path(&entry_path)
                         )
                         .yellow()
                     );

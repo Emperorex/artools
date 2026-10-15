@@ -603,7 +603,11 @@ fn main() {
             // --largest-files: individual files, largest first, instead of
             // the per-directory report.
             for file in &largest_files {
-                println!("{:>10}  {}", format_size(file.size), file.path.display());
+                println!(
+                    "{:>10}  {}",
+                    format_size(file.size),
+                    arcommon::display_path(&file.path)
+                );
             }
         } else if args.tree {
             let selection =
@@ -629,7 +633,11 @@ fn main() {
             print!("{text}");
         } else if args.inodes {
             if args.summarize {
-                println!("{:>10}  {}", root_total, target_path.display());
+                println!(
+                    "{:>10}  {}",
+                    root_total,
+                    arcommon::display_path(&target_path)
+                );
             } else {
                 let selection = select_directories(
                     &aggregated_sizes,
@@ -649,13 +657,17 @@ fn main() {
                     );
                 } else {
                     for (path, count) in &selection.entries {
-                        println!("{:>10}  {}", count, path.display());
+                        println!("{:>10}  {}", count, arcommon::display_path(path));
                     }
                 }
             }
         } else if args.summarize {
             // --summarize: print only the root total and exit
-            println!("{:>10}  {}", format_size(root_total), target_path.display());
+            println!(
+                "{:>10}  {}",
+                format_size(root_total),
+                arcommon::display_path(&target_path)
+            );
         } else {
             let selection =
                 select_directories(&aggregated_sizes, &aggregated_content, &target_path, &query);
@@ -671,7 +683,11 @@ fn main() {
                 );
             } else {
                 for (path, size) in &selection.entries {
-                    println!("{:>10}  {}", format_size(*size), path.display());
+                    println!(
+                        "{:>10}  {}",
+                        format_size(*size),
+                        arcommon::display_path(path)
+                    );
                 }
             }
         }
@@ -710,7 +726,7 @@ fn print_duplicates(report: &DuplicateReport, top: usize, summarize: bool) {
                 format_size(group.reclaimable())
             );
             for path in &group.paths {
-                println!("  {}", path.display());
+                println!("  {}", arcommon::display_path(path));
             }
             println!();
         }
@@ -756,7 +772,7 @@ fn warn_unreadable(report: &DuplicateReport, debug: bool) {
         );
         if debug {
             for (path, reason) in &report.unreadable {
-                eprintln!("  {}: {}", path.display(), reason);
+                eprintln!("  {}: {}", arcommon::display_path(path), reason);
             }
         }
     }

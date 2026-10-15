@@ -55,7 +55,7 @@ pub fn render_list_with_bars(
             paint(*value, format!("{text:>width$}")),
             bar(*value, total, BAR_WIDTH),
             percent(*value, total),
-            path.display()
+            arcommon::display_path(path)
         ));
     }
     out

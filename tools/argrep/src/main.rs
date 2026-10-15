@@ -1,7 +1,7 @@
 use argrep::{
     DEFAULT_IGNORES, MatchOptions, SearchConfig, SearchStats, build_matcher, build_matcher_multi,
-    check_replacement, parallel_grep, parse_pattern_file, parse_size, replace_matches,
-    replaced_matches, sanitize_for_display,
+    check_replacement, display_path, parallel_grep, parse_pattern_file, parse_size,
+    replace_matches, replaced_matches, sanitize_for_display,
 };
 use clap::Parser;
 use clap::builder::TypedValueParser as _;
@@ -1250,11 +1250,11 @@ fn print_result(
         // (line_num: 0, no content) — what distinguishes them is entirely
         // *which files ever produced a result at all* (see grep_file/
         // emit_file_listing/grep_stdin), not how that result prints.
-        println!("{}", result.file_path.display().to_string().magenta());
+        println!("{}", display_path(&result.file_path).magenta());
     } else if count_per_file {
         println!(
             "{}: {}",
-            result.file_path.display().to_string().magenta(),
+            display_path(&result.file_path).magenta(),
             result.count.unwrap_or(0).to_string().green()
         );
     } else {
@@ -1262,12 +1262,12 @@ fn print_result(
         let prefix = if line_number {
             format!(
                 "{}{}{}",
-                result.file_path.display().to_string().magenta(),
+                display_path(&result.file_path).magenta(),
                 sep,
                 result.line_num.to_string().green()
             )
         } else {
-            result.file_path.display().to_string().magenta().to_string()
+            display_path(&result.file_path).magenta().to_string()
         };
 
         let content = if result.is_context {

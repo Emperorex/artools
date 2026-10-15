@@ -638,7 +638,12 @@ pub fn scan_directory(
             Err(err) if err.kind() == std::io::ErrorKind::Interrupted => continue,
             Err(err) => {
                 if config.debug {
-                    eprintln!("{}: {}: {}", "ardisk".red(), dir_path.display(), err);
+                    eprintln!(
+                        "{}: {}: {}",
+                        "ardisk".red(),
+                        arcommon::display_path(dir_path),
+                        err
+                    );
                 }
                 return;
             }
@@ -731,7 +736,7 @@ pub fn scan_directory(
                     eprintln!(
                         "{}: {}: on another filesystem, skipped (--one-file-system)",
                         "ardisk".yellow(),
-                        entry_path.display()
+                        arcommon::display_path(&entry_path)
                     );
                 }
                 continue;

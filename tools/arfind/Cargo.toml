@@ -5,6 +5,7 @@ edition = "2024"
 authors = ["Artem Shemet"]
 
 [dependencies]
+arcommon = { path = "../../crates/arcommon" }
 clap = { version = "4", features = ["derive"] }
 glob = "0.3"
 crossbeam-channel = "0.5"

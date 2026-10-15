@@ -480,7 +480,8 @@ pub struct SearchStats {
     pub files_discovered: Arc<AtomicUsize>,
     /// Files filtered out by name/path rules — hidden, gitignore/
     /// .ignore, --exclude, --include, --type, --type-not — before ever
-    /// being opened. Deliberately does *not* include binary files (they
+    /// being opened. Also counts special files (FIFOs, sockets, device
+    /// nodes) found while walking, which are never opened either. Deliberately does *not* include binary files (they
     /// were opened, just not fully read) or files that failed to open
     /// (that's `io_errors`, a different failure category from "skipped by
     /// our own filtering rules"). Displayed as "Files skipped".
@@ -831,7 +832,16 @@ pub fn scan_and_grep(
 ) {
     let dir_path = task.path.as_path();
 
-    if dir_path.is_file() {
+    // Anything other than a directory as the root is an explicitly named
+    // file: a regular file, but also a FIFO, /dev/stdin, a device node,
+    // etc. Those are read exactly as named, same as grep does, because the
+    // user asked for that path. (Subdirectory tasks only ever carry real
+    // directories, so in practice this is a root-only check.) fs::metadata
+    // follows symlinks, like the old is_file() did. A path that can't be
+    // stat'ed falls through to read_dir below and is reported as an I/O
+    // error there.
+    let root_is_non_dir = matches!(fs::metadata(dir_path), Ok(m) if !m.is_dir());
+    if root_is_non_dir {
         // An explicitly-named single-file root always counts as one
         // discovered (and searched) file — see files_discovered's field
         // doc for why this must stay in sync with the entries-loop below.
@@ -906,6 +916,27 @@ pub fn scan_and_grep(
         let os_file_name = entry.file_name();
         let file_name = os_file_name.to_string_lossy();
         let is_dir = file_type.is_dir();
+
+        // Only directories and regular files are traversed. FIFOs, sockets
+        // and device nodes found while walking are skipped: opening a FIFO
+        // blocks until a writer appears (one stray `mkfifo` would hang a
+        // worker, and so the whole search, forever), and reading a device
+        // node is never what a recursive text search means. Same rule as
+        // ripgrep. Naming one explicitly as PATH still reads it (see the
+        // root check above). Counted as discovered + skipped, so the
+        // --stats accounting identity still holds.
+        if !is_dir && !file_type.is_file() {
+            stats.files_discovered.fetch_add(1, Ordering::Relaxed);
+            stats.files_skipped.fetch_add(1, Ordering::Relaxed);
+            if config.debug {
+                eprintln!(
+                    "{}: {}: not a regular file, skipped",
+                    "argrep".red(),
+                    entry.path().display()
+                );
+            }
+            continue;
+        }
 
         // files_discovered counts every file-type entry seen, before any
         // filtering below — see the field doc on SearchStats for the

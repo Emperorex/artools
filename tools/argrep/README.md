@@ -382,6 +382,12 @@ The following directories are always skipped:
 
 Hidden files and directories (names starting with `.`) are also skipped by default — pass `--hidden` to include them (see Usage above for how this interacts with `--no-ignore`).
 
+### Special files
+
+While walking a directory, argrep searches only regular files. FIFOs (named pipes), sockets and device nodes are skipped. Opening a FIFO blocks until something writes to it, so a single stray `mkfifo` used to hang the whole search. Symlinks found during traversal are not followed either. Skipped special files show up under "Files skipped" in `--stats`, and `--debug` names each one.
+
+A path you name explicitly is read as given, whatever it is: `argrep needle /path/to/pipe` reads from the FIFO (waiting for a writer), just like grep.
+
 ## Binary file handling
 
 `argrep` automatically skips binary files by checking the first 1024 bytes for null bytes. No flag needed — compiled binaries, images, and media files are silently ignored.

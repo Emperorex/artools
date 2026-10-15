@@ -4336,3 +4336,96 @@ fn decompressed_cap_does_not_apply_to_plain_files() {
     assert_eq!(collect(&rx).len(), 1);
     assert_eq!(stats.io_errors.load(Ordering::Relaxed), 0);
 }
+
+// ── Special files during traversal (SAST F2) ────────────────────────────────
+//
+// Contract: recursive traversal searches only directories and regular
+// files. FIFOs, sockets and device nodes it discovers are skipped (opening a
+// FIFO blocks until a writer appears, which used to hang the whole search).
+// A FIFO the user names explicitly as PATH is still read.
+
+#[cfg(unix)]
+fn make_fifo(path: &std::path::Path) {
+    let status = std::process::Command::new("mkfifo")
+        .arg(path)
+        .status()
+        .expect("mkfifo must be available on this system");
+    assert!(status.success(), "mkfifo failed");
+}
+
+/// Runs `f` on a helper thread and fails the test (instead of hanging the
+/// whole test binary) if it doesn't finish within 10 seconds.
+#[cfg(unix)]
+fn within_timeout<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> T {
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(f());
+    });
+    rx.recv_timeout(std::time::Duration::from_secs(10))
+        .expect("search did not finish: blocked on a special file")
+}
+
+#[cfg(unix)]
+#[test]
+fn traversal_skips_fifos_and_sockets_instead_of_hanging() {
+    let (_dir, root) = make_tree(&[("a.txt", "needle\n")]);
+    make_fifo(&root.join("pipe"));
+    let _sock = std::os::unix::net::UnixListener::bind(root.join("sock")).unwrap();
+
+    let config = default_config("needle", false);
+    let names = within_timeout(move || run(root, config));
+    assert_eq!(names, vec!["a.txt".to_string()]);
+}
+
+#[cfg(unix)]
+#[test]
+fn special_files_count_as_discovered_and_skipped() {
+    let (_dir, root) = make_tree(&[("a.txt", "needle\n"), ("b.txt", "nothing\n")]);
+    make_fifo(&root.join("pipe"));
+
+    let config = stats_config("needle", &[]);
+    let stats = SearchStats::new();
+    let stats_for_run = stats.clone();
+    within_timeout(move || parallel_grep(root, 4, config, stats_for_run, |_| {}));
+
+    assert_eq!(stats.files_discovered.load(Ordering::Relaxed), 3);
+    assert_eq!(stats.total_files.load(Ordering::Relaxed), 2);
+    assert_eq!(stats.files_skipped.load(Ordering::Relaxed), 1);
+    assert_eq!(stats.io_errors.load(Ordering::Relaxed), 0);
+}
+
+#[cfg(unix)]
+#[test]
+fn files_listing_does_not_include_special_files() {
+    let (_dir, root) = make_tree(&[("a.txt", "x\n")]);
+    make_fifo(&root.join("pipe"));
+
+    let config = files_only_config(false, false, &[], &[]);
+    let names = within_timeout(move || run(root, config));
+    assert_eq!(names, vec!["a.txt".to_string()]);
+}
+
+#[cfg(unix)]
+#[test]
+fn explicitly_named_fifo_is_still_read() {
+    let dir = TempDir::new().unwrap();
+    let root = fs::canonicalize(dir.path()).unwrap();
+    let fifo_path = root.join("pipe");
+    make_fifo(&fifo_path);
+
+    let writer_path = fifo_path.clone();
+    let writer = std::thread::spawn(move || {
+        let mut f = fs::OpenOptions::new()
+            .write(true)
+            .open(&writer_path)
+            .unwrap();
+        f.write_all(b"needle through a named pipe\n").unwrap();
+    });
+
+    let config = default_config("needle", false);
+    let names = within_timeout(move || run(fifo_path, config));
+    // Assert before joining: if the FIFO was never opened, the writer
+    // stays blocked and joining first would hang the test.
+    assert_eq!(names, vec!["pipe".to_string()]);
+    writer.join().unwrap();
+}

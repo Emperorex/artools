@@ -1,6 +1,7 @@
 use argrep::{
     DEFAULT_IGNORES, MatchOptions, SearchConfig, SearchStats, build_matcher, build_matcher_multi,
-    check_replacement, parallel_grep, replace_matches, replaced_matches, sanitize_for_display,
+    check_replacement, parallel_grep, parse_pattern_file, replace_matches, replaced_matches,
+    sanitize_for_display,
 };
 use clap::Parser;
 use clap::builder::TypedValueParser as _;
@@ -129,9 +130,9 @@ fn resolve_e_path(query: Option<String>, path: Option<String>) -> Result<Option<
         (Some(p), None) => Ok(Some(p)),
         (None, Some(p)) => Ok(Some(p)),
         (Some(q), Some(p)) => Err(format!(
-            "-e/--regexp does not treat QUERY as an additional pattern, \
-             only PATH, but got two positional arguments: '{q}' and \
-             '{p}'. Use `argrep -e '...' {p}` (or `argrep -e '...' {q}`, \
+            "with -e/--regexp or -f/--file, QUERY is not an additional \
+             pattern, only PATH, but got two positional arguments: '{q}' \
+             and '{p}'. Use `argrep -e '...' {p}` (or `argrep -e '...' {q}`, \
              whichever was meant as the path — and add another -e if \
              '{q}' was meant as a pattern instead)."
         )),
@@ -219,7 +220,7 @@ struct Args {
     /// (which doesn't search content at all) or with -e/--regexp (which
     /// supplies patterns instead) — see those flags' own doc comments
     /// for how a lone positional is interpreted in either mode.
-    #[arg(required_unless_present_any = ["files", "patterns"])]
+    #[arg(required_unless_present_any = ["files", "patterns", "pattern_files"])]
     query: Option<String>,
 
     /// Root directory or file to start the search
@@ -236,6 +237,16 @@ struct Args {
     /// resolve_e_path).
     #[arg(short = 'e', long = "regexp")]
     patterns: Vec<String>,
+
+    /// Read patterns from FILE, one per line, like grep -f / rg -f.
+    /// Repeatable, and combinable with -e: a line matches if it matches
+    /// ANY pattern from any source. Blank lines are skipped (unlike grep,
+    /// where they match everything); CRLF endings are fine; no comment
+    /// syntax. -F/-i/-S/-w/-x apply to every pattern. As with -e, QUERY is
+    /// not a pattern then, so a lone positional is PATH. `-f -` reads the
+    /// patterns from stdin; the data must then come from PATH.
+    #[arg(short = 'f', long = "file", value_name = "FILE")]
+    pattern_files: Vec<String>,
 
     /// Case-insensitive search only if every given pattern (QUERY, or
     /// all of -e's patterns) is entirely lowercase; case-sensitive if
@@ -528,6 +539,12 @@ fn compile_glob(pattern: &str, flag_name: &str, quiet: bool) -> Pattern {
     }
 }
 
+/// Prints `error: ...` in red and exits with `code`.
+fn fail(message: &str, code: i32) -> ! {
+    eprintln!("{}", format!("error: {}", message).red());
+    std::process::exit(code);
+}
+
 fn main() {
     let mut args = Args::parse();
 
@@ -552,9 +569,9 @@ fn main() {
             );
             std::process::exit(2);
         }
-    } else if !args.patterns.is_empty() {
-        // -e was given: QUERY is not an additional pattern (same rule as
-        // GNU grep's -e/-f), so a lone leftover positional is PATH.
+    } else if !args.patterns.is_empty() || !args.pattern_files.is_empty() {
+        // -e or -f was given: QUERY is not an additional pattern (same
+        // rule as GNU grep's -e/-f), so a lone leftover positional is PATH.
         match resolve_e_path(args.query.take(), args.path.take()) {
             Ok(path) => args.path = path,
             Err(msg) => {
@@ -569,8 +586,68 @@ fn main() {
     // required_unless_present_any=["files","patterns"] guarantees is
     // present here whenever neither --files nor -e applies. Empty only
     // in --files mode, where it's never used for matching anyway.
-    let patterns: Vec<String> = if !args.patterns.is_empty() {
-        args.patterns.clone()
+    // -f/--file: read every pattern file now, before anything else, so a
+    // missing or unreadable file fails fast. Patterns are kept with their
+    // origin for error messages; -e patterns come first, then each file in
+    // command-line order (this only matters for --replace group numbers).
+    let config_error_code = if args.quiet { 2 } else { 1 };
+    let mut file_patterns: Vec<(String, usize, String)> = Vec::new(); // (file, line, pattern)
+    if !args.pattern_files.is_empty() {
+        if args.pattern_files.iter().filter(|f| *f == "-").count() > 1 {
+            fail("-f - (patterns from stdin) can be given only once", 2);
+        }
+        if args.pattern_files.iter().any(|f| f == "-") && args.path.as_deref() == Some("-") {
+            fail(
+                "stdin can't hold both the patterns (-f -) and the text to search (PATH -); \
+                 give a file or directory to search",
+                2,
+            );
+        }
+        for file in &args.pattern_files {
+            let contents = if file == "-" {
+                let mut buf = String::new();
+                io::Read::read_to_string(&mut io::stdin(), &mut buf)
+                    .map(|_| buf)
+                    .map_err(|e| format!("cannot read patterns from stdin: {e}"))
+            } else {
+                fs::read(file)
+                    .map_err(|e| format!("cannot read pattern file '{file}': {e}"))
+                    .and_then(|bytes| {
+                        String::from_utf8(bytes)
+                            .map_err(|_| format!("pattern file '{file}' is not valid UTF-8"))
+                    })
+            };
+            match contents {
+                Ok(text) => file_patterns.extend(
+                    parse_pattern_file(&text)
+                        .into_iter()
+                        .map(|p| (file.clone(), p.line, p.pattern)),
+                ),
+                Err(e) => fail(&e, config_error_code),
+            }
+        }
+        if file_patterns.is_empty() && args.patterns.is_empty() {
+            let which = if args.pattern_files.len() == 1 {
+                format!("'{}'", args.pattern_files[0])
+            } else {
+                "the pattern files".to_string()
+            };
+            fail(
+                &format!(
+                    "no patterns found in {which} (blank lines are skipped); \
+                     an empty rule list would match nothing"
+                ),
+                config_error_code,
+            );
+        }
+    }
+
+    let patterns: Vec<String> = if !args.patterns.is_empty() || !file_patterns.is_empty() {
+        args.patterns
+            .iter()
+            .cloned()
+            .chain(file_patterns.iter().map(|(_, _, p)| p.clone()))
+            .collect()
     } else if let Some(q) = &args.query {
         vec![q.clone()]
     } else {
@@ -609,13 +686,26 @@ fn main() {
         // construction — and every existing test against it — is
         // untouched by -e's addition; build_matcher_multi is a separate
         // function, not something build_matcher delegates to.
-        let result = if args.patterns.is_empty() {
+        let result = if args.patterns.is_empty() && file_patterns.is_empty() {
             let query = args.query.as_deref().expect(
-                "clap's required_unless_present_any=[\"files\", \"patterns\"] guarantees this",
+                "clap's required_unless_present_any=[\"files\", \"patterns\", \"pattern_files\"] guarantees this",
             );
             build_matcher(query, match_options)
         } else {
-            build_matcher_multi(&patterns, match_options)
+            build_matcher_multi(&patterns, match_options).map_err(|e| {
+                // With patterns from files, point at the offending line
+                // instead of echoing a possibly huge list.
+                match file_patterns
+                    .iter()
+                    .find(|(_, _, p)| build_matcher(p, match_options).is_err())
+                {
+                    Some((file, line, p)) => {
+                        let why = build_matcher(p, match_options).unwrap_err();
+                        format!("{file}:{line}: {why}")
+                    }
+                    None => e,
+                }
+            })
         };
         match result {
             Ok(re) => re,
@@ -727,7 +817,10 @@ fn main() {
     let stats = SearchStats::new();
     let start_time = Instant::now();
 
-    let use_stdin = if args.files {
+    let patterns_from_stdin = args.pattern_files.iter().any(|f| f == "-");
+    let use_stdin = if args.files || (patterns_from_stdin && args.path.is_none()) {
+        // With -f -, stdin has already been read for the patterns, so the
+        // data comes from PATH (default ".") and never from stdin.
         // --files always lists a directory tree — never falls back to
         // reading stdin, even if stdin happens to be piped and no PATH
         // was given (which would otherwise trigger the auto-detection
@@ -1184,6 +1277,42 @@ mod tests {
         smart_case_ignore_case, type_globs,
     };
     use clap::Parser;
+
+    // ── -f / --file ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn pattern_file_replaces_query_and_is_repeatable() {
+        let a = Args::try_parse_from(["argrep", "-f", "a.txt", "-f", "b.txt", "src"]).unwrap();
+        assert_eq!(a.pattern_files, ["a.txt", "b.txt"]);
+        // Parsing binds the lone positional to `query`; main() then moves
+        // it to PATH via resolve_e_path, exactly as for -e.
+        assert_eq!(a.query.as_deref(), Some("src"));
+        let a = Args::try_parse_from(["argrep", "--file", "rules.txt"]).unwrap();
+        assert_eq!(a.pattern_files, ["rules.txt"]);
+        assert!(a.query.is_none());
+        let a = Args::try_parse_from(["argrep", "-f", "-", "."]).unwrap();
+        assert_eq!(a.pattern_files, ["-"]);
+    }
+
+    #[test]
+    fn pattern_file_combines_with_e_and_matching_flags() {
+        for extra in [
+            &["-e", "X"][..],
+            &["-F"],
+            &["-i"],
+            &["-S"],
+            &["-w"],
+            &["-x"],
+            &["-r", "Y"],
+            &["-q"],
+            &["-l"],
+            &["-c"],
+        ] {
+            let mut argv = vec!["argrep", "-f", "p.txt", "."];
+            argv.extend_from_slice(extra);
+            assert!(Args::try_parse_from(&argv).is_ok(), "{argv:?}");
+        }
+    }
 
     // ── -r / --replace ───────────────────────────────────────────────────────
 

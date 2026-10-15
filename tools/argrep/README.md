@@ -365,6 +365,8 @@ This is aimed squarely at rotated logs — `logrotate` compresses old logs as gz
 | `--stats`               | —     | —                 | Print a clean search summary (files discovered/searched/skipped, directories, bytes read, workers, matches, elapsed) to stderr; independent of `--debug` |
 | `--files`               | —     | —                 | List files that would be searched, without reading them; QUERY not required; conflicts with content-search flags (see Usage above)                       |
 | `--search-compressed`   | `-z`  | —                 | Decompress gzip (`.gz`/`.tgz`) files before searching; no effect combined with `--files`                                                                 |
+| `--max-line-size`       | —     | `4M`              | Skip lines longer than SIZE (K/M/G suffixes; `0` = unlimited) with a warning instead of buffering them whole                                       |
+| `--max-decompressed-size` | —   | `1G`              | With `-z`, stop after SIZE decompressed bytes per file (gzip-bomb protection; `0` = unlimited)                                                     |
 | `--quiet`               | `-q`  | —                 | No output; exit code alone reports match/no-match/error (see Exit codes below). Overrides -l/-c/-n if also set — nothing is printed either way.          |
 
 `-l`, `-L`, and `-c` cannot be combined with each other — they imply mutually incompatible output contracts (`filename` matched vs `filename` unmatched vs `filename: count`), so combining any two of them (`argrep foo . -c -l`, `argrep foo . -l -L`, etc.) is a CLI error rather than one silently overriding the other.
@@ -385,6 +387,15 @@ Hidden files and directories (names starting with `.`) are also skipped by defau
 `argrep` automatically skips binary files by checking the first 1024 bytes for null bytes. No flag needed — compiled binaries, images, and media files are silently ignored.
 
 Text files with invalid UTF-8 (a stray byte from a legacy encoding, a corrupted line, etc.) are still searched in full: an invalid sequence becomes `U+FFFD` in that one line rather than ending the scan partway through the file. This matches how tools like `ripgrep` treat non-UTF-8 text by default.
+
+### Resource limits
+
+argrep never holds more than one line per worker thread in memory, and that line is capped:
+
+- `--max-line-size SIZE` (default `4M`): a line longer than this is skipped (its bytes are read and discarded, never stored) and a warning is printed once per file. Without this cap, a single newline-free file would be buffered entirely in memory.
+- `--max-decompressed-size SIZE` (default `1G`): under `-z`, reading stops once a file has produced this many decompressed bytes. gzip compresses repetitive data roughly 1000:1, so a ~2 MB `.gz` can otherwise expand to gigabytes. Applies only to compressed files.
+
+Both accept `K`/`M`/`G` suffixes (binary multiples) and `0` for unlimited. A file that hit either limit was **not fully searched**: it counts toward the "could not be read" total (so the exit status reflects it), and `-L` will not list it as "no match". Raise the limit, or pass `0`, if you need to search such files, e.g. `argrep --max-line-size 64M 'token' dist/`.
 
 With `-z`/`--search-compressed` (see Usage above), the binary sniff runs on the *decompressed* content, not the raw compressed bytes on disk — a gzip-compressed binary file is still correctly skipped, the same as an uncompressed one would be. Sniffing a decompressed (or otherwise non-seekable) stream works a little differently under the hood than sniffing a plain file: since it generally can't be rewound, the sniffed bytes are held onto and replayed ahead of the rest of the stream instead of seeking back to the start. This has one small side benefit worth calling out: it also means a FIFO/named pipe can now be searched at all, where it previously failed outright (rewinding after the sniff read isn't possible on a pipe either).
 

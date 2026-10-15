@@ -73,6 +73,8 @@ fn default_config(query: &str, ignore_case: bool) -> std::sync::Arc<argrep::Sear
         only_matching: false,
         max_count: None,
         replace: None,
+        max_line_bytes: argrep::DEFAULT_MAX_LINE_BYTES,
+        max_decompressed_bytes: argrep::DEFAULT_MAX_DECOMPRESSED_BYTES,
     })
 }
 
@@ -231,6 +233,8 @@ fn compressed_config(query: &str, search_compressed: bool) -> StdArc<SearchConfi
         only_matching: false,
         max_count: None,
         replace: None,
+        max_line_bytes: argrep::DEFAULT_MAX_LINE_BYTES,
+        max_decompressed_bytes: argrep::DEFAULT_MAX_DECOMPRESSED_BYTES,
     })
 }
 
@@ -525,6 +529,8 @@ fn multi_pattern_config(patterns: &[&str], ignore_case: bool) -> StdArc<SearchCo
         only_matching: false,
         max_count: None,
         replace: None,
+        max_line_bytes: argrep::DEFAULT_MAX_LINE_BYTES,
+        max_decompressed_bytes: argrep::DEFAULT_MAX_DECOMPRESSED_BYTES,
     })
 }
 
@@ -895,6 +901,8 @@ fn hidden_config(query: &str, hidden: bool, no_ignore: bool) -> StdArc<SearchCon
         only_matching: false,
         max_count: None,
         replace: None,
+        max_line_bytes: argrep::DEFAULT_MAX_LINE_BYTES,
+        max_decompressed_bytes: argrep::DEFAULT_MAX_DECOMPRESSED_BYTES,
     })
 }
 
@@ -1058,6 +1066,8 @@ fn type_config(
         only_matching: false,
         max_count: None,
         replace: None,
+        max_line_bytes: argrep::DEFAULT_MAX_LINE_BYTES,
+        max_decompressed_bytes: argrep::DEFAULT_MAX_DECOMPRESSED_BYTES,
     })
 }
 
@@ -1213,6 +1223,8 @@ fn custom_ignore_dir_is_excluded() {
         only_matching: false,
         max_count: None,
         replace: None,
+        max_line_bytes: argrep::DEFAULT_MAX_LINE_BYTES,
+        max_decompressed_bytes: argrep::DEFAULT_MAX_DECOMPRESSED_BYTES,
     });
     let stats = SearchStats::new();
     let results: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
@@ -1278,6 +1290,8 @@ fn stats_counts_are_accurate() {
         only_matching: false,
         max_count: None,
         replace: None,
+        max_line_bytes: argrep::DEFAULT_MAX_LINE_BYTES,
+        max_decompressed_bytes: argrep::DEFAULT_MAX_DECOMPRESSED_BYTES,
     });
     let stats = SearchStats::new();
     let stats_clone = stats.clone();
@@ -1319,6 +1333,8 @@ fn stats_config(query: &str, exclude: &[&str]) -> StdArc<SearchConfig> {
         only_matching: false,
         max_count: None,
         replace: None,
+        max_line_bytes: argrep::DEFAULT_MAX_LINE_BYTES,
+        max_decompressed_bytes: argrep::DEFAULT_MAX_DECOMPRESSED_BYTES,
     })
 }
 
@@ -1476,6 +1492,8 @@ fn files_only_config(
         only_matching: false,
         max_count: None,
         replace: None,
+        max_line_bytes: argrep::DEFAULT_MAX_LINE_BYTES,
+        max_decompressed_bytes: argrep::DEFAULT_MAX_DECOMPRESSED_BYTES,
     })
 }
 
@@ -1640,6 +1658,8 @@ fn only_matching_output_escapes_control_characters_in_matched_text() {
         only_matching: true,
         max_count: None,
         replace: None,
+        max_line_bytes: argrep::DEFAULT_MAX_LINE_BYTES,
+        max_decompressed_bytes: argrep::DEFAULT_MAX_DECOMPRESSED_BYTES,
     });
     let results: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
     let r = Arc::clone(&results);
@@ -1686,6 +1706,8 @@ fn context_lines_with_control_characters_are_also_escaped() {
         only_matching: false,
         max_count: None,
         replace: None,
+        max_line_bytes: argrep::DEFAULT_MAX_LINE_BYTES,
+        max_decompressed_bytes: argrep::DEFAULT_MAX_DECOMPRESSED_BYTES,
     });
     let results: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
     let r = Arc::clone(&results);
@@ -1752,6 +1774,8 @@ fn control_characters_do_not_affect_whether_a_line_matches() {
             only_matching: false,
             max_count: None,
             replace: None,
+            max_line_bytes: argrep::DEFAULT_MAX_LINE_BYTES,
+            max_decompressed_bytes: argrep::DEFAULT_MAX_DECOMPRESSED_BYTES,
         })
     }
 
@@ -1833,6 +1857,8 @@ fn multiple_workers_find_same_matches_as_single_worker() {
             only_matching: false,
             max_count: None,
             replace: None,
+            max_line_bytes: argrep::DEFAULT_MAX_LINE_BYTES,
+            max_decompressed_bytes: argrep::DEFAULT_MAX_DECOMPRESSED_BYTES,
         });
         let results: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
         let r = Arc::clone(&results);
@@ -1920,6 +1946,8 @@ fn invert_returns_non_matching_lines() {
         only_matching: false,
         max_count: None,
         replace: None,
+        max_line_bytes: argrep::DEFAULT_MAX_LINE_BYTES,
+        max_decompressed_bytes: argrep::DEFAULT_MAX_DECOMPRESSED_BYTES,
     });
     let results: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
     let r = Arc::clone(&results);
@@ -1972,6 +2000,8 @@ fn invert_with_no_matches_returns_all_lines() {
         only_matching: false,
         max_count: None,
         replace: None,
+        max_line_bytes: argrep::DEFAULT_MAX_LINE_BYTES,
+        max_decompressed_bytes: argrep::DEFAULT_MAX_DECOMPRESSED_BYTES,
     });
     let results: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
     let r = Arc::clone(&results);
@@ -2030,6 +2060,8 @@ fn files_with_matches_returns_only_filenames() {
         only_matching: false,
         max_count: None,
         replace: None,
+        max_line_bytes: argrep::DEFAULT_MAX_LINE_BYTES,
+        max_decompressed_bytes: argrep::DEFAULT_MAX_DECOMPRESSED_BYTES,
     });
     let results: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
     let r = Arc::clone(&results);
@@ -2087,6 +2119,8 @@ fn files_with_matches_emits_each_file_once() {
         only_matching: false,
         max_count: None,
         replace: None,
+        max_line_bytes: argrep::DEFAULT_MAX_LINE_BYTES,
+        max_decompressed_bytes: argrep::DEFAULT_MAX_DECOMPRESSED_BYTES,
     });
     let results: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
     let r = Arc::clone(&results);
@@ -2159,6 +2193,8 @@ fn files_without_match_returns_only_unmatched_filenames() {
         only_matching: false,
         max_count: None,
         replace: None,
+        max_line_bytes: argrep::DEFAULT_MAX_LINE_BYTES,
+        max_decompressed_bytes: argrep::DEFAULT_MAX_DECOMPRESSED_BYTES,
     });
     let results: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
     let r = Arc::clone(&results);
@@ -2220,6 +2256,8 @@ fn files_without_match_emits_nothing_when_every_file_matches() {
         only_matching: false,
         max_count: None,
         replace: None,
+        max_line_bytes: argrep::DEFAULT_MAX_LINE_BYTES,
+        max_decompressed_bytes: argrep::DEFAULT_MAX_DECOMPRESSED_BYTES,
     });
     let results: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
     let r = Arc::clone(&results);
@@ -2284,6 +2322,8 @@ fn files_without_match_with_invert_reports_files_where_every_line_matches() {
         only_matching: false,
         max_count: None,
         replace: None,
+        max_line_bytes: argrep::DEFAULT_MAX_LINE_BYTES,
+        max_decompressed_bytes: argrep::DEFAULT_MAX_DECOMPRESSED_BYTES,
     });
     let results: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
     let r = Arc::clone(&results);
@@ -2341,6 +2381,8 @@ fn files_without_match_stops_reading_after_first_match() {
         only_matching: false,
         max_count: None,
         replace: None,
+        max_line_bytes: argrep::DEFAULT_MAX_LINE_BYTES,
+        max_decompressed_bytes: argrep::DEFAULT_MAX_DECOMPRESSED_BYTES,
     });
     let stats = SearchStats::new();
     let (output_tx, output_rx) = crossbeam_channel::unbounded();
@@ -2416,6 +2458,8 @@ fn files_without_match_excludes_unreadable_files() {
         only_matching: false,
         max_count: None,
         replace: None,
+        max_line_bytes: argrep::DEFAULT_MAX_LINE_BYTES,
+        max_decompressed_bytes: argrep::DEFAULT_MAX_DECOMPRESSED_BYTES,
     });
     let stats = SearchStats::new();
     let results: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
@@ -2482,6 +2526,8 @@ fn files_without_match_quiet_produces_no_output() {
         only_matching: false,
         max_count: None,
         replace: None,
+        max_line_bytes: argrep::DEFAULT_MAX_LINE_BYTES,
+        max_decompressed_bytes: argrep::DEFAULT_MAX_DECOMPRESSED_BYTES,
     });
 
     let call_count = Arc::new(AtomicUsize::new(0));
@@ -2550,6 +2596,8 @@ fn count_per_file_returns_correct_counts() {
         only_matching: false,
         max_count: None,
         replace: None,
+        max_line_bytes: argrep::DEFAULT_MAX_LINE_BYTES,
+        max_decompressed_bytes: argrep::DEFAULT_MAX_DECOMPRESSED_BYTES,
     });
     let results: Arc<Mutex<Vec<(String, usize)>>> = Arc::new(Mutex::new(Vec::new()));
     let r = Arc::clone(&results);
@@ -2616,6 +2664,8 @@ fn count_per_file_emits_result_for_every_file() {
         only_matching: false,
         max_count: None,
         replace: None,
+        max_line_bytes: argrep::DEFAULT_MAX_LINE_BYTES,
+        max_decompressed_bytes: argrep::DEFAULT_MAX_DECOMPRESSED_BYTES,
     });
     let results: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
     let r = Arc::clone(&results);
@@ -2684,6 +2734,8 @@ fn invert_with_count_counts_non_matching_lines() {
         only_matching: false,
         max_count: None,
         replace: None,
+        max_line_bytes: argrep::DEFAULT_MAX_LINE_BYTES,
+        max_decompressed_bytes: argrep::DEFAULT_MAX_DECOMPRESSED_BYTES,
     });
     let results: Arc<Mutex<Vec<(String, usize)>>> = Arc::new(Mutex::new(Vec::new()));
     let r = Arc::clone(&results);
@@ -2754,6 +2806,8 @@ fn invert_with_files_with_matches_returns_files_with_a_non_matching_line() {
         only_matching: false,
         max_count: None,
         replace: None,
+        max_line_bytes: argrep::DEFAULT_MAX_LINE_BYTES,
+        max_decompressed_bytes: argrep::DEFAULT_MAX_DECOMPRESSED_BYTES,
     });
     let results: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
     let r = Arc::clone(&results);
@@ -2822,6 +2876,8 @@ fn invert_with_context_builds_context_around_inverted_matches() {
         only_matching: false,
         max_count: None,
         replace: None,
+        max_line_bytes: argrep::DEFAULT_MAX_LINE_BYTES,
+        max_decompressed_bytes: argrep::DEFAULT_MAX_DECOMPRESSED_BYTES,
     });
     let results: Arc<Mutex<Vec<(String, bool)>>> = Arc::new(Mutex::new(Vec::new()));
     let r = Arc::clone(&results);
@@ -2897,6 +2953,8 @@ fn include_pattern_searches_only_matching_files() {
         only_matching: false,
         max_count: None,
         replace: None,
+        max_line_bytes: argrep::DEFAULT_MAX_LINE_BYTES,
+        max_decompressed_bytes: argrep::DEFAULT_MAX_DECOMPRESSED_BYTES,
     });
     let results: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
     let r = Arc::clone(&results);
@@ -2951,6 +3009,8 @@ fn include_pattern_no_files_match_returns_empty() {
         only_matching: false,
         max_count: None,
         replace: None,
+        max_line_bytes: argrep::DEFAULT_MAX_LINE_BYTES,
+        max_decompressed_bytes: argrep::DEFAULT_MAX_DECOMPRESSED_BYTES,
     });
     let results: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
     let r = Arc::clone(&results);
@@ -3001,6 +3061,8 @@ fn include_wildcard_matches_all_files() {
         only_matching: false,
         max_count: None,
         replace: None,
+        max_line_bytes: argrep::DEFAULT_MAX_LINE_BYTES,
+        max_decompressed_bytes: argrep::DEFAULT_MAX_DECOMPRESSED_BYTES,
     });
     let config_wild = StdArc::new(SearchConfig {
         regex: build_matcher(
@@ -3036,6 +3098,8 @@ fn include_wildcard_matches_all_files() {
         only_matching: false,
         max_count: None,
         replace: None,
+        max_line_bytes: argrep::DEFAULT_MAX_LINE_BYTES,
+        max_decompressed_bytes: argrep::DEFAULT_MAX_DECOMPRESSED_BYTES,
     });
 
     let run = |config: std::sync::Arc<argrep::SearchConfig>| {
@@ -3103,6 +3167,8 @@ fn before_context_includes_leading_lines() {
         only_matching: false,
         max_count: None,
         replace: None,
+        max_line_bytes: argrep::DEFAULT_MAX_LINE_BYTES,
+        max_decompressed_bytes: argrep::DEFAULT_MAX_DECOMPRESSED_BYTES,
     });
 
     let results: Arc<Mutex<Vec<(usize, String, bool)>>> = Arc::new(Mutex::new(Vec::new()));
@@ -3167,6 +3233,8 @@ fn after_context_includes_trailing_lines() {
         only_matching: false,
         max_count: None,
         replace: None,
+        max_line_bytes: argrep::DEFAULT_MAX_LINE_BYTES,
+        max_decompressed_bytes: argrep::DEFAULT_MAX_DECOMPRESSED_BYTES,
     });
 
     let results: Arc<Mutex<Vec<(usize, String, bool)>>> = Arc::new(Mutex::new(Vec::new()));
@@ -3234,6 +3302,8 @@ fn context_both_and_group_separator() {
         only_matching: false,
         max_count: None,
         replace: None,
+        max_line_bytes: argrep::DEFAULT_MAX_LINE_BYTES,
+        max_decompressed_bytes: argrep::DEFAULT_MAX_DECOMPRESSED_BYTES,
     });
 
     let results: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
@@ -3307,6 +3377,8 @@ fn query_is_a_regex_by_default() {
         only_matching: false,
         max_count: None,
         replace: None,
+        max_line_bytes: argrep::DEFAULT_MAX_LINE_BYTES,
+        max_decompressed_bytes: argrep::DEFAULT_MAX_DECOMPRESSED_BYTES,
     });
 
     let matches: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
@@ -3364,6 +3436,8 @@ fn fixed_strings_mode_matches_literally() {
         only_matching: false,
         max_count: None,
         replace: None,
+        max_line_bytes: argrep::DEFAULT_MAX_LINE_BYTES,
+        max_decompressed_bytes: argrep::DEFAULT_MAX_DECOMPRESSED_BYTES,
     });
 
     let matches: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
@@ -3433,6 +3507,8 @@ fn whole_word_matches_only_word_boundaries() {
         only_matching: false,
         max_count: None,
         replace: None,
+        max_line_bytes: argrep::DEFAULT_MAX_LINE_BYTES,
+        max_decompressed_bytes: argrep::DEFAULT_MAX_DECOMPRESSED_BYTES,
     });
 
     let matches: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
@@ -3492,6 +3568,8 @@ fn whole_line_matches_only_exact_line() {
         only_matching: false,
         max_count: None,
         replace: None,
+        max_line_bytes: argrep::DEFAULT_MAX_LINE_BYTES,
+        max_decompressed_bytes: argrep::DEFAULT_MAX_DECOMPRESSED_BYTES,
     });
 
     let matches: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
@@ -3546,6 +3624,8 @@ fn quiet_mode_produces_no_output() {
         only_matching: false,
         max_count: None,
         replace: None,
+        max_line_bytes: argrep::DEFAULT_MAX_LINE_BYTES,
+        max_decompressed_bytes: argrep::DEFAULT_MAX_DECOMPRESSED_BYTES,
     });
 
     let call_count = Arc::new(AtomicUsize::new(0));
@@ -3599,6 +3679,8 @@ fn quiet_mode_with_no_matches_reports_zero() {
         only_matching: false,
         max_count: None,
         replace: None,
+        max_line_bytes: argrep::DEFAULT_MAX_LINE_BYTES,
+        max_decompressed_bytes: argrep::DEFAULT_MAX_DECOMPRESSED_BYTES,
     });
 
     let call_count = Arc::new(AtomicUsize::new(0));
@@ -3645,6 +3727,8 @@ fn only_matching_emits_one_row_per_occurrence() {
         only_matching: true,
         max_count: None,
         replace: None,
+        max_line_bytes: argrep::DEFAULT_MAX_LINE_BYTES,
+        max_decompressed_bytes: argrep::DEFAULT_MAX_DECOMPRESSED_BYTES,
     });
 
     let matches: Arc<Mutex<Vec<(usize, String)>>> = Arc::new(Mutex::new(Vec::new()));
@@ -3698,6 +3782,8 @@ fn count_per_file_takes_priority_over_only_matching() {
         only_matching: true,
         max_count: None,
         replace: None,
+        max_line_bytes: argrep::DEFAULT_MAX_LINE_BYTES,
+        max_decompressed_bytes: argrep::DEFAULT_MAX_DECOMPRESSED_BYTES,
     });
 
     let matches: Arc<Mutex<Vec<Option<usize>>>> = Arc::new(Mutex::new(Vec::new()));
@@ -3745,6 +3831,8 @@ fn max_count_stops_after_n_matching_lines() {
         only_matching: false,
         max_count: Some(2),
         replace: None,
+        max_line_bytes: argrep::DEFAULT_MAX_LINE_BYTES,
+        max_decompressed_bytes: argrep::DEFAULT_MAX_DECOMPRESSED_BYTES,
     });
 
     let matches: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
@@ -3791,6 +3879,8 @@ fn max_count_caps_the_count_per_file_total() {
         only_matching: false,
         max_count: Some(2),
         replace: None,
+        max_line_bytes: argrep::DEFAULT_MAX_LINE_BYTES,
+        max_decompressed_bytes: argrep::DEFAULT_MAX_DECOMPRESSED_BYTES,
     });
 
     let matches: Arc<Mutex<Vec<Option<usize>>>> = Arc::new(Mutex::new(Vec::new()));
@@ -3840,6 +3930,8 @@ fn max_count_with_only_matching_counts_lines_not_occurrences() {
         only_matching: true,
         max_count: Some(1),
         replace: None,
+        max_line_bytes: argrep::DEFAULT_MAX_LINE_BYTES,
+        max_decompressed_bytes: argrep::DEFAULT_MAX_DECOMPRESSED_BYTES,
     });
 
     let matches: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
@@ -3887,6 +3979,8 @@ fn max_count_still_flushes_trailing_context() {
         only_matching: false,
         max_count: Some(1),
         replace: None,
+        max_line_bytes: argrep::DEFAULT_MAX_LINE_BYTES,
+        max_decompressed_bytes: argrep::DEFAULT_MAX_DECOMPRESSED_BYTES,
     });
 
     let matches: Arc<Mutex<Vec<(String, bool)>>> = Arc::new(Mutex::new(Vec::new()));
@@ -3939,6 +4033,8 @@ fn exclude_skips_matching_files() {
         only_matching: false,
         max_count: None,
         replace: None,
+        max_line_bytes: argrep::DEFAULT_MAX_LINE_BYTES,
+        max_decompressed_bytes: argrep::DEFAULT_MAX_DECOMPRESSED_BYTES,
     });
 
     let results: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
@@ -3991,6 +4087,8 @@ fn exclude_wins_over_include_on_overlap() {
         only_matching: false,
         max_count: None,
         replace: None,
+        max_line_bytes: argrep::DEFAULT_MAX_LINE_BYTES,
+        max_decompressed_bytes: argrep::DEFAULT_MAX_DECOMPRESSED_BYTES,
     });
 
     let results: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
@@ -4038,6 +4136,8 @@ fn exclude_dir_glob_skips_matching_directories() {
         only_matching: false,
         max_count: None,
         replace: None,
+        max_line_bytes: argrep::DEFAULT_MAX_LINE_BYTES,
+        max_decompressed_bytes: argrep::DEFAULT_MAX_DECOMPRESSED_BYTES,
     });
 
     let results: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
@@ -4056,4 +4156,183 @@ fn exclude_dir_glob_skips_matching_directories() {
     // Both "build" and "build-tools" match "build*" and are skipped
     // entirely (never even traversed); only src/main.txt is searched.
     assert_eq!(res, vec!["main.txt"]);
+}
+
+// ── --max-line-size / --max-decompressed-size (SAST F1) ─────────────────────
+
+fn limited_config(
+    query: &str,
+    search_compressed: bool,
+    max_line_bytes: usize,
+    max_decompressed_bytes: u64,
+    files_without_match: bool,
+) -> StdArc<SearchConfig> {
+    let mut config = StdArc::try_unwrap(compressed_config(query, search_compressed))
+        .ok()
+        .expect("sole owner");
+    config.max_line_bytes = max_line_bytes;
+    config.max_decompressed_bytes = max_decompressed_bytes;
+    config.files_without_match = files_without_match;
+    StdArc::new(config)
+}
+
+fn collect(rx: &crossbeam_channel::Receiver<argrep::MatchResult>) -> Vec<argrep::MatchResult> {
+    rx.try_iter().collect()
+}
+
+#[test]
+fn oversized_line_is_skipped_and_following_lines_still_searched() {
+    let dir = TempDir::new().unwrap();
+    let root = fs::canonicalize(dir.path()).unwrap();
+    let mut content = String::from("needle early\n");
+    content.push_str(&"A".repeat(10_000));
+    content.push_str("needle inside giant line\nneedle late\n");
+    fs::write(root.join("a.txt"), &content).unwrap();
+
+    let config = limited_config("needle", false, 1024, 0, false);
+    let stats = SearchStats::new();
+    let (tx, rx) = crossbeam_channel::unbounded();
+    grep_file(&root.join("a.txt"), &config, &tx, &stats);
+
+    let results = collect(&rx);
+    let lines: Vec<_> = results
+        .iter()
+        .map(|r| (r.line_num, r.line_content.as_str()))
+        .collect();
+    assert_eq!(lines, vec![(1, "needle early"), (3, "needle late")]);
+    assert_eq!(
+        stats.io_errors.load(Ordering::Relaxed),
+        1,
+        "counted once per file"
+    );
+    assert_eq!(stats.bytes_read.load(Ordering::Relaxed), content.len());
+}
+
+#[test]
+fn newline_free_file_larger_than_cap_is_skipped_without_match() {
+    let dir = TempDir::new().unwrap();
+    let root = fs::canonicalize(dir.path()).unwrap();
+    fs::write(root.join("blob.txt"), "x".repeat(200_000) + "needle").unwrap();
+
+    let config = limited_config("needle", false, 4096, 0, false);
+    let stats = SearchStats::new();
+    let (tx, rx) = crossbeam_channel::unbounded();
+    grep_file(&root.join("blob.txt"), &config, &tx, &stats);
+
+    assert!(collect(&rx).is_empty());
+    assert_eq!(stats.io_errors.load(Ordering::Relaxed), 1);
+}
+
+#[test]
+fn zero_line_cap_means_unlimited() {
+    let dir = TempDir::new().unwrap();
+    let root = fs::canonicalize(dir.path()).unwrap();
+    fs::write(root.join("blob.txt"), "x".repeat(200_000) + "needle").unwrap();
+
+    let config = limited_config("needle", false, 0, 0, false);
+    let stats = SearchStats::new();
+    let (tx, rx) = crossbeam_channel::unbounded();
+    grep_file(&root.join("blob.txt"), &config, &tx, &stats);
+
+    assert_eq!(collect(&rx).len(), 1);
+    assert_eq!(stats.io_errors.load(Ordering::Relaxed), 0);
+}
+
+#[test]
+fn files_without_match_does_not_list_file_with_skipped_lines() {
+    let dir = TempDir::new().unwrap();
+    let root = fs::canonicalize(dir.path()).unwrap();
+    fs::write(root.join("blob.txt"), "x".repeat(10_000) + "\n").unwrap();
+
+    let config = limited_config("needle", false, 1024, 0, true);
+    let stats = SearchStats::new();
+    let (tx, rx) = crossbeam_channel::unbounded();
+    grep_file(&root.join("blob.txt"), &config, &tx, &stats);
+
+    assert!(
+        collect(&rx).is_empty(),
+        "an incompletely searched file must not be reported as 'no match'"
+    );
+}
+
+#[test]
+fn gzip_bomb_is_cut_off_at_decompressed_cap() {
+    let dir = TempDir::new().unwrap();
+    let root = fs::canonicalize(dir.path()).unwrap();
+    // 8 MiB of newline-terminated lines compresses to a few KiB.
+    let plain = "padding padding padding\n".repeat(350_000);
+    let gz = gzip_bytes(plain.as_bytes());
+    assert!(
+        gz.len() * 50 < plain.len(),
+        "test needs a highly compressible input"
+    );
+    fs::write(root.join("bomb.log.gz"), &gz).unwrap();
+
+    let cap = 1024 * 1024u64;
+    let config = limited_config("needle", true, 4096, cap, false);
+    let stats = SearchStats::new();
+    let (tx, rx) = crossbeam_channel::unbounded();
+    grep_file(&root.join("bomb.log.gz"), &config, &tx, &stats);
+
+    assert!(collect(&rx).is_empty());
+    assert_eq!(stats.io_errors.load(Ordering::Relaxed), 1);
+    let read = stats.bytes_read.load(Ordering::Relaxed) as u64;
+    assert!(
+        read <= cap + 4096 && read > cap,
+        "reading must stop right after the cap, read {read}"
+    );
+}
+
+#[test]
+fn gzip_newline_free_bomb_stays_bounded() {
+    // The exact shape from the SAST report: one huge run of a single byte,
+    // no newline anywhere.
+    let dir = TempDir::new().unwrap();
+    let root = fs::canonicalize(dir.path()).unwrap();
+    let gz = gzip_bytes(&vec![b'A'; 20 * 1024 * 1024]);
+    fs::write(root.join("app.log.gz"), &gz).unwrap();
+
+    let config = limited_config("needle", true, 64 * 1024, 4 * 1024 * 1024, false);
+    let stats = SearchStats::new();
+    let (tx, rx) = crossbeam_channel::unbounded();
+    grep_file(&root.join("app.log.gz"), &config, &tx, &stats);
+
+    assert!(collect(&rx).is_empty());
+    assert!(stats.io_errors.load(Ordering::Relaxed) >= 1);
+    assert!(stats.bytes_read.load(Ordering::Relaxed) <= 4 * 1024 * 1024 + 64 * 1024);
+}
+
+#[test]
+fn gzip_exactly_at_cap_is_fully_searched() {
+    let dir = TempDir::new().unwrap();
+    let root = fs::canonicalize(dir.path()).unwrap();
+    let plain = "hello\nneedle\n";
+    fs::write(root.join("ok.gz"), gzip_bytes(plain.as_bytes())).unwrap();
+
+    let config = limited_config("needle", true, 4096, plain.len() as u64, false);
+    let stats = SearchStats::new();
+    let (tx, rx) = crossbeam_channel::unbounded();
+    grep_file(&root.join("ok.gz"), &config, &tx, &stats);
+
+    assert_eq!(collect(&rx).len(), 1);
+    assert_eq!(
+        stats.io_errors.load(Ordering::Relaxed),
+        0,
+        "clean EOF at the cap is not an error"
+    );
+}
+
+#[test]
+fn decompressed_cap_does_not_apply_to_plain_files() {
+    let dir = TempDir::new().unwrap();
+    let root = fs::canonicalize(dir.path()).unwrap();
+    fs::write(root.join("big.txt"), "pad\n".repeat(10_000) + "needle\n").unwrap();
+
+    let config = limited_config("needle", true, 4096, 100, false);
+    let stats = SearchStats::new();
+    let (tx, rx) = crossbeam_channel::unbounded();
+    grep_file(&root.join("big.txt"), &config, &tx, &stats);
+
+    assert_eq!(collect(&rx).len(), 1);
+    assert_eq!(stats.io_errors.load(Ordering::Relaxed), 0);
 }

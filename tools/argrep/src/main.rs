@@ -1,7 +1,7 @@
 use argrep::{
     DEFAULT_IGNORES, MatchOptions, SearchConfig, SearchStats, build_matcher, build_matcher_multi,
-    check_replacement, parallel_grep, parse_pattern_file, replace_matches, replaced_matches,
-    sanitize_for_display,
+    check_replacement, parallel_grep, parse_pattern_file, parse_size, replace_matches,
+    replaced_matches, sanitize_for_display,
 };
 use clap::Parser;
 use clap::builder::TypedValueParser as _;
@@ -431,6 +431,22 @@ struct Args {
     #[arg(short = 'z', long = "search-compressed")]
     search_compressed: bool,
 
+    /// Skip (with a warning) any line longer than SIZE instead of
+    /// buffering it whole. Accepts K/M/G suffixes (binary multiples);
+    /// 0 = unlimited. Protects against memory exhaustion from huge
+    /// newline-free files. A file with skipped lines counts as not fully
+    /// searched: exit status reflects it and -L will not list it.
+    #[arg(long = "max-line-size", value_name = "SIZE", value_parser = parse_size,
+          default_value = "4M")]
+    max_line_size: u64,
+
+    /// With -z, stop reading a file after SIZE decompressed bytes (with a
+    /// warning) - protection against gzip bombs. Accepts K/M/G suffixes;
+    /// 0 = unlimited. No effect on uncompressed files.
+    #[arg(long = "max-decompressed-size", value_name = "SIZE", value_parser = parse_size,
+          default_value = "1G")]
+    max_decompressed_size: u64,
+
     /// List the files that would be searched, without searching their
     /// content — every filter still runs (.gitignore/.ignore, --hidden,
     /// --no-ignore, --include, --exclude, --type, --type-not,
@@ -812,6 +828,8 @@ fn main() {
         only_matching: args.only_matching,
         max_count: args.max_count.map(|v| v as usize),
         replace: args.replace.clone(),
+        max_line_bytes: usize::try_from(args.max_line_size).unwrap_or(usize::MAX),
+        max_decompressed_bytes: args.max_decompressed_size,
     });
 
     let stats = SearchStats::new();
@@ -1582,6 +1600,39 @@ mod tests {
             "--hidden alone must not also set --no-ignore — they're \
              separate filtering layers"
         );
+    }
+
+    // ── --max-line-size / --max-decompressed-size ────────────────────────────
+
+    #[test]
+    fn size_limit_flags_have_safe_defaults() {
+        let args = Args::try_parse_from(["argrep", "foo", "."]).unwrap();
+        assert_eq!(args.max_line_size, argrep::DEFAULT_MAX_LINE_BYTES as u64);
+        assert_eq!(
+            args.max_decompressed_size,
+            argrep::DEFAULT_MAX_DECOMPRESSED_BYTES
+        );
+    }
+
+    #[test]
+    fn size_limit_flags_accept_suffixes_and_zero() {
+        let args = Args::try_parse_from([
+            "argrep",
+            "foo",
+            ".",
+            "--max-line-size",
+            "512K",
+            "--max-decompressed-size",
+            "0",
+        ])
+        .unwrap();
+        assert_eq!(args.max_line_size, 512 * 1024);
+        assert_eq!(args.max_decompressed_size, 0);
+    }
+
+    #[test]
+    fn size_limit_flags_reject_garbage() {
+        assert!(Args::try_parse_from(["argrep", "foo", ".", "--max-line-size", "abc"]).is_err());
     }
 
     // ── -z / --search-compressed ─────────────────────────────────────────────

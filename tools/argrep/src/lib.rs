@@ -20,6 +20,91 @@ use std::{
     thread,
 };
 
+/// Default cap on a single line's length, in bytes (4 MiB). Lines longer
+/// than this are skipped rather than buffered whole; see
+/// `SearchConfig::max_line_bytes`. Large enough for minified JS bundles and
+/// long JSON-lines records, small enough that N worker threads each holding
+/// one can't exhaust memory.
+pub const DEFAULT_MAX_LINE_BYTES: usize = 4 * 1024 * 1024;
+
+/// Default cap on the decompressed size of a single `-z` file, in bytes
+/// (1 GiB). Gzip compresses repetitive input roughly 1000:1, so without a
+/// cap a ~1 MB file can expand to gigabytes (a "gzip bomb").
+pub const DEFAULT_MAX_DECOMPRESSED_BYTES: u64 = 1024 * 1024 * 1024;
+
+/// Parses a human-friendly size such as `4M`, `512K`, `1G` or `1048576`
+/// (binary multiples: K = 1024). `0` is valid and means "unlimited" for the
+/// flags that use this. Used as a clap value_parser.
+pub fn parse_size(s: &str) -> Result<u64, String> {
+    let t = s.trim();
+    if t.is_empty() {
+        return Err("size must not be empty".to_string());
+    }
+    let (digits, mult) = match t.chars().last().unwrap().to_ascii_uppercase() {
+        'K' => (&t[..t.len() - 1], 1024u64),
+        'M' => (&t[..t.len() - 1], 1024 * 1024),
+        'G' => (&t[..t.len() - 1], 1024 * 1024 * 1024),
+        _ => (t, 1),
+    };
+    let n: u64 = digits
+        .trim()
+        .parse()
+        .map_err(|_| format!("invalid size '{s}' (expected e.g. 4M, 512K, 1G, or a byte count)"))?;
+    n.checked_mul(mult)
+        .ok_or_else(|| format!("size '{s}' is too large"))
+}
+
+/// Reads one line (through `\n`, inclusive) into `buf`, but never stores
+/// more than `max_line + 2` bytes (room for a `\r\n` terminator beyond the
+/// limit). Bytes past that are consumed from the reader and discarded, so
+/// memory stays bounded no matter how long the line is. Returns
+/// `(bytes consumed from reader, overflowed)`; consumed == 0 means EOF.
+/// `max_line == 0` means unlimited.
+fn read_line_capped<R: BufRead>(
+    reader: &mut R,
+    buf: &mut Vec<u8>,
+    max_line: usize,
+) -> std::io::Result<(usize, bool)> {
+    let limit = if max_line == 0 {
+        usize::MAX
+    } else {
+        max_line.saturating_add(2)
+    };
+    let mut total = 0usize;
+    let mut overflow = false;
+    loop {
+        let (done, used) = {
+            let avail = match reader.fill_buf() {
+                Ok(a) => a,
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(e) => return Err(e),
+            };
+            if avail.is_empty() {
+                return Ok((total, overflow));
+            }
+            let (chunk, done) = match avail.iter().position(|&b| b == b'\n') {
+                Some(i) => (&avail[..=i], true),
+                None => (avail, false),
+            };
+            if !overflow {
+                let room = limit.saturating_sub(buf.len());
+                if chunk.len() <= room {
+                    buf.extend_from_slice(chunk);
+                } else {
+                    buf.extend_from_slice(&chunk[..room]);
+                    overflow = true;
+                }
+            }
+            (done, chunk.len())
+        };
+        reader.consume(used);
+        total += used;
+        if done {
+            return Ok((total, overflow));
+        }
+    }
+}
+
 /// Default directories to ignore during text search
 pub const DEFAULT_IGNORES: &[&str] = &[".git", "node_modules", "__pycache__", "target"];
 
@@ -352,6 +437,17 @@ pub struct SearchConfig {
     /// as in ripgrep). Only what is printed changes; files are never
     /// written. Validated by [`check_replacement`] before a search starts.
     pub replace: Option<String>,
+    /// --max-line-size: lines longer than this many bytes are skipped
+    /// (never buffered whole) with a warning, and the file is treated as
+    /// incompletely searched (counts as an I/O error, so -L won't list it
+    /// and the exit code reflects it). 0 = unlimited. Bounds per-thread
+    /// memory for newline-free files (minified blobs, binary-ish data).
+    pub max_line_bytes: usize,
+    /// --max-decompressed-size: under -z, stop reading a file after this
+    /// many decompressed bytes (gzip-bomb protection), with a warning and
+    /// the same incomplete-search treatment as above. 0 = unlimited. Has
+    /// no effect on uncompressed files.
+    pub max_decompressed_bytes: u64,
 }
 
 /// Shared statistics counters
@@ -933,11 +1029,24 @@ pub fn grep_file(
     // -z/--search-compressed: transparently decompress gzip files. The
     // resulting content stream is boxed so the rest of this function
     // doesn't need to know or care which case it's in.
-    let content: Box<dyn Read> = if config.search_compressed && is_gzip_target(file_path) {
-        Box::new(GzDecoder::new(file))
+    //
+    // Under -z the decoder is wrapped in Read::take(cap + 1): one byte more
+    // than the cap, so "read more than cap bytes" is distinguishable from
+    // "the file was exactly cap bytes and ended cleanly" (Take reports both
+    // as plain EOF otherwise). See the check in the main loop.
+    let decompress = config.search_compressed && is_gzip_target(file_path);
+    let decompressed_cap = config.max_decompressed_bytes;
+    let content: Box<dyn Read> = if decompress {
+        let decoder = GzDecoder::new(file);
+        if decompressed_cap > 0 {
+            Box::new(decoder.take(decompressed_cap.saturating_add(1)))
+        } else {
+            Box::new(decoder)
+        }
     } else {
         Box::new(file)
     };
+    let mut decompressed_total: u64 = 0;
     let mut buffered = BufReader::new(content);
 
     // Fast binary file sniffing: check the first 1024 bytes for a null
@@ -1029,10 +1138,31 @@ pub fn grep_file(
         }
 
         line_bytes.clear();
-        match reader.read_until(b'\n', &mut line_bytes) {
-            Ok(0) => break, // EOF
-            Ok(n) => {
+        let line_overflowed = match read_line_capped(
+            &mut reader,
+            &mut line_bytes,
+            config.max_line_bytes,
+        ) {
+            Ok((0, _)) => break, // EOF
+            Ok((n, overflowed)) => {
                 stats.bytes_read.fetch_add(n, Ordering::Relaxed);
+                if decompress && decompressed_cap > 0 {
+                    decompressed_total += n as u64;
+                    if decompressed_total > decompressed_cap {
+                        // Read past the cap: stop, and make sure nobody
+                        // mistakes this for a clean, complete search.
+                        stats.io_errors.fetch_add(1, Ordering::Relaxed);
+                        had_io_error = true;
+                        eprintln!(
+                            "{}: {}: decompressed size exceeds --max-decompressed-size ({} bytes); rest of file not searched",
+                            "argrep".red(),
+                            file_path.display(),
+                            decompressed_cap
+                        );
+                        break;
+                    }
+                }
+                overflowed
             }
             Err(err) => {
                 stats.io_errors.fetch_add(1, Ordering::Relaxed);
@@ -1042,8 +1172,28 @@ pub fn grep_file(
                 }
                 break;
             }
-        }
+        };
         line_num += 1;
+
+        if line_overflowed {
+            // Line longer than --max-line-size: only a truncated prefix was
+            // kept, and searching a prefix would give wrong answers (-v,
+            // -x, $ anchors), so the whole line is skipped. Warn once per
+            // file; later oversized lines in the same file are still
+            // skipped, just not re-announced.
+            if !had_io_error {
+                eprintln!(
+                    "{}: {}: line {} exceeds --max-line-size ({} bytes); skipping oversized lines",
+                    "argrep".red(),
+                    file_path.display(),
+                    line_num,
+                    config.max_line_bytes
+                );
+                stats.io_errors.fetch_add(1, Ordering::Relaxed);
+            }
+            had_io_error = true;
+            continue;
+        }
 
         let raw_line = String::from_utf8_lossy(&line_bytes);
         // Strip the trailing line terminator (read_until keeps it, unlike
@@ -1789,5 +1939,66 @@ mod replace_tests {
         let named = re(r"(?P<host>\w+)");
         assert!(check_replacement(&named, "${host} $host $1").is_ok());
         assert!(check_replacement(&named, "$hostname").is_err());
+    }
+}
+
+#[cfg(test)]
+mod size_limit_tests {
+    use super::{parse_size, read_line_capped};
+    use std::io::Cursor;
+
+    #[test]
+    fn parse_size_handles_suffixes() {
+        assert_eq!(parse_size("0"), Ok(0));
+        assert_eq!(parse_size("100"), Ok(100));
+        assert_eq!(parse_size("2k"), Ok(2048));
+        assert_eq!(parse_size("4M"), Ok(4 * 1024 * 1024));
+        assert_eq!(parse_size("1G"), Ok(1024 * 1024 * 1024));
+        assert!(parse_size("").is_err());
+        assert!(parse_size("M").is_err());
+        assert!(parse_size("1.5M").is_err());
+        assert!(parse_size("99999999999999999999G").is_err());
+    }
+
+    #[test]
+    fn short_lines_are_read_whole() {
+        let mut r = Cursor::new(b"abc\ndef\n".to_vec());
+        let mut buf = Vec::new();
+        assert_eq!(read_line_capped(&mut r, &mut buf, 10).unwrap(), (4, false));
+        assert_eq!(buf, b"abc\n");
+    }
+
+    #[test]
+    fn long_line_is_bounded_but_fully_consumed() {
+        let mut data = vec![b'A'; 100_000];
+        data.extend_from_slice(b"\nnext\n");
+        let mut r = Cursor::new(data);
+        let mut buf = Vec::new();
+        let (n, overflow) = read_line_capped(&mut r, &mut buf, 16).unwrap();
+        assert_eq!(n, 100_001);
+        assert!(overflow);
+        assert!(
+            buf.len() <= 18,
+            "buffer must stay bounded, got {}",
+            buf.len()
+        );
+        buf.clear();
+        assert_eq!(read_line_capped(&mut r, &mut buf, 16).unwrap(), (5, false));
+        assert_eq!(buf, b"next\n");
+    }
+
+    #[test]
+    fn line_exactly_at_limit_is_not_overflow() {
+        let mut r = Cursor::new(b"abcd\r\n".to_vec());
+        let mut buf = Vec::new();
+        assert_eq!(read_line_capped(&mut r, &mut buf, 4).unwrap(), (6, false));
+    }
+
+    #[test]
+    fn zero_means_unlimited() {
+        let mut r = Cursor::new(vec![b'x'; 50_000]);
+        let mut buf = Vec::new();
+        let (n, overflow) = read_line_capped(&mut r, &mut buf, 0).unwrap();
+        assert_eq!((n, overflow, buf.len()), (50_000, false, 50_000));
     }
 }

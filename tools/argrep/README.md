@@ -20,7 +20,7 @@ cargo build --release --bin argrep
 argrep [OPTIONS] QUERY [PATH]
 ```
 
-`QUERY` is required and is matched as a **regular expression** by default (Rust's [`regex`](https://docs.rs/regex) crate — a similar dialect to `grep -E`/PCRE, without backreferences or lookaround). Two exceptions: with `--files` (see below), `QUERY` is dropped entirely — `argrep --files [PATH]`, not `argrep --files QUERY [PATH]` — and with `-e`/`--regexp` (see below), patterns are supplied via repeated `-e` flags instead of the positional `QUERY`.
+`QUERY` is required and is matched as a **regular expression** by default (Rust's [`regex`](https://docs.rs/regex) crate — a similar dialect to `grep -E`/PCRE, without backreferences or lookaround). Two exceptions: with `--files` (see below), `QUERY` is dropped entirely — `argrep --files [PATH]`, not `argrep --files QUERY [PATH]` — and with `-e`/`--regexp` or `-f`/`--file` (see below), patterns are supplied via repeated `-e` flags or pattern files instead of the positional `QUERY`.
 
 Use `-e`/`--regexp` to search for more than one pattern at once — a line matches if it matches **any** of them (combined via alternation, not required to match all), same semantics as `grep`/`ripgrep`'s multiple `-e`:
 
@@ -33,11 +33,40 @@ argrep -e 'error' -e 'panic' src/
 
 ```
 $ argrep -e 'TODO' foo .
-error: -e/--regexp does not treat QUERY as an additional pattern, only PATH,
-but got two positional arguments: 'foo' and '.'. Use `argrep -e '...' .` (or
-`argrep -e '...' foo`, whichever was meant as the path — and add another -e
-if 'foo' was meant as a pattern instead).
+error: with -e/--regexp or -f/--file, QUERY is not an additional pattern,
+only PATH, but got two positional arguments: 'foo' and '.'. Use
+`argrep -e '...' .` (or `argrep -e '...' foo`, whichever was meant as the path
+— and add another -e if 'foo' was meant as a pattern instead).
 ```
+
+Use `-f`/`--file FILE` to read patterns from a file, one per line, like `grep -f`/`rg -f`. It's handy for long lists, rules shared between scripts, or generated lists:
+
+```
+# patterns.txt
+TODO
+FIXME
+HACK
+
+argrep -f patterns.txt src/
+argrep -f patterns.txt -f more.txt . --type rust
+argrep -f patterns.txt -e 'XXX' src/          # mix with -e
+argrep -F -f exact-strings.txt /var/log       # every line is a literal
+argrep -f forbidden.txt . --type rust -q && echo clean   # CI check
+generate-rules | argrep -f - src/             # patterns from stdin
+```
+
+- **Format:** one pattern per line. `\n` and `\r\n` endings both work. Lines are taken verbatim (leading and trailing spaces included) and `#` has no special meaning.
+- **Blank lines are skipped**, including whitespace-only ones. This deliberately differs from GNU grep and ripgrep, where an empty line is an empty pattern that matches *every* line, so a stray blank line at the end of a rule list would make everything match. To search for whitespace, use `-e`.
+- **Combining:** `-f` is repeatable and mixes with `-e`. A line matches if it matches any pattern from any source. `-F`, `-i`, `-S`, `-w`, `-x` and `-r` apply to the whole set, exactly as with several `-e`.
+- **Positionals:** as with `-e`, `QUERY` is not a pattern then, so `argrep -f p.txt src/` searches `src/`.
+- **`-f -`** reads the patterns from stdin. The text to search must then come from `PATH` (default `.`), never from stdin, and `-f - -` is an error.
+- **Errors** stop the search before it starts:
+  - a missing or unreadable file, or one that isn't UTF-8
+  - a file with no patterns at all (unless `-e` adds some)
+  - an invalid regex, reported with the file and line: `bad.txt:2: Invalid pattern '(unclosed' ...`
+
+  Exit status is `1`, or `2` with `-q`, so a broken rule list never looks like "no matches" in CI.
+- **The rule file is searched too.** Searching a directory that contains the pattern file finds the patterns in the file itself, just as with `grep -rf`. Exclude it (`--exclude forbidden.txt`) or narrow the search (`--type rust`, a `src/` path) for CI checks.
 
 Use `-F`/`--fixed-strings` to search for `QUERY` literally instead, e.g. when it contains characters like `.`, `*`, `(` that you don't want interpreted as regex syntax:
 
@@ -309,6 +338,7 @@ This is aimed squarely at rotated logs — `logrotate` compresses old logs as gz
 | `--ignore-case`         | `-i`  | —                 | Case-insensitive matching                                                                                                                                |
 | `--smart-case`          | `-S`  | —                 | Case-insensitive only if every pattern is entirely lowercase; conflicts with `-i`                                                                        |
 | `--regexp PATTERN`      | `-e`  | —                 | An additional pattern to search for (OR'd with others); repeatable; QUERY not required or used as a pattern once given                                   |
+| `--file FILE`           | `-f`  | —                 | Read patterns from `FILE`, one per line (blank lines skipped); repeatable; OR'ed with `-e`; `-f -` reads stdin |
 | `--fixed-strings`       | `-F`  | —                 | Treat QUERY as a literal string instead of a regex                                                                                                       |
 | `--word-regexp`         | `-w`  | —                 | Match only whole words (wraps QUERY in `\b(?:...)\b`)                                                                                                    |
 | `--line-regexp`         | `-x`  | —                 | Match only whole lines (wraps QUERY in `^(?:...)$`)                                                                                                      |
@@ -479,6 +509,7 @@ argrep -z 'OutOfMemoryError' /var/log/app/*.log.gz
 | Case-insensitive       | `grep -ri "query" .`                           | `argrep -i "query" .`                         |
 | Smart case             | *(no equivalent — always explicit)*            | `argrep -S "query" .`                         |
 | Multiple patterns      | `grep -e "p1" -e "p2" .`                       | `argrep -e "p1" -e "p2" .`                    |
+| Patterns from a file   | `grep -rf patterns.txt .`                      | `argrep -f patterns.txt .`                    |
 | Fixed string           | `grep -rF "query" .`                           | `argrep -F "query" .`                         |
 | Whole word             | `grep -rw "query" .`                           | `argrep -w "query" .`                         |
 | Whole line             | `grep -rx "query" .`                           | `argrep -x "query" .`                         |

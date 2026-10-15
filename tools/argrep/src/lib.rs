@@ -512,6 +512,39 @@ pub fn build_matcher(query: &str, opts: MatchOptions) -> Result<Regex, String> {
         .map_err(|err| format!("Invalid pattern '{}': {}", query, err))
 }
 
+/// One pattern read from a `-f/--file` pattern file, with where it came
+/// from (for error messages).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FilePattern {
+    pub pattern: String,
+    /// 1-based line number in the file.
+    pub line: usize,
+}
+
+/// Parses the contents of a `-f/--file` pattern file: one pattern per
+/// line. `\n` and `\r\n` line endings both work (a trailing `\r` is never
+/// part of a pattern). Empty and whitespace-only lines are skipped.
+///
+/// Skipping blank lines deliberately differs from GNU grep and ripgrep,
+/// where an empty line is an empty pattern that matches *every* line: a
+/// stray blank line at the end of a "forbidden strings" list would turn a
+/// CI check into "everything is forbidden". Use `-e` to search for
+/// whitespace. Lines are otherwise taken verbatim, leading and trailing
+/// spaces included; `#` has no special meaning.
+pub fn parse_pattern_file(contents: &str) -> Vec<FilePattern> {
+    contents
+        .split('\n')
+        .enumerate()
+        .filter_map(|(i, line)| {
+            let line = line.strip_suffix('\r').unwrap_or(line);
+            (!line.trim().is_empty()).then(|| FilePattern {
+                pattern: line.to_string(),
+                line: i + 1,
+            })
+        })
+        .collect()
+}
+
 /// Builds a single combined regex from multiple patterns (-e/--regexp)
 /// — a line matches if it matches ANY of them, same semantics as grep/
 /// ripgrep's multiple -e (patterns are combined via alternation, not
@@ -1603,6 +1636,57 @@ mod build_matcher_multi_tests {
             MatchOptions::default(),
         );
         assert!(result.is_err());
+    }
+}
+
+#[cfg(test)]
+mod pattern_file_tests {
+    use super::{FilePattern, parse_pattern_file};
+
+    fn pats(s: &str) -> Vec<(String, usize)> {
+        parse_pattern_file(s)
+            .into_iter()
+            .map(|FilePattern { pattern, line }| (pattern, line))
+            .collect()
+    }
+
+    #[test]
+    fn one_pattern_per_line_with_line_numbers() {
+        assert_eq!(
+            pats("TODO\nFIXME\nHACK\n"),
+            [("TODO".into(), 1), ("FIXME".into(), 2), ("HACK".into(), 3)]
+        );
+    }
+
+    #[test]
+    fn blank_and_whitespace_only_lines_are_skipped() {
+        assert_eq!(
+            pats("\nTODO\n   \n\t\n\nFIXME\n\n"),
+            [("TODO".into(), 2), ("FIXME".into(), 6)]
+        );
+        assert!(parse_pattern_file("").is_empty());
+        assert!(parse_pattern_file("\n\n  \n").is_empty());
+    }
+
+    #[test]
+    fn crlf_and_missing_final_newline() {
+        assert_eq!(
+            pats("a\r\nb\r\nc"),
+            [("a".into(), 1), ("b".into(), 2), ("c".into(), 3)]
+        );
+    }
+
+    #[test]
+    fn patterns_are_verbatim_otherwise() {
+        assert_eq!(
+            pats(" lead\ntrail \n# not a comment\n\\d+\n"),
+            [
+                (" lead".into(), 1),
+                ("trail ".into(), 2),
+                ("# not a comment".into(), 3),
+                ("\\d+".into(), 4)
+            ]
+        );
     }
 }
 

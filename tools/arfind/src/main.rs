@@ -294,9 +294,9 @@ fn main() {
         parallel_find(root_path, args.jobs, config, stats.clone(), move |item| {
             if !count_only {
                 if item.is_dir {
-                    println!("{}", item.path.display().to_string().blue().bold());
+                    println!("{}", arcommon::display_path(&item.path).blue().bold());
                 } else {
-                    println!("{}", item.path.display());
+                    println!("{}", arcommon::display_path(&item.path));
                 }
             }
         });

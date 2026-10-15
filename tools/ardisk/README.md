@@ -523,6 +523,12 @@ Sizes are rolled up bottom-up in a single pass — parent directories always inc
 
 **Hard links** are also deduplicated: if two directory entries share the same inode (`fs::hard_link`, or `ln` without `-s`), that file is counted once, not once per name — in both physical and `--apparent-size` mode. A file with 100MB of content and two hard-linked names contributes 100MB to the total, matching how `du` itself counts hard links. Which of the two paths gets "credit" for that size in a per-directory breakdown can vary between runs, since scanning is parallel; the grand total is unaffected either way.
 
+## Terminal safety
+
+File names can contain ESC and other control characters, which a terminal would otherwise execute (clearing the screen, rewriting earlier lines, changing the window title). Every text report prints such characters as visible escapes: a file named `x<ESC>[2J.txt` is shown as `x\x1b[2J.txt`. This applies to the directory list, `--tree`, `--bar`, `--largest-files`, `--duplicates`, `--by-type` labels and `--debug` messages, and covers C0 controls (including tab and newline), DEL and C1 controls (U+0080–U+009F).
+
+`--json` is unaffected: it keeps the exact names, with control characters escaped by JSON itself (`\u001b`), so scripts get the real path back.
+
 ## Examples
 
 ```bash

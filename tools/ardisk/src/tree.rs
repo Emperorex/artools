@@ -68,7 +68,7 @@ pub fn tree_lines(selection: &DirectorySelection, root: &Path) -> Vec<TreeLine> 
             path: path.clone(),
             value: *value,
             guide: String::new(),
-            name: path.display().to_string(),
+            name: arcommon::display_path(path),
         });
         walk(top, entries, &children, String::new(), &mut lines);
     }
@@ -89,7 +89,7 @@ fn walk(
         let (path, value) = &entries[child];
         let name = path
             .strip_prefix(parent)
-            .map_or_else(|_| path.display().to_string(), |r| r.display().to_string());
+            .map_or_else(|_| arcommon::display_path(path), arcommon::display_path);
         lines.push(TreeLine {
             path: path.clone(),
             value: *value,

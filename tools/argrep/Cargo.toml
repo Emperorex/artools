@@ -6,6 +6,7 @@ authors = ["Artem Shemet"]
 description = "Fast parallel text search utility"
 
 [dependencies]
+arcommon = { path = "../../crates/arcommon" }
 clap = { version = "4.0", features = ["derive"] }
 crossbeam-channel = "0.5"
 colored = "3.1"

@@ -29,6 +29,8 @@ curl -fsSL https://artools.io/install.sh | bash
 artools/
 ├── .github/workflows/   # CI/CD pipelines (Lint, Test, Release)
 ├── docs/                # GitHub Pages site (artools.io)
+├── crates/
+│   └── arcommon/        # Shared helpers (terminal-safe output)
 └── tools/
     ├── arfind/          # Fast parallel file finder
     ├── ardisk/          # Fast parallel disk usage analyzer

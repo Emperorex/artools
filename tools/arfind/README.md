@@ -225,6 +225,12 @@ Running commands on search results is powerful, so arfind adds a few guarantees:
 
 Commands inherit arfind's terminal, so interactive programs work. With `--exec` they run one after another (an editor opens once per file); `-X` opens them all at once. Paths are not printed while running commands, and `--count` cannot be combined with them.
 
+## Terminal safety
+
+File names can contain ESC and other control characters, which a terminal would otherwise execute (clearing the screen, rewriting earlier lines, changing the window title). arfind prints every such character as a visible escape: a file named `x<ESC>[2J.txt` is listed as `x\x1b[2J.txt`. This covers C0 controls (including tab and newline), DEL and C1 controls (U+0080–U+009F).
+
+`--dry-run` writes names that contain control characters in `$'...'` form (`$'x\x1b[2J.txt'`), so the line is safe to print and still reproduces the exact name when pasted into bash, zsh or ksh. Commands run by `--exec`/`--exec-batch` always receive the exact, unescaped name.
+
 ## Examples
 
 ```bash

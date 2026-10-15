@@ -642,9 +642,11 @@ fn label_of(extension: &Option<String>) -> String {
         None => "(no extension)".to_string(),
         Some(ext) if ext.chars().count() > MAX_LABEL_CHARS => {
             let cut: String = ext.chars().take(MAX_LABEL_CHARS - 1).collect();
-            format!("{cut}…")
+            format!("{}…", arcommon::sanitize_name(&cut))
         }
-        Some(ext) => ext.clone(),
+        // Extensions come from file names, so they can hold control
+        // characters; escape them before they reach the terminal.
+        Some(ext) => arcommon::sanitize_name(ext).into_owned(),
     }
 }
 

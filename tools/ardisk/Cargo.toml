@@ -6,6 +6,7 @@ authors = ["Artem Shemet"]
 description = "Fast parallel disk usage analyzer"
 
 [dependencies]
+arcommon = { path = "../../crates/arcommon" }
 clap = { version = "4.0", features = ["derive"] }
 glob = "0.3"
 crossbeam-channel = "0.5"

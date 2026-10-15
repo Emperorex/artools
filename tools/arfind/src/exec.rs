@@ -291,16 +291,45 @@ pub fn command_terminated(raw_args: &[String]) -> bool {
 
 /// Quotes one word for display so a `--dry-run` line can be pasted into a
 /// POSIX shell. Plain words stay as they are.
+///
+/// A word containing control characters (possible in file names) is
+/// written in `$'...'` form with those characters as `\xHH` escapes, so
+/// printing the line can never send raw escape sequences to the terminal,
+/// and pasting it still reproduces the exact name (`$'...'` is in POSIX.1-2024
+/// and supported by bash, zsh and ksh).
 pub fn shell_quote(word: &OsStr) -> String {
     let s = word.to_string_lossy();
     let safe = !s.is_empty()
         && s.chars()
             .all(|c| c.is_ascii_alphanumeric() || "/._-+=:,@%".contains(c));
     if safe {
-        s.into_owned()
-    } else {
-        format!("'{}'", s.replace('\'', r"'\''"))
+        return s.into_owned();
     }
+    if s.chars()
+        .any(|c| matches!(c as u32, 0x00..=0x1F | 0x7F..=0x9F))
+    {
+        let mut out = String::from("$'");
+        for c in s.chars() {
+            match c {
+                '\\' => out.push_str("\\\\"),
+                '\'' => out.push_str("\\'"),
+                c if (c as u32) < 0x20 || c as u32 == 0x7F => {
+                    out.push_str(&format!("\\x{:02x}", c as u32))
+                }
+                // C1: emit the UTF-8 bytes, which is what the name holds.
+                c if matches!(c as u32, 0x80..=0x9F) => {
+                    let mut buf = [0u8; 2];
+                    for b in c.encode_utf8(&mut buf).bytes() {
+                        out.push_str(&format!("\\x{b:02x}"));
+                    }
+                }
+                c => out.push(c),
+            }
+        }
+        out.push('\'');
+        return out;
+    }
+    format!("'{}'", s.replace('\'', r"'\''"))
 }
 
 /// A full command line for display.
@@ -390,6 +419,17 @@ mod tests {
 
     fn strs(v: &[OsString]) -> Vec<String> {
         v.iter().map(|s| s.to_string_lossy().into_owned()).collect()
+    }
+
+    #[test]
+    fn shell_quote_escapes_control_characters() {
+        let q = shell_quote(OsStr::new("x\x1b]0;PWNED\x07\x1b[2J it's\\.txt"));
+        assert_eq!(q, r"$'x\x1b]0;PWNED\x07\x1b[2J it\'s\\.txt'");
+        assert!(!q.chars().any(|c| c.is_control()));
+        assert_eq!(shell_quote(OsStr::new("a\u{9b}b")), r"$'a\xc2\x9bb'");
+        // Ordinary words keep the old quoting.
+        assert_eq!(shell_quote(OsStr::new("it's")), r"'it'\''s'");
+        assert_eq!(shell_quote(OsStr::new("plain.txt")), "plain.txt");
     }
 
     #[test]

@@ -8,7 +8,6 @@ use ignore::{
 };
 use regex::{Regex, RegexBuilder};
 use std::{
-    borrow::Cow,
     collections::{HashSet, VecDeque},
     fs::{self, File},
     io::{BufRead, BufReader, Cursor, Read},
@@ -108,57 +107,17 @@ fn read_line_capped<R: BufRead>(
 /// Default directories to ignore during text search
 pub const DEFAULT_IGNORES: &[&str] = &[".git", "node_modules", "__pycache__", "target"];
 
-/// Replaces control characters that could manipulate the terminal — bell
-/// (rings it), escape (arbitrary ANSI sequences: colors, cursor moves,
-/// even in vulnerable terminal emulators worse than that), carriage
-/// return (overwrites the current line), and the rest of the C0 control
-/// range plus DEL — with a visible `\xHH` escape, so a match inside a
-/// file that happens to contain such bytes can never make argrep's own
-/// output do any of that to the user's terminal. This is a real risk on
-/// a search this permissive: `--hidden --no-ignore` deliberately walks
-/// into caches, compiled artifacts, and other content that was never
-/// meant to be printed as text, and the existing binary sniff only
-/// catches a NUL byte in the first 1024 bytes — plenty of non-NUL binary
-/// content passes it right through.
-///
-/// Deliberately scoped to C0 controls (0x00-0x1F) and DEL (0x7F) only,
-/// not the 8-bit C1 range (U+0080-U+009F) some terminals also treat as
-/// control codes — those only arise from a genuine multi-byte UTF-8
-/// sequence decoding to one of those codepoints, which is rare enough in
-/// practice not to be worth the extra complexity here.
-///
-/// Tab is left alone (common in ordinary text and harmless). Applied at
-/// the point content is packaged for display, not at the point it's
-/// matched against the query — the regex still sees the original raw
-/// text, so this changes nothing about what counts as a match, only what
-/// gets printed for one. Returns the input unchanged (no allocation) in
-/// the overwhelmingly common case of a line with no control characters;
-/// the fast-path check operates on raw bytes rather than decoded chars,
-/// which is safe here specifically because every byte in 0x00-0x1F/0x7F
-/// is unambiguously a literal ASCII byte in valid UTF-8 — those values
-/// never occur as a continuation byte (0x80-0xBF) of a multi-byte
-/// sequence, so there's no risk of a false match inside one.
-pub fn sanitize_for_display(s: &str) -> Cow<'_, str> {
-    let needs_escaping = s
-        .bytes()
-        .any(|b| matches!(b, 0x00..=0x08 | 0x0B..=0x1F | 0x7F));
-    if !needs_escaping {
-        return Cow::Borrowed(s);
-    }
+/// Escapes control characters (C0 except tab, DEL, and C1) so file
+/// content can be printed to a terminal without the terminal executing
+/// them. Shared with arfind/ardisk via the `arcommon` crate; re-exported
+/// here so existing `argrep::sanitize_for_display` users keep working.
+/// Applied when content is packaged for display, never before matching:
+/// the regex always sees the original text.
+pub use arcommon::sanitize_for_display;
 
-    let mut out = String::with_capacity(s.len());
-    for ch in s.chars() {
-        let code = ch as u32;
-        if ch == '\t' {
-            out.push(ch);
-        } else if code <= 0x1F || code == 0x7F {
-            out.push_str(&format!("\\x{code:02x}"));
-        } else {
-            out.push(ch);
-        }
-    }
-    Cow::Owned(out)
-}
+/// Path ready to print to a terminal (control characters escaped). Only
+/// for human-facing output; see `arcommon::display_path`.
+pub use arcommon::display_path;
 
 /// A line after --replace, ready for display.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -862,7 +821,7 @@ pub fn scan_and_grep(
         Err(err) => {
             stats.io_errors.fetch_add(1, Ordering::Relaxed);
             if config.debug {
-                eprintln!("{}: {}: {}", "argrep".red(), dir_path.display(), err);
+                eprintln!("{}: {}: {}", "argrep".red(), display_path(dir_path), err);
             }
             return;
         }
@@ -932,7 +891,7 @@ pub fn scan_and_grep(
                 eprintln!(
                     "{}: {}: not a regular file, skipped",
                     "argrep".red(),
-                    entry.path().display()
+                    display_path(&entry.path())
                 );
             }
             continue;
@@ -1051,7 +1010,7 @@ pub fn grep_file(
         Err(err) => {
             stats.io_errors.fetch_add(1, Ordering::Relaxed);
             if config.debug {
-                eprintln!("{}: {}: {}", "argrep".red(), file_path.display(), err);
+                eprintln!("{}: {}: {}", "argrep".red(), display_path(file_path), err);
             }
             return;
         }
@@ -1095,7 +1054,7 @@ pub fn grep_file(
         Err(err) => {
             stats.io_errors.fetch_add(1, Ordering::Relaxed);
             if config.debug {
-                eprintln!("{}: {}: {}", "argrep".red(), file_path.display(), err);
+                eprintln!("{}: {}: {}", "argrep".red(), display_path(file_path), err);
             }
             return;
         }
@@ -1187,7 +1146,7 @@ pub fn grep_file(
                         eprintln!(
                             "{}: {}: decompressed size exceeds --max-decompressed-size ({} bytes); rest of file not searched",
                             "argrep".red(),
-                            file_path.display(),
+                            display_path(file_path),
                             decompressed_cap
                         );
                         break;
@@ -1199,7 +1158,7 @@ pub fn grep_file(
                 stats.io_errors.fetch_add(1, Ordering::Relaxed);
                 had_io_error = true;
                 if config.debug {
-                    eprintln!("{}: {}: {}", "argrep".red(), file_path.display(), err);
+                    eprintln!("{}: {}: {}", "argrep".red(), display_path(file_path), err);
                 }
                 break;
             }
@@ -1216,7 +1175,7 @@ pub fn grep_file(
                 eprintln!(
                     "{}: {}: line {} exceeds --max-line-size ({} bytes); skipping oversized lines",
                     "argrep".red(),
-                    file_path.display(),
+                    display_path(file_path),
                     line_num,
                     config.max_line_bytes
                 );

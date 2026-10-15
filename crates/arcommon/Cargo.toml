@@ -1,0 +1,9 @@
+[package]
+name = "arcommon"
+version = "0.1.0"
+edition = "2024"
+authors = ["Artem Shemet"]
+description = "Shared helpers for the artools command-line tools"
+publish = false
+
+[dependencies]

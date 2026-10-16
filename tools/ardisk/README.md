@@ -60,7 +60,7 @@ scanning: 214,880 dirs, 1,902,311 files, 182.40 GB, 41.3s
 
 - On a terminal the line updates in place about ten times a second and is erased before the report is printed.
 - When stderr is redirected (a log file, CI), ardisk writes a plain line every two seconds and a final `scanned: ...` summary, with no control characters.
-- Counts follow the same filters as the report, and the final numbers equal the report's totals. With `--inodes` the size is left out.
+- Counts follow the same filters as the report, and the final numbers equal the report's totals. `files` counts regular files only. With `--inodes`, the size is replaced by the inode total, which also includes directories, symlinks and special files: `scanning: 86 dirs, 2,100 files, 2,512 inodes, 1.2s`.
 - With `--duplicates`, a `comparing N candidate files...` line is shown while file contents are compared.
 - Only stderr is used, so stdout (including `--json`) is unchanged.
 

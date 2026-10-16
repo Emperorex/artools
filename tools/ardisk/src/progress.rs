@@ -90,17 +90,26 @@ pub fn format_elapsed(d: Duration) -> String {
 }
 
 /// The counter text, e.g. `12,345 dirs, 456,789 files, 12.30 GB, 3.2s`.
-/// With `inodes`, the size is left out (the files count says enough).
+/// With `inodes`, the inode total takes the size's place: `files` counts
+/// regular files only, so it alone would undercount what the report totals.
 pub fn describe(s: Snapshot, elapsed: Duration, inodes: bool) -> String {
     let mut text = format!(
-        "{} dir{}, {} file{}",
+        "{} dir{}, {} file{}, ",
         group_digits(s.dirs),
         if s.dirs == 1 { "" } else { "s" },
         group_digits(s.files),
         if s.files == 1 { "" } else { "s" },
     );
-    if !inodes {
-        text.push_str(", ");
+    if inodes {
+        // `files` counts regular files only, while the inode total also
+        // covers directories, symlinks and special files, so show the
+        // total itself: it is the number the report will end with.
+        text.push_str(&format!(
+            "{} inode{}",
+            group_digits(s.amount),
+            if s.amount == 1 { "" } else { "s" }
+        ));
+    } else {
         text.push_str(&format_size_plain(s.amount));
     }
     text.push_str(", ");
@@ -310,16 +319,25 @@ mod tests {
             describe(s, Duration::from_millis(1_500), false),
             "12,345 dirs, 456,789 files, 1.50 KB, 1.5s"
         );
+        // --inodes: the inode total takes the size's place.
+        let s = Snapshot {
+            dirs: 86,
+            files: 2_100,
+            amount: 2_512,
+        };
         assert_eq!(
             describe(s, Duration::from_millis(1_500), true),
-            "12,345 dirs, 456,789 files, 1.5s"
+            "86 dirs, 2,100 files, 2,512 inodes, 1.5s"
         );
         let one = Snapshot {
             dirs: 1,
             files: 1,
-            amount: 0,
+            amount: 1,
         };
-        assert_eq!(describe(one, Duration::ZERO, true), "1 dir, 1 file, 0.0s");
+        assert_eq!(
+            describe(one, Duration::ZERO, true),
+            "1 dir, 1 file, 1 inode, 0.0s"
+        );
     }
 
     #[test]

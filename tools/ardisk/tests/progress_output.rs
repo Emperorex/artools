@@ -101,11 +101,28 @@ fn final_line_matches_the_report_and_has_no_control_characters() {
 }
 
 #[test]
-fn inode_mode_leaves_out_the_size() {
+fn inode_mode_shows_the_inode_total_not_a_size() {
     let (_d, root) = sample();
-    let err = stderr(&ardisk(&[p(&root), "--inodes", "-s", "--progress"]));
+    // Entries that are inodes but not regular files, so the inode total
+    // differs from dirs + files and the test can tell them apart.
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(root.join("a/one.bin"), root.join("c/link")).unwrap();
+
+    let out = ardisk(&[p(&root), "--inodes", "-s", "--progress"]);
+    let report_total: u64 = String::from_utf8(out.stdout.clone())
+        .unwrap()
+        .split_whitespace()
+        .next()
+        .unwrap()
+        .parse()
+        .unwrap();
+    let err = stderr(&out);
     let last = err.lines().last().unwrap();
     assert!(!last.contains('B'), "no size in inode mode: {last:?}");
+    assert!(
+        last.contains(&format!(", {report_total} inodes, ")),
+        "the counter must end on the report's inode total ({report_total}): {last:?}"
+    );
 }
 
 #[test]

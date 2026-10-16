@@ -111,22 +111,8 @@ fn build_ignore_dirs(
     no_ignore: bool,
     extra: Vec<String>,
 ) -> Result<(HashSet<String>, Vec<Pattern>), String> {
-    let mut names: HashSet<String> = if no_ignore {
-        HashSet::new()
-    } else {
-        DEFAULT_IGNORES.iter().map(|s| s.to_string()).collect()
-    };
-    let mut patterns = Vec::new();
-    for entry in extra {
-        if entry.contains(['*', '?', '[']) {
-            patterns.push(Pattern::new(&entry).map_err(|e| {
-                format!("Invalid glob pattern for --exclude-dir: '{}': {}", entry, e)
-            })?);
-        } else {
-            names.insert(entry);
-        }
-    }
-    Ok((names, patterns))
+    arcommon::ignore::split_dir_excludes(DEFAULT_IGNORES, no_ignore, extra, true)
+        .map_err(|(entry, e)| format!("Invalid glob pattern for --exclude-dir: '{}': {}", entry, e))
 }
 
 /// Prints `error: ...` in red and exits with status 1.

@@ -1,3 +1,7 @@
+use arcommon::{
+    filetypes::{type_globs, type_name_parser},
+    jobs::{MAX_JOBS, default_jobs},
+};
 use argrep::{
     DEFAULT_IGNORES, MatchOptions, SearchConfig, SearchStats, build_matcher, build_matcher_multi,
     check_replacement, display_path, parallel_grep, parse_pattern_file, parse_size,
@@ -16,69 +20,6 @@ use std::{
     sync::{Arc, atomic::Ordering},
     time::Instant,
 };
-
-/// Built-in file types for --type/--type-not: a small, deliberately
-/// hand-picked starter set rather than ripgrep's much larger built-in type
-/// database (which covers hundreds of types). --type-add/--type-clear for
-/// user-defined types, and a --type-list flag to print this table, are
-/// intentionally left for a later change — see the README.
-const TYPE_TABLE: &[(&str, &[&str])] = &[
-    ("rust", &["*.rs"]),
-    ("python", &["*.py", "*.pyi"]),
-    ("javascript", &["*.js", "*.jsx", "*.mjs", "*.cjs"]),
-    ("typescript", &["*.ts", "*.tsx"]),
-    ("json", &["*.json"]),
-    ("yaml", &["*.yaml", "*.yml"]),
-    ("toml", &["*.toml"]),
-    ("markdown", &["*.md"]),
-    ("shell", &["*.sh", "*.bash", "*.zsh"]),
-    ("go", &["*.go"]),
-    ("java", &["*.java"]),
-    ("c", &["*.c", "*.h"]),
-    // "h" is deliberately only under "c", not also under "cpp": a bare
-    // .h file is far more commonly plain C than C++ in practice (C++
-    // headers more often use .hpp/.hh/.hxx), so this is a judgment call
-    // about the common case, not a technical restriction — nothing stops
-    // a future change from adding "*.h" to "cpp" too if that turns out
-    // to be the wrong call. `--type c --type cpp` together covers both
-    // if a codebase mixes them.
-    ("cpp", &["*.cpp", "*.cc", "*.cxx", "*.hpp"]),
-    ("html", &["*.html", "*.htm"]),
-    ("css", &["*.css"]),
-    ("sql", &["*.sql"]),
-    ("xml", &["*.xml"]),
-];
-
-fn type_globs(name: &str) -> Option<&'static [&'static str]> {
-    TYPE_TABLE
-        .iter()
-        .find(|(n, _)| *n == name)
-        .map(|(_, globs)| *globs)
-}
-
-fn known_type_names() -> String {
-    TYPE_TABLE
-        .iter()
-        .map(|(n, _)| *n)
-        .collect::<Vec<_>>()
-        .join(", ")
-}
-
-/// clap value_parser for --type/--type-not: validates the name against
-/// TYPE_TABLE at parse time, so an unknown type is reported as a CLI usage
-/// error (exit 2) rather than a config error, same tier as e.g. -m 0 or
-/// -j 0 being rejected at parse time.
-fn type_name_parser(s: &str) -> Result<String, String> {
-    if type_globs(s).is_some() {
-        Ok(s.to_string())
-    } else {
-        Err(format!(
-            "unknown type '{}' (known types: {})",
-            s,
-            known_type_names()
-        ))
-    }
-}
 
 /// Resolves the positional PATH argument for --files mode, given the raw
 /// values clap bound to the (still positionally-first) `query` slot and
@@ -153,22 +94,6 @@ fn smart_case_ignore_case(patterns: &[String]) -> bool {
         .all(|p| !p.chars().any(|c| c.is_uppercase()))
 }
 
-/// CPU-aware default worker count, used as the -j/--jobs default.
-///
-/// Half of available_parallelism(), clamped to [1, 16]: using every core by
-/// default competes with the rest of the system (and with the other
-/// worker-based tools in this repo if run concurrently), while an unclamped
-/// value could default to an unreasonably high thread count on large
-/// build/CI machines. available_parallelism() failing (sandboxed or
-/// restricted environments) falls back to 1, which the clamp still turns
-/// into a valid default.
-fn default_jobs() -> usize {
-    let cpus = std::thread::available_parallelism()
-        .map(|n| n.get())
-        .unwrap_or(1);
-    (cpus / 2).clamp(1, 16)
-}
-
 /// Hard upper bound for -B/--before-context, -A/--after-context, and
 /// -C/--context.
 ///
@@ -198,15 +123,6 @@ fn context_lines_parser(value: &str) -> Result<usize, String> {
 
     Ok(value)
 }
-
-/// Hard upper bound for -j/--jobs.
-///
-/// `jobs` maps 1:1 to raw `thread::spawn` calls (see the worker loop below),
-/// so an unbounded value lets a caller trivially exhaust threads/PIDs/memory
-/// on the host (e.g. `-j 65535`). 128 comfortably covers even large CI/build
-/// machines while keeping a hostile or accidental value from taking down the
-/// process or the machine it runs on.
-const MAX_JOBS: u16 = 128;
 
 /// CLI arguments for argrep
 #[derive(Parser, Debug)]
@@ -517,22 +433,14 @@ fn build_ignore_dirs(
     extra: Vec<String>,
     quiet: bool,
 ) -> (HashSet<String>, Vec<Pattern>) {
-    let mut names: HashSet<String> = if no_ignore {
-        HashSet::new()
-    } else {
-        DEFAULT_IGNORES.iter().map(|s| s.to_string()).collect()
-    };
-
-    let mut patterns = Vec::new();
-    for entry in extra {
-        if entry.contains(['*', '?', '[']) {
-            patterns.push(compile_glob(&entry, "--exclude-dir", quiet));
-        } else {
-            names.insert(entry);
-        }
-    }
-
-    (names, patterns)
+    arcommon::ignore::split_dir_excludes(DEFAULT_IGNORES, no_ignore, extra, true).unwrap_or_else(
+        |(entry, e)| {
+            fail(
+                &format!("Invalid glob pattern for --exclude-dir: '{entry}': {e}"),
+                if quiet { 2 } else { 1 },
+            )
+        },
+    )
 }
 
 /// Compiles a single glob pattern, exiting with the same CLI-error
@@ -1291,9 +1199,10 @@ fn print_result(
 #[cfg(test)]
 mod tests {
     use super::{
-        Args, TYPE_TABLE, build_ignore_dirs, default_jobs, resolve_e_path, resolve_files_path,
+        Args, build_ignore_dirs, default_jobs, resolve_e_path, resolve_files_path,
         smart_case_ignore_case, type_globs,
     };
+    use arcommon::filetypes::TYPE_TABLE;
     use clap::Parser;
 
     // ── -f / --file ──────────────────────────────────────────────────────────
@@ -1397,15 +1306,6 @@ mod tests {
     fn jobs_two_is_accepted() {
         let args = Args::try_parse_from(["argrep", "foo", ".", "-j", "2"]).unwrap();
         assert_eq!(args.jobs, 2);
-    }
-
-    #[test]
-    fn default_jobs_matches_half_available_parallelism_clamped() {
-        let cpus = std::thread::available_parallelism()
-            .map(|n| n.get())
-            .unwrap_or(1);
-        let expected = (cpus / 2).clamp(1, 16);
-        assert_eq!(default_jobs(), expected);
     }
 
     #[test]

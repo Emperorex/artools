@@ -1,11 +1,11 @@
+use arcommon::{
+    ignore::{DEFAULT_IGNORED_DIRS, IgnoreStack, is_ignored},
+    walk::{self, Queue},
+};
 use colored::Colorize;
 use crossbeam_channel::unbounded;
 use flate2::read::GzDecoder;
 use glob::Pattern;
-use ignore::{
-    Match,
-    gitignore::{Gitignore, GitignoreBuilder},
-};
 use regex::{Regex, RegexBuilder};
 use std::{
     collections::{HashSet, VecDeque},
@@ -104,8 +104,34 @@ fn read_line_capped<R: BufRead>(
     }
 }
 
-/// Default directories to ignore during text search
+/// Default directories to ignore during text search: the shared defaults
+/// (`arcommon::ignore::DEFAULT_IGNORED_DIRS`) plus `target`, since build
+/// output is rarely worth grepping.
 pub const DEFAULT_IGNORES: &[&str] = &[".git", "node_modules", "__pycache__", "target"];
+
+// DEFAULT_IGNORES must stay a superset of the shared list.
+const _: () = {
+    let mut i = 0;
+    while i < DEFAULT_IGNORED_DIRS.len() {
+        let (a, b) = (
+            DEFAULT_IGNORED_DIRS[i].as_bytes(),
+            DEFAULT_IGNORES[i].as_bytes(),
+        );
+        assert!(
+            a.len() == b.len(),
+            "DEFAULT_IGNORES must start with the shared defaults"
+        );
+        let mut j = 0;
+        while j < a.len() {
+            assert!(
+                a[j] == b[j],
+                "DEFAULT_IGNORES must start with the shared defaults"
+            );
+            j += 1;
+        }
+        i += 1;
+    }
+};
 
 /// Escapes control characters (C0 except tab, DEL, and C1) so file
 /// content can be printed to a terminal without the terminal executing
@@ -280,7 +306,7 @@ pub struct Task {
     /// Accumulated .gitignore/.ignore matchers from the root down to this
     /// directory's parent, in order (deepest = highest priority, mirroring
     /// git's own precedence for nested ignore files).
-    pub ignore_stack: Arc<Vec<Arc<Gitignore>>>,
+    pub ignore_stack: IgnoreStack,
 }
 
 /// Shared runtime configuration
@@ -664,129 +690,36 @@ pub fn parallel_grep(
     stats: SearchStats,
     on_match: impl Fn(MatchResult) + Send + 'static,
 ) {
-    let (task_tx, task_rx) = unbounded::<Task>();
     let (output_tx, output_rx) = unbounded::<MatchResult>();
-    let active_tasks = Arc::new(AtomicUsize::new(1));
-
-    task_tx
-        .send(Task {
-            path: root,
-            ignore_stack: Arc::new(Vec::new()),
-        })
-        .unwrap();
-
-    let mut handles = Vec::new();
-
-    for _ in 0..workers {
-        let task_rx = task_rx.clone();
-        let task_tx = task_tx.clone();
-        let output_tx = output_tx.clone();
-        let config = Arc::clone(&config);
-        let stats = stats.clone();
-        let active_tasks = Arc::clone(&active_tasks);
-
-        let handle = thread::spawn(move || {
-            loop {
-                let task = crossbeam_channel::select! {
-                    recv(task_rx) -> msg => match msg {
-                        Ok(task) => task,
-                        Err(_) => break,
-                    },
-                    default => {
-                        if active_tasks.load(Ordering::SeqCst) == 0 {
-                            break;
-                        }
-                        thread::yield_now();
-                        continue;
-                    }
-                };
-
-                if !(config.quiet && stats.matched_lines.load(Ordering::Relaxed) > 0) {
-                    scan_and_grep(task, &config, &task_tx, &output_tx, &active_tasks, &stats);
-                }
-                active_tasks.fetch_sub(1, Ordering::SeqCst);
-            }
-        });
-
-        handles.push(handle);
-    }
-
-    drop(task_tx);
-    drop(output_tx);
-
-    let printer_handle = thread::spawn(move || {
+    // Results are printed while the walk is still running.
+    let printer = thread::spawn(move || {
         for item in output_rx {
             on_match(item);
         }
     });
 
-    for handle in handles {
-        handle.join().unwrap();
-    }
-
-    printer_handle.join().unwrap();
-}
-
-/// Builds a single combined matcher from any `.gitignore`/`.ignore` files
-/// present directly in `dir`. Returns `None` if neither file exists (or
-/// exists but contributes zero patterns), so callers can skip extending the
-/// ignore stack for the common case of a directory with no ignore files.
-///
-/// `present_files` must list only filenames the caller has already
-/// confirmed exist in `dir` (from a directory listing it already has) —
-/// this function never attempts to open a file that isn't there. Most
-/// directories have neither `.gitignore` nor `.ignore`, so at scale that
-/// avoids both a wasted open() per directory and, when `--debug` is on, a
-/// flood of harmless "No such file" pseudo-errors for the common case.
-fn build_dir_gitignore(dir: &Path, present_files: &[&str], debug: bool) -> Option<Gitignore> {
-    if present_files.is_empty() {
-        return None;
-    }
-
-    let mut builder = GitignoreBuilder::new(dir);
-
-    for filename in present_files {
-        if let Some(err) = builder.add(dir.join(filename))
-            && debug
-        {
-            eprintln!("{}", format!("argrep: {}", err).red());
+    let root_task = Task {
+        path: root,
+        ignore_stack: Arc::new(Vec::new()),
+    };
+    walk::for_each([root_task], workers, |task, queue| {
+        if config.quiet && stats.matched_lines.load(Ordering::Relaxed) > 0 {
+            // -q already has its answer: drop the rest of the walk.
+            queue.stop();
+            return;
         }
-    }
+        scan_and_grep(task, &config, queue, &output_tx, &stats);
+    });
 
-    match builder.build() {
-        Ok(gi) if gi.num_ignores() > 0 || gi.num_whitelists() > 0 => Some(gi),
-        Ok(_) => None,
-        Err(err) => {
-            if debug {
-                eprintln!("{}", format!("argrep: {}", err).red());
-            }
-            None
-        }
-    }
-}
-
-/// Checks `path` against a stack of gitignore matchers ordered root-to-leaf.
-/// Later (deeper) matchers take priority over earlier ones, so a subdirectory's
-/// `.gitignore` can re-include (`!pattern`) something an ancestor ignored —
-/// matching git's own precedence for nested ignore files.
-fn is_path_ignored(stack: &[Arc<Gitignore>], path: &Path, is_dir: bool) -> bool {
-    let mut ignored = false;
-    for matcher in stack {
-        match matcher.matched(path, is_dir) {
-            Match::Ignore(_) => ignored = true,
-            Match::Whitelist(_) => ignored = false,
-            Match::None => {}
-        }
-    }
-    ignored
+    drop(output_tx);
+    printer.join().unwrap();
 }
 
 pub fn scan_and_grep(
     task: Task,
     config: &SearchConfig,
-    task_tx: &crossbeam_channel::Sender<Task>,
+    queue: &Queue<Task>,
     output_tx: &crossbeam_channel::Sender<MatchResult>,
-    active_tasks: &AtomicUsize,
     stats: &SearchStats,
 ) {
     let dir_path = task.path.as_path();
@@ -833,24 +766,17 @@ pub fn scan_and_grep(
     // to open files that, for the overwhelming majority of directories,
     // aren't there — avoids both a wasted syscall and (with --debug) a
     // flood of harmless "No such file" noise for every directory searched.
-    let ignore_stack: Arc<Vec<Arc<Gitignore>>> = if config.respect_gitignore {
-        let present_ignore_files: Vec<&str> = [".gitignore", ".ignore"]
-            .into_iter()
-            .filter(|name| {
-                entries
-                    .iter()
-                    .any(|e| e.file_name().as_os_str() == std::ffi::OsStr::new(name))
-            })
-            .collect();
-
-        match build_dir_gitignore(dir_path, &present_ignore_files, config.debug) {
-            Some(gi) => {
-                let mut stack = (*task.ignore_stack).clone();
-                stack.push(Arc::new(gi));
-                Arc::new(stack)
+    let ignore_stack: IgnoreStack = if config.respect_gitignore {
+        let (stack, errors) =
+            arcommon::ignore::stack_for_dir(&task.ignore_stack, dir_path, |name| {
+                entries.iter().any(|e| e.file_name() == name)
+            });
+        if config.debug {
+            for err in errors {
+                eprintln!("{}", format!("argrep: {}", err).red());
             }
-            None => Arc::clone(&task.ignore_stack),
         }
+        stack
     } else {
         Arc::clone(&task.ignore_stack)
     };
@@ -913,7 +839,7 @@ pub fn scan_and_grep(
 
         let entry_path = entry.path();
 
-        if config.respect_gitignore && is_path_ignored(&ignore_stack, &entry_path, is_dir) {
+        if config.respect_gitignore && is_ignored(&ignore_stack, &entry_path, is_dir) {
             if !is_dir {
                 stats.files_skipped.fetch_add(1, Ordering::Relaxed);
             }
@@ -929,8 +855,7 @@ pub fn scan_and_grep(
             {
                 continue;
             }
-            active_tasks.fetch_add(1, Ordering::SeqCst);
-            let _ = task_tx.send(Task {
+            queue.push(Task {
                 path: entry_path,
                 ignore_stack: Arc::clone(&ignore_stack),
             });
@@ -1415,70 +1340,6 @@ pub fn grep_file(
             is_separator: false,
             highlights: None,
         });
-    }
-}
-
-#[cfg(test)]
-mod ignore_tests {
-    // ── build_dir_gitignore ──────────────────────────────────────────────────
-    //
-    // Presence must be determined by the caller (from a directory listing it
-    // already has) rather than by attempting to open ".gitignore"/".ignore"
-    // speculatively — most directories have neither file, so at scale that
-    // was a wasted open() per directory plus, with --debug on, a flood of
-    // harmless "No such file" noise.
-
-    #[test]
-    fn build_dir_gitignore_touches_nothing_when_no_files_present() {
-        use super::build_dir_gitignore;
-        use std::path::Path;
-
-        let result = build_dir_gitignore(Path::new("/definitely/does/not/exist"), &[], true);
-        assert!(result.is_none());
-    }
-
-    #[test]
-    fn build_dir_gitignore_builds_from_present_gitignore() {
-        use super::build_dir_gitignore;
-        use std::fs;
-
-        let dir = tempfile::TempDir::new().unwrap();
-        fs::write(dir.path().join(".gitignore"), b"*.log\n").unwrap();
-
-        let gi = build_dir_gitignore(dir.path(), &[".gitignore"], false);
-        assert!(gi.is_some());
-    }
-
-    #[test]
-    fn build_dir_gitignore_ignores_unlisted_files_even_if_present() {
-        use super::build_dir_gitignore;
-        use std::fs;
-
-        let dir = tempfile::TempDir::new().unwrap();
-        fs::write(dir.path().join(".gitignore"), b"*.log\n").unwrap();
-        fs::write(dir.path().join(".ignore"), b"*.tmp\n").unwrap();
-
-        let gi = build_dir_gitignore(dir.path(), &[".gitignore"], false).unwrap();
-        assert!(matches!(
-            gi.matched(dir.path().join("a.log"), false),
-            super::Match::Ignore(_)
-        ));
-        assert!(matches!(
-            gi.matched(dir.path().join("a.tmp"), false),
-            super::Match::None
-        ));
-    }
-
-    #[test]
-    fn build_dir_gitignore_returns_none_for_empty_ignore_file() {
-        use super::build_dir_gitignore;
-        use std::fs;
-
-        let dir = tempfile::TempDir::new().unwrap();
-        fs::write(dir.path().join(".gitignore"), b"# just a comment\n").unwrap();
-
-        let gi = build_dir_gitignore(dir.path(), &[".gitignore"], false);
-        assert!(gi.is_none());
     }
 }
 

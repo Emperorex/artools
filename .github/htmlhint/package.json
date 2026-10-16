@@ -1,0 +1,8 @@
+{
+  "name": "artools-html-lint",
+  "private": true,
+  "description": "Pinned htmlhint for the Lint workflow; installed with npm ci so every run gets the same dependency tree.",
+  "devDependencies": {
+    "htmlhint": "1.9.2"
+  }
+}

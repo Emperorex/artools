@@ -12,10 +12,43 @@ on:
           - arfind
           - ardisk
           - argrep
+
+# Nothing by default; each job below asks for exactly what it needs.
+permissions: {}
+
 jobs:
+  # Gate for the whole release: nothing is built, attested or published
+  # unless this passes. Two independent checks:
+  #  * the run must be on main, so no release can come from an unreviewed
+  #    branch (workflow_dispatch otherwise accepts any branch);
+  #  * the job uses the protected "release" environment, so its rules
+  #    (required reviewers, deployment branch = main) apply. Configure it
+  #    in Settings > Environments; see the commit message.
+  release-gate:
+    name: Release gate
+    runs-on: ubuntu-latest
+    environment: release
+    permissions: {}
+    steps:
+      - name: Require the main branch
+        env:
+          REF: ${{ github.ref }}
+        run: |
+          if [ "$REF" != "refs/heads/main" ]; then
+            echo "::error::Releases are only built from main (this run is on $REF)."
+            exit 1
+          fi
+
   build:
     name: Build Binary
+    needs: release-gate
     runs-on: ${{ matrix.os }}
+    # Values used inside run: scripts are passed as environment variables
+    # rather than pasted in with ${{ }}, so they can never become shell code.
+    env:
+      TOOL: ${{ inputs.tool_name }}
+      TARGET: ${{ matrix.target }}
+      SUFFIX: ${{ matrix.artifact_suffix }}
     permissions:
       contents: read
       id-token: write
@@ -39,6 +72,9 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # Don't leave the token in .git/config for later steps to read.
+          persist-credentials: false
 
       # Pinned to a commit like every other action here: this job can mint
       # provenance attestations, so nothing a tag owner changes may run in
@@ -64,19 +100,18 @@ jobs:
       # Build production binary
       - name: Build Release Binary
         run: |
-          cargo build --release --target ${{ matrix.target }} --bin ${{ inputs.tool_name }}
+          cargo build --release --target "$TARGET" --bin "$TOOL"
 
       # Codesign macOS binary with ad-hoc signature to mitigate Gatekeeper kills
       - name: Codesign macOS Binary
         if: matrix.os == 'macos-latest'
         run: |
-          codesign -s - "target/${{ matrix.target }}/release/${{ inputs.tool_name }}"
+          codesign -s - "target/$TARGET/release/$TOOL"
 
       - name: Prepare Artifact
         run: |
           mkdir -p dist
-          cp target/${{ matrix.target }}/release/${{ inputs.tool_name }} \
-             dist/${{ inputs.tool_name }}-${{ matrix.artifact_suffix }}
+          cp "target/$TARGET/release/$TOOL" "dist/$TOOL-$SUFFIX"
 
       - name: Upload Artifact
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
@@ -100,6 +135,8 @@ jobs:
     name: Publish GitHub Release
     needs: build
     runs-on: ubuntu-latest
+    env:
+      TOOL: ${{ inputs.tool_name }}
     permissions:
       contents: write
       id-token: write
@@ -110,6 +147,9 @@ jobs:
         with:
           # Required for proper tag push and historical log diff analysis
           fetch-depth: 0
+          # Credentials are kept on purpose in this one job: the "Create and
+          # Push Git Tag" step below pushes with them. Every other checkout
+          # sets persist-credentials: false.
 
       - name: Download All Artifacts
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
@@ -124,10 +164,10 @@ jobs:
       - name: Generate SHA256SUMS
         run: |
           cd dist
-          sha256sum "${{ inputs.tool_name }}-linux-x86_64" \
-                     "${{ inputs.tool_name }}-linux-arm64" \
-                     "${{ inputs.tool_name }}-macos-arm64" \
-                     "${{ inputs.tool_name }}-macos-x86_64" > SHA256SUMS
+          sha256sum "$TOOL-linux-x86_64" \
+                     "$TOOL-linux-arm64" \
+                     "$TOOL-macos-arm64" \
+                     "$TOOL-macos-x86_64" > SHA256SUMS
           cat SHA256SUMS
 
       # Attest the checksums file itself too: this proves SHA256SUMS came
@@ -142,9 +182,15 @@ jobs:
       - name: Extract version from Cargo.toml
         id: get_version
         run: |
-          VERSION=$(grep '^version' tools/${{ inputs.tool_name }}/Cargo.toml | head -n1 | cut -d '"' -f2)
-          echo "VERSION=$VERSION" >> $GITHUB_ENV
-          echo "TAG_NAME=${{ inputs.tool_name }}-v$VERSION" >> $GITHUB_ENV
+          VERSION=$(grep '^version' "tools/$TOOL/Cargo.toml" | head -n1 | cut -d '"' -f2)
+          # The version becomes part of a tag name and the release title, so
+          # accept only a plain semantic version.
+          if ! printf '%s' "$VERSION" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z.-]+)?$'; then
+            echo "::error::Unexpected version '$VERSION' in tools/$TOOL/Cargo.toml"
+            exit 1
+          fi
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+          echo "TAG_NAME=$TOOL-v$VERSION" >> "$GITHUB_ENV"
 
       # Generate and push a physical Git tag into the repository history
       - name: Create and Push Git Tag
@@ -153,11 +199,11 @@ jobs:
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
           
           # Check if the tag already exists to prevent pipeline crashes
-          if git rev-parse "${{ env.TAG_NAME }}" >/dev/null 2>&1; then
-            echo "Tag ${{ env.TAG_NAME }} already exists. Skipping tag creation."
+          if git rev-parse "$TAG_NAME" >/dev/null 2>&1; then
+            echo "Tag $TAG_NAME already exists. Skipping tag creation."
           else
-            git tag -a "${{ env.TAG_NAME }}" -m "Release ${{ inputs.tool_name }} v${{ env.VERSION }}"
-            git push origin "${{ env.TAG_NAME }}"
+            git tag -a "$TAG_NAME" -m "Release $TOOL v$VERSION"
+            git push origin "$TAG_NAME"
           fi
 
       # Find the previous release tag for this specific tool to use as the
@@ -165,8 +211,7 @@ jobs:
       - name: Generate tool-scoped release notes
         id: release_notes
         run: |
-          TOOL="${{ inputs.tool_name }}"
-          CURRENT_TAG="${{ env.TAG_NAME }}"
+          CURRENT_TAG="$TAG_NAME"
 
           # Find the most recent previous tag for this tool (e.g. arfind-v0.1.1)
           PREV_TAG=$(git tag --list "${TOOL}-v*" --sort=-version:refname \
@@ -200,7 +245,7 @@ jobs:
             echo ""
             echo "$COMMITS"
             echo ""
-            echo "**Full changelog:** https://github.com/${{ github.repository }}/commits/main/tools/${TOOL}"
+            echo "**Full changelog:** https://github.com/${GITHUB_REPOSITORY}/commits/main/tools/${TOOL}"
             echo "RELEASE_NOTES_EOF"
           } >> "$GITHUB_OUTPUT"
 

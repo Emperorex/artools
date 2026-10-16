@@ -67,20 +67,20 @@ jobs:
         run: |
           echo "Scanning for Rust projects in tools/..."
           
-          # Знаходимо всі папки в tools/, де є Cargo.toml
+          # Find every folder in tools/ and crates/ that has a Cargo.toml
           for cargo_toml in tools/*/Cargo.toml crates/*/Cargo.toml; do
-            # Перевіряємо, чи файл дійсно існує (на випадок порожньої папки)
+            # Check that the file really exists (in case a folder is empty and the glob didn't match)
             [ -e "$cargo_toml" ] || continue
           
-            # Отримуємо шлях до папки проєкту (наприклад, tools/arfind)
+            # Get the project's folder (e.g. tools/arfind)
             project_dir=$(dirname "$cargo_toml")
             echo "----------------------------------------"
             echo "Linting Rust project in: $project_dir"
             echo "----------------------------------------"
           
-            # Запускаємо перевірку форматування
+            # Check formatting
             cargo fmt --manifest-path "$cargo_toml" --check
           
-            # Запускаємо clippy, вказуючи шлях до конкретного маніфесту
+            # Run clippy against this project's own manifest
             cargo clippy --manifest-path "$cargo_toml" -- -D warnings
           done

@@ -1,3 +1,4 @@
+use arcommon::jobs::{MAX_JOBS, default_jobs};
 use ardisk::{
     Collect, DEFAULT_IGNORES, ScanConfig, ScanOutput,
     age::{Age, MtimeFilter, check_window, parse_age},
@@ -89,31 +90,6 @@ fn parse_threshold(s: &str) -> Result<u64, String> {
 
     Ok(bytes as u64)
 }
-
-/// CPU-aware default worker count, used as the -j/--jobs default.
-///
-/// Half of available_parallelism(), clamped to [1, 16]: using every core by
-/// default competes with the rest of the system (and with the other
-/// worker-based tools in this repo if run concurrently), while an unclamped
-/// value could default to an unreasonably high thread count on large
-/// build/CI machines. available_parallelism() failing (sandboxed or
-/// restricted environments) falls back to 1, which the clamp still turns
-/// into a valid default.
-fn default_jobs() -> usize {
-    let cpus = std::thread::available_parallelism()
-        .map(|n| n.get())
-        .unwrap_or(1);
-    (cpus / 2).clamp(1, 16)
-}
-
-/// Hard upper bound for -j/--jobs.
-///
-/// `jobs` maps 1:1 to raw `thread::spawn` calls (see the worker loop below),
-/// so an unbounded value lets a caller trivially exhaust threads/PIDs/memory
-/// on the host (e.g. `-j 65535`). 128 comfortably covers even large CI/build
-/// machines while keeping a hostile or accidental value from taking down the
-/// process or the machine it runs on.
-const MAX_JOBS: u16 = 128;
 
 /// When to draw usage bars in the flat directory list (`--bar`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
@@ -350,13 +326,10 @@ struct Args {
 /// still honored either way, since that's the user asking for something
 /// specific rather than the tool's automatic noise filtering.
 fn build_ignore_dirs(no_ignore: bool, extra: Vec<String>) -> HashSet<String> {
-    let mut ignore_dirs: HashSet<String> = if no_ignore {
-        HashSet::new()
-    } else {
-        DEFAULT_IGNORES.iter().map(|s| s.to_string()).collect()
-    };
-    ignore_dirs.extend(extra);
-    ignore_dirs
+    // ardisk's --ignore takes plain names only (globs go to --exclude).
+    let (names, _) = arcommon::ignore::split_dir_excludes(DEFAULT_IGNORES, no_ignore, extra, false)
+        .expect("no glob is compiled when globs are not allowed");
+    names
 }
 
 fn main() {
@@ -805,15 +778,6 @@ mod tests {
     fn jobs_two_is_accepted() {
         let args = Args::try_parse_from(["ardisk", ".", "-j", "2"]).unwrap();
         assert_eq!(args.jobs, 2);
-    }
-
-    #[test]
-    fn default_jobs_matches_half_available_parallelism_clamped() {
-        let cpus = std::thread::available_parallelism()
-            .map(|n| n.get())
-            .unwrap_or(1);
-        let expected = (cpus / 2).clamp(1, 16);
-        assert_eq!(default_jobs(), expected);
     }
 
     #[test]

@@ -1,64 +1,26 @@
 //! Named file types (`--type` / `--type-not`) and `--extension`.
 //!
-//! The type table is the same as argrep's, so `arfind . --type rust` and
-//! `argrep PATTERN . --type rust` select exactly the same files. Keep the two
-//! tables in sync when adding a type.
+//! The type table itself lives in `arcommon::filetypes`, shared with argrep,
+//! so `arfind . --type rust` and `argrep PATTERN . --type rust` select exactly
+//! the same files.
 
 use glob::Pattern;
 
-/// Built-in types: name and file-name globs. Same as argrep's `TYPE_TABLE`.
-pub const TYPE_TABLE: &[(&str, &[&str])] = &[
-    ("rust", &["*.rs"]),
-    ("python", &["*.py", "*.pyi"]),
-    ("javascript", &["*.js", "*.jsx", "*.mjs", "*.cjs"]),
-    ("typescript", &["*.ts", "*.tsx"]),
-    ("json", &["*.json"]),
-    ("yaml", &["*.yaml", "*.yml"]),
-    ("toml", &["*.toml"]),
-    ("markdown", &["*.md"]),
-    ("shell", &["*.sh", "*.bash", "*.zsh"]),
-    ("go", &["*.go"]),
-    ("java", &["*.java"]),
-    // "*.h" only under "c", as in argrep: a bare .h is more often C.
-    ("c", &["*.c", "*.h"]),
-    ("cpp", &["*.cpp", "*.cc", "*.cxx", "*.hpp"]),
-    ("html", &["*.html", "*.htm"]),
-    ("css", &["*.css"]),
-    ("sql", &["*.sql"]),
-    ("xml", &["*.xml"]),
-];
-
-pub fn type_globs(name: &str) -> Option<&'static [&'static str]> {
-    TYPE_TABLE
-        .iter()
-        .find(|(n, _)| *n == name)
-        .map(|(_, globs)| *globs)
-}
-
-pub fn known_type_names() -> String {
-    TYPE_TABLE
-        .iter()
-        .map(|(n, _)| *n)
-        .collect::<Vec<_>>()
-        .join(", ")
-}
+// The table and lookups are shared with argrep (arcommon::filetypes), so
+// `--type rust` selects the same files in both tools.
+pub use arcommon::filetypes::{TYPE_TABLE, known_type_names, type_globs};
 
 /// clap value parser for `--type` / `--type-not`: unknown names are a usage
 /// error listing the known types. The entry kinds `f`, `d` and `l` get a
 /// pointer to `-t`, since that is what someone typing `--type f` wants.
 pub fn type_name_parser(s: &str) -> Result<String, String> {
-    if type_globs(s).is_some() {
-        return Ok(s.to_string());
-    }
-    let hint = if matches!(s, "f" | "d" | "l") {
-        format!("; to filter by entry kind use -t {s} (--file-type {s})")
-    } else {
-        String::new()
-    };
-    Err(format!(
-        "unknown type '{s}' (known types: {}){hint}",
-        known_type_names()
-    ))
+    arcommon::filetypes::type_name_parser(s).map_err(|err| {
+        if matches!(s, "f" | "d" | "l") {
+            format!("{err}; to filter by entry kind use -t {s} (--file-type {s})")
+        } else {
+            err
+        }
+    })
 }
 
 /// Normalizes an `--extension` value: trims, drops one leading dot, lowers

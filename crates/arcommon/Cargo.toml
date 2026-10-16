@@ -7,3 +7,8 @@ description = "Shared helpers for the artools command-line tools"
 publish = false
 
 [dependencies]
+glob = "0.3"
+ignore = "0.4"
+
+[dev-dependencies]
+tempfile = "3"

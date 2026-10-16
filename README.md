@@ -30,7 +30,7 @@ artools/
 ├── .github/workflows/   # CI/CD pipelines (Lint, Test, Release)
 ├── docs/                # GitHub Pages site (artools.io)
 ├── crates/
-│   └── arcommon/        # Shared helpers (terminal-safe output)
+│   └── arcommon/        # Shared library: parallel walker, ignore rules, filters, safe output
 └── tools/
     ├── arfind/          # Fast parallel file finder
     ├── ardisk/          # Fast parallel disk usage analyzer

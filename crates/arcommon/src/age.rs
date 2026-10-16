@@ -5,7 +5,7 @@
 //! could mean minutes or months.
 //!
 //! Both filters compare a file's mtime with one reference time, taken once
-//! when ardisk starts:
+//! when the tool starts:
 //!
 //! * `--older-than A` keeps files modified at or before `now - A`;
 //! * `--newer-than B` keeps files modified after `now - B`.

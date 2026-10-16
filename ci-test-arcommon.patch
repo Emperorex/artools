@@ -1,0 +1,42 @@
+diff --git a/.github/workflows/lint.yml b/.github/workflows/lint.yml
+index 707866f..1b0780f 100644
+--- a/.github/workflows/lint.yml
++++ b/.github/workflows/lint.yml
+@@ -68,7 +68,7 @@ jobs:
+           echo "Scanning for Rust projects in tools/..."
+           
+           # Знаходимо всі папки в tools/, де є Cargo.toml
+-          for cargo_toml in tools/*/Cargo.toml; do
++          for cargo_toml in tools/*/Cargo.toml crates/*/Cargo.toml; do
+             # Перевіряємо, чи файл дійсно існує (на випадок порожньої папки)
+             [ -e "$cargo_toml" ] || continue
+           
+diff --git a/.github/workflows/test.yml b/.github/workflows/test.yml
+index aa959f2..1e3b0a5 100644
+--- a/.github/workflows/test.yml
++++ b/.github/workflows/test.yml
+@@ -17,7 +17,13 @@ jobs:
+     strategy:
+       fail-fast: false
+       matrix:
+-        tool: [ arfind, ardisk, argrep ]
++        tool: [ arfind, ardisk, argrep, arcommon ]
++        include:
++          - { tool: arfind, path: tools/arfind }
++          - { tool: ardisk, path: tools/ardisk }
++          - { tool: argrep, path: tools/argrep }
++          # Shared library used by all three tools
++          - { tool: arcommon, path: crates/arcommon }
+ 
+     steps:
+       - name: Checkout
+@@ -34,7 +40,7 @@ jobs:
+       - name: Rust Cache
+         uses: swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+         with:
+-          workspaces: "tools/${{ matrix.tool }}"
++          workspaces: "${{ matrix.path }}"
+ 
+       - name: Run tests
+-        run: cargo test --manifest-path tools/${{ matrix.tool }}/Cargo.toml
++        run: cargo test --manifest-path ${{ matrix.path }}/Cargo.toml

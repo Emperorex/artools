@@ -17,7 +17,13 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        tool: [ arfind, ardisk, argrep ]
+        tool: [ arfind, ardisk, argrep, arcommon ]
+        include:
+          - { tool: arfind, path: tools/arfind }
+          - { tool: ardisk, path: tools/ardisk }
+          - { tool: argrep, path: tools/argrep }
+          # Shared library used by all three tools
+          - { tool: arcommon, path: crates/arcommon }
 
     steps:
       - name: Checkout
@@ -34,7 +40,7 @@ jobs:
       - name: Rust Cache
         uses: swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
-          workspaces: "tools/${{ matrix.tool }}"
+          workspaces: "${{ matrix.path }}"
 
       - name: Run tests
-        run: cargo test --manifest-path tools/${{ matrix.tool }}/Cargo.toml
+        run: cargo test --manifest-path ${{ matrix.path }}/Cargo.toml

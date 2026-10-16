@@ -220,22 +220,32 @@ jobs:
 
           if [ -z "$PREV_TAG" ]; then
             # No previous tag — include all commits touching this tool's directory
-            RANGE=""
+            RANGE=()
             echo "No previous tag found for ${TOOL}, using full history."
           else
-            RANGE="${PREV_TAG}..HEAD"
+            RANGE=("${PREV_TAG}..HEAD")
             echo "Generating notes from ${PREV_TAG} to HEAD"
           fi
 
-          # Collect only commits that touched files under tools/<tool>/
-          # --follow-renames handles file moves across the history
-          COMMITS=$(git log ${RANGE} \
+          # Commits that touched this tool's own files.
+          COMMITS=$(git log "${RANGE[@]}" \
             --pretty=format:"- %s (%h)" \
             -- "tools/${TOOL}/" \
             | head -50)
 
-          if [ -z "$COMMITS" ]; then
-            COMMITS="- No changes specific to \`${TOOL}\` since the last release."
+          # Commits to shared library code under crates/ (e.g. arcommon) are
+          # compiled into every tool, so they belong in its notes too. Listed
+          # separately, and only those not already listed above.
+          TOOL_SHAS=$(git log "${RANGE[@]}" --pretty=format:%H -- "tools/${TOOL}/")
+          SHARED=""
+          for sha in $(git log "${RANGE[@]}" --pretty=format:%H -- "crates/" | head -50); do
+            if ! printf '%s\n' "$TOOL_SHAS" | grep -qx "$sha"; then
+              SHARED="${SHARED}$(git log -1 --pretty=format:"- %s (%h)" "$sha")"$'\n'
+            fi
+          done
+
+          if [ -z "$COMMITS" ] && [ -z "$SHARED" ]; then
+            COMMITS="- No changes to \`${TOOL}\` since the last release."
           fi
 
           # Write multi-line output safely using the GITHUB_OUTPUT heredoc syntax
@@ -243,8 +253,16 @@ jobs:
             echo "notes<<RELEASE_NOTES_EOF"
             echo "## What's Changed in \`${TOOL}\`"
             echo ""
-            echo "$COMMITS"
-            echo ""
+            if [ -n "$COMMITS" ]; then
+              echo "$COMMITS"
+              echo ""
+            fi
+            if [ -n "$SHARED" ]; then
+              echo "### Shared code (\`crates/\`)"
+              echo ""
+              printf '%s' "$SHARED"
+              echo ""
+            fi
             echo "**Full changelog:** https://github.com/${GITHUB_REPOSITORY}/commits/main/tools/${TOOL}"
             echo "RELEASE_NOTES_EOF"
           } >> "$GITHUB_OUTPUT"

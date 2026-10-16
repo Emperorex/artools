@@ -174,9 +174,25 @@ pub struct Args {
         num_args = 1..,
         allow_hyphen_values = true,
         value_terminator = ";",
-        conflicts_with_all = ["count", "exec_batch"]
+        conflicts_with_all = ["count", "exec_batch", "execdir"]
     )]
     pub exec: Option<Vec<String>>,
+
+    /// Like --exec, but run each command from the result's own directory
+    /// with ./NAME as the path, like find -execdir. Safer when others can
+    /// write to the tree: a parent directory swapped for a symlink after
+    /// the search is detected and that file is skipped instead of acted
+    /// on outside the tree. The program is resolved to an absolute path
+    /// up front, and a PATH with relative entries is refused.
+    #[arg(
+        long,
+        value_name = "CMD",
+        num_args = 1..,
+        allow_hyphen_values = true,
+        value_terminator = ";",
+        conflicts_with_all = ["count", "exec_batch"]
+    )]
+    pub execdir: Option<Vec<String>>,
 
     /// Run a command once with all results as arguments, like fd -X or
     /// find -exec ... + (split into several runs if the list is very long).
@@ -189,12 +205,12 @@ pub struct Args {
         num_args = 1..,
         allow_hyphen_values = true,
         value_terminator = ";",
-        conflicts_with = "count"
+        conflicts_with_all = ["count", "execdir"]
     )]
     pub exec_batch: Option<Vec<String>>,
 
-    /// With --exec/--exec-batch: print the commands that would run (shell
-    /// quoted) instead of running them.
+    /// With --exec/--exec-batch/--execdir: print the commands that would
+    /// run (shell quoted) instead of running them.
     #[arg(long)]
     pub dry_run: bool,
 }

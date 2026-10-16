@@ -20,6 +20,25 @@
 //!   files cannot change the tree while it is still being searched.
 //! * **Nothing to do, nothing run.** Batch mode with no results starts no
 //!   process, unlike plain `xargs`, which would run `rm` with no arguments.
+//!
+//! Known limit of `--exec` / `--exec-batch`: the classic `find -exec` race.
+//! Paths are checked during the search and used later, so someone who can
+//! write to a directory in the tree can swap a parent directory for a
+//! symlink in between, and the command then acts on a file outside the
+//! tree. This matters when a privileged user runs a command over a tree
+//! that others can write to (e.g. root over `/tmp`). `--execdir` closes
+//! that gap:
+//!
+//! * **`--execdir`** runs each command from the file's own directory and
+//!   passes `./NAME`, like `find -execdir`. The directory is reopened
+//!   component by component from `/` with `O_NOFOLLOW` (result paths come
+//!   from a canonical root and never contain symlinks), so a directory
+//!   swapped for a symlink makes arfind refuse that file instead of
+//!   following the link; the command is then started inside that exact
+//!   directory with `fchdir`. Because the working directory is
+//!   attacker-writable in that scenario, the program is resolved to an
+//!   absolute path before searching, and `PATH` entries that are relative
+//!   (`.`, empty, `bin`) are refused, as `find -execdir` does.
 
 use std::{
     ffi::{OsStr, OsString},
@@ -155,6 +174,11 @@ pub struct ExecTemplate {
     batch: bool,
     /// No placeholder anywhere: the path(s) go after the last argument.
     append: bool,
+    /// `--execdir`: run from each file's directory with `./NAME`.
+    in_dir: bool,
+    /// `--execdir`: the program resolved to an absolute path up front, so
+    /// it can't be picked up from the (untrusted) working directory.
+    resolved_program: Option<PathBuf>,
 }
 
 impl ExecTemplate {
@@ -202,7 +226,23 @@ impl ExecTemplate {
             args,
             batch,
             append,
+            in_dir: false,
+            resolved_program: None,
         })
+    }
+
+    /// Parses the words after `--execdir`: like `--exec`, but each command
+    /// runs from the file's own directory and gets `./NAME`. `path_env` is
+    /// the `PATH` used to resolve a bare program name.
+    pub fn parse_execdir(words: &[String], path_env: Option<&OsStr>) -> Result<Self, String> {
+        let mut t = Self::parse(words, false).map_err(|e| e.replace("--exec", "--execdir"))?;
+        t.resolved_program = Some(resolve_program(&t.program, path_env)?);
+        t.in_dir = true;
+        Ok(t)
+    }
+
+    pub fn is_execdir(&self) -> bool {
+        self.in_dir
     }
 
     pub fn is_batch(&self) -> bool {
@@ -216,6 +256,15 @@ impl ExecTemplate {
     /// The argument list for one path (per-file mode).
     pub fn args_for(&self, path: &Path) -> Vec<OsString> {
         debug_assert!(path.is_absolute(), "results must be absolute paths");
+        // --execdir: placeholders see "./NAME", so {} is ./NAME, {/} NAME,
+        // {//} ".", and so on; nothing ever names the directory again.
+        let rel;
+        let path = if self.in_dir {
+            rel = split_for_execdir(path).1;
+            rel.as_path()
+        } else {
+            path
+        };
         let mut out: Vec<OsString> = self.args.iter().map(|a| a.expand(path)).collect();
         if self.append {
             out.push(path.as_os_str().to_owned());
@@ -296,12 +345,12 @@ pub fn misplaced_options(words: &[String], arfind_long_options: &[String]) -> Ve
         .collect()
 }
 
-/// Whether the command after the first `--exec` / `--exec-batch` / `-X` in
-/// the raw command line was ended with a `;` argument.
+/// Whether the command after the first `--exec` / `--exec-batch` / `-X` /
+/// `--execdir` in the raw command line was ended with a `;` argument.
 pub fn command_terminated(raw_args: &[String]) -> bool {
     raw_args
         .iter()
-        .skip_while(|a| !matches!(a.as_str(), "--exec" | "--exec-batch" | "-X"))
+        .skip_while(|a| !matches!(a.as_str(), "--exec" | "--exec-batch" | "-X" | "--execdir"))
         .skip(1)
         .any(|a| a == ";")
 }
@@ -359,6 +408,128 @@ pub fn display_command(program: &str, args: &[OsString]) -> String {
     line
 }
 
+/// `--execdir`: the directory to run in and the `./NAME` to pass for a
+/// result. A result without a file name (only `/` itself) runs in that
+/// directory with `.`.
+pub fn split_for_execdir(path: &Path) -> (PathBuf, PathBuf) {
+    match (path.parent(), path.file_name()) {
+        (Some(dir), Some(name)) if !dir.as_os_str().is_empty() => {
+            (dir.to_path_buf(), Path::new(".").join(name))
+        }
+        _ => (path.to_path_buf(), PathBuf::from(".")),
+    }
+}
+
+/// Resolves the `--execdir` program to an absolute path before anything
+/// runs. A name with a `/` must already be absolute (a relative one would
+/// be looked up in each file's directory). A bare name is searched in
+/// `PATH`, and a `PATH` with a relative or empty entry is refused, since
+/// the lookup would then reach into the directories being processed.
+pub fn resolve_program(program: &str, path_env: Option<&OsStr>) -> Result<PathBuf, String> {
+    let is_executable_file = |p: &Path| {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::metadata(p)
+                .map(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+                .unwrap_or(false)
+        }
+        #[cfg(not(unix))]
+        {
+            p.is_file()
+        }
+    };
+    if program.contains('/') {
+        let p = Path::new(program);
+        if !p.is_absolute() {
+            return Err(format!(
+                "--execdir: '{program}' is a relative path, which would be looked up \
+                 in each file's directory; give an absolute path or a command name"
+            ));
+        }
+        return if is_executable_file(p) {
+            Ok(p.to_path_buf())
+        } else {
+            Err(format!("--execdir: '{program}' is not an executable file"))
+        };
+    }
+    let path_env = path_env.unwrap_or_default();
+    let entries: Vec<PathBuf> = std::env::split_paths(path_env).collect();
+    if let Some(bad) = entries.iter().find(|d| !d.is_absolute()) {
+        let shown = if bad.as_os_str().is_empty() {
+            "an empty entry".to_string()
+        } else {
+            format!("'{}'", bad.display())
+        };
+        return Err(format!(
+            "--execdir: PATH contains {shown}, a relative directory; with --execdir \
+             the command would be looked up in each file's directory. Remove it from \
+             PATH or give the command as an absolute path"
+        ));
+    }
+    entries
+        .iter()
+        .map(|d| d.join(program))
+        .find(|c| is_executable_file(c))
+        .ok_or_else(|| format!("--execdir: command '{program}' not found in PATH"))
+}
+
+/// Opens `dir` (absolute) one component at a time from `/`, refusing to
+/// follow a symlink anywhere along the way. arfind's result paths are built
+/// from a canonical root without following links, so a symlink here means
+/// something was swapped after the search.
+#[cfg(unix)]
+pub fn open_dir_nofollow(dir: &Path) -> io::Result<std::os::fd::OwnedFd> {
+    use std::ffi::CString;
+    use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+    use std::os::unix::ffi::OsStrExt;
+    use std::path::Component;
+
+    let open = |at: Option<&OwnedFd>, name: &OsStr, nofollow: bool| -> io::Result<OwnedFd> {
+        let c = CString::new(name.as_bytes())
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "NUL in path"))?;
+        let mut flags = libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC;
+        if nofollow {
+            flags |= libc::O_NOFOLLOW;
+        }
+        // SAFETY: `c` is a valid NUL-terminated string and the directory fd,
+        // when given, is open for the duration of the call.
+        let fd = unsafe {
+            match at {
+                Some(d) => libc::openat(d.as_raw_fd(), c.as_ptr(), flags),
+                None => libc::open(c.as_ptr(), flags),
+            }
+        };
+        if fd < 0 {
+            Err(io::Error::last_os_error())
+        } else {
+            // SAFETY: `fd` was just returned by open/openat and is owned here.
+            Ok(unsafe { OwnedFd::from_raw_fd(fd) })
+        }
+    };
+
+    if !dir.is_absolute() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "not an absolute path",
+        ));
+    }
+    let mut cur = open(None, OsStr::new("/"), false)?;
+    for comp in dir.components() {
+        match comp {
+            Component::RootDir => {}
+            Component::Normal(name) => cur = open(Some(&cur), name, true)?,
+            _ => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "path has '.' or '..' components",
+                ));
+            }
+        }
+    }
+    Ok(cur)
+}
+
 /// Outcome of running the commands.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct ExecSummary {
@@ -395,6 +566,9 @@ pub fn run(
     dry_run: bool,
     out: &mut dyn io::Write,
 ) -> Result<ExecSummary, ExecError> {
+    if template.in_dir {
+        return run_in_dirs(template, paths, dry_run, out);
+    }
     let invocations: Vec<Vec<OsString>> = if template.batch {
         template.batches_for(paths, BATCH_MAX_BYTES)
     } else {
@@ -417,6 +591,94 @@ pub fn run(
                     error,
                 });
             }
+        }
+    }
+    Ok(summary)
+}
+
+/// `--execdir`: one command per result, each started inside the result's
+/// directory (opened without following symlinks) and given `./NAME`.
+fn run_in_dirs(
+    template: &ExecTemplate,
+    paths: &[PathBuf],
+    dry_run: bool,
+    out: &mut dyn io::Write,
+) -> Result<ExecSummary, ExecError> {
+    let program = template
+        .resolved_program
+        .clone()
+        .unwrap_or_else(|| PathBuf::from(&template.program));
+    let mut summary = ExecSummary::default();
+    for path in paths {
+        let (dir, _) = split_for_execdir(path);
+        let args = template.args_for(path);
+        summary.runs += 1;
+        if dry_run {
+            let _ = writeln!(
+                out,
+                "cd {} && {}",
+                shell_quote(dir.as_os_str()),
+                display_command(&template.program, &args)
+            );
+            continue;
+        }
+        #[cfg(unix)]
+        {
+            use std::os::fd::AsRawFd;
+            use std::os::unix::process::CommandExt;
+            let dir_fd = match open_dir_nofollow(&dir) {
+                Ok(fd) => fd,
+                Err(e) => {
+                    let why = match e.raw_os_error() {
+                        Some(libc::ELOOP) | Some(libc::ENOTDIR) => {
+                            "a directory in its path is now a symlink or no longer a \
+                             directory (changed since the search)"
+                                .to_string()
+                        }
+                        _ => e.to_string(),
+                    };
+                    eprintln!(
+                        "arfind: {}: not running the command: {why}",
+                        arcommon::display_path(path)
+                    );
+                    summary.failed += 1;
+                    continue;
+                }
+            };
+            let raw = dir_fd.as_raw_fd();
+            let mut cmd = Command::new(&program);
+            cmd.args(&args);
+            // SAFETY: fchdir is async-signal-safe, and `dir_fd` stays open
+            // until the child has been started and waited for.
+            unsafe {
+                cmd.pre_exec(move || {
+                    if libc::fchdir(raw) == 0 {
+                        Ok(())
+                    } else {
+                        Err(io::Error::last_os_error())
+                    }
+                });
+            }
+            let status = cmd.status();
+            drop(dir_fd);
+            match status {
+                Ok(status) if status.success() => {}
+                Ok(_) => summary.failed += 1,
+                Err(error) => {
+                    return Err(ExecError::Spawn {
+                        program: template.program.clone(),
+                        error,
+                    });
+                }
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = (&program, &args, &dir);
+            return Err(ExecError::Spawn {
+                program: template.program.clone(),
+                error: io::Error::new(io::ErrorKind::Unsupported, "--execdir needs a Unix system"),
+            });
         }
     }
     Ok(summary)
@@ -523,6 +785,93 @@ mod tests {
                 assert!(!starts_with_dash(&arg), "{name}: {arg:?}");
             }
         }
+    }
+
+    #[test]
+    fn execdir_placeholders_name_only_the_file() {
+        let mut t =
+            ExecTemplate::parse(&words(&["echo", "{}", "{/}", "{//}", "{.}", "{/.}"]), false)
+                .unwrap();
+        t.in_dir = true;
+        assert_eq!(
+            strs(&t.args_for(Path::new("/src/dir/file.tar.gz"))),
+            [
+                "./file.tar.gz",
+                "file.tar.gz",
+                ".",
+                "./file.tar",
+                "file.tar"
+            ]
+        );
+        // F4's rule still applies to {/} and {/.}.
+        assert_eq!(
+            strs(&t.args_for(Path::new("/d/-rf.txt"))),
+            ["./-rf.txt", "./-rf.txt", ".", "./-rf", "./-rf"]
+        );
+        // Without placeholders, ./NAME is appended.
+        let mut t = ExecTemplate::parse(&words(&["rm"]), false).unwrap();
+        t.in_dir = true;
+        assert_eq!(strs(&t.args_for(Path::new("/d/x"))), ["./x"]);
+    }
+
+    #[test]
+    fn execdir_splits_into_directory_and_dot_slash_name() {
+        assert_eq!(
+            split_for_execdir(Path::new("/a/b/c.txt")),
+            (PathBuf::from("/a/b"), PathBuf::from("./c.txt"))
+        );
+        assert_eq!(
+            split_for_execdir(Path::new("/top")),
+            (PathBuf::from("/"), PathBuf::from("./top"))
+        );
+        assert_eq!(
+            split_for_execdir(Path::new("/")),
+            (PathBuf::from("/"), PathBuf::from("."))
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn execdir_program_resolution_refuses_relative_lookups() {
+        let path = |s: &str| Some(OsString::from(s));
+        // Bare names come from absolute PATH entries only.
+        assert_eq!(
+            resolve_program("sh", path("/usr/bin:/bin").as_deref()).unwrap(),
+            if Path::new("/usr/bin/sh").exists() {
+                PathBuf::from("/usr/bin/sh")
+            } else {
+                PathBuf::from("/bin/sh")
+            }
+        );
+        for bad in [".:/bin", "/bin::/usr/bin", "bin:/bin", ""] {
+            let err = resolve_program("sh", path(bad).as_deref()).unwrap_err();
+            assert!(err.contains("relative"), "{bad:?}: {err}");
+        }
+        assert!(resolve_program("./tool", path("/bin").as_deref()).is_err());
+        assert!(resolve_program("bin/tool", path("/bin").as_deref()).is_err());
+        assert!(resolve_program("/bin/sh", None).is_ok());
+        assert!(resolve_program("/definitely/missing", None).is_err());
+        assert!(resolve_program("arfind-no-such-program-xyz", path("/bin").as_deref()).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn open_dir_nofollow_refuses_symlinks_anywhere_in_the_path() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let root = std::fs::canonicalize(dir.path()).unwrap();
+        std::fs::create_dir_all(root.join("real/sub")).unwrap();
+        std::os::unix::fs::symlink(root.join("real"), root.join("link")).unwrap();
+        std::fs::write(root.join("file"), b"x").unwrap();
+
+        assert!(open_dir_nofollow(&root.join("real/sub")).is_ok());
+        for bad in ["link", "link/sub", "file"] {
+            let err = open_dir_nofollow(&root.join(bad)).unwrap_err();
+            assert!(
+                matches!(err.raw_os_error(), Some(libc::ELOOP) | Some(libc::ENOTDIR)),
+                "{bad}: {err}"
+            );
+        }
+        assert!(open_dir_nofollow(Path::new("relative/dir")).is_err());
     }
 
     #[test]

@@ -246,3 +246,158 @@ fn dry_run_shows_the_dot_slash_prefix() {
     );
     assert_eq!(String::from_utf8_lossy(&out.stdout), "rm ./-rf.txt ./-rf\n");
 }
+
+// ── --execdir and the --exec race (SAST F7) ─────────────────────────────────
+//
+// Commands run one at a time in path order, so the command for `a/x` can
+// swap directory `b` for a symlink before the command for `b/y` runs: the
+// same thing an attacker with write access to the tree could do between the
+// search and the commands.
+
+/// tree/a/x, tree/b/y, and outside/y, which must never be touched.
+fn race_tree() -> (TempDir, PathBuf, PathBuf) {
+    let dir = TempDir::new().unwrap();
+    let base = fs::canonicalize(dir.path()).unwrap();
+    for rel in ["tree/a/x", "tree/b/y", "outside/y"] {
+        let full = base.join(rel);
+        fs::create_dir_all(full.parent().unwrap()).unwrap();
+        fs::write(full, b"x\n").unwrap();
+    }
+    (dir, base.join("tree"), base.join("outside"))
+}
+
+#[test]
+fn execdir_refuses_a_directory_swapped_for_a_symlink() {
+    let (_dir, tree, outside) = race_tree();
+    // Runs inside the file's directory, so ../b is tree/b.
+    let script = format!(
+        r#"if [ "$1" = ./x ]; then mv ../b ../b.real && ln -s '{}' ../b; fi; rm -- "$1""#,
+        outside.display()
+    );
+    let out = arfind(
+        &tree,
+        &[
+            ".",
+            "-t",
+            "f",
+            "--execdir",
+            "/bin/sh",
+            "-c",
+            &script,
+            "sh",
+            "{}",
+            ";",
+        ],
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        outside.join("y").exists(),
+        "file outside the tree was removed: {stderr}"
+    );
+    assert!(
+        !tree.join("a/x").exists(),
+        "the first command should have run"
+    );
+    assert!(tree.join("b.real/y").exists());
+    assert!(stderr.contains("not running the command"), "{stderr}");
+    assert!(!out.status.success(), "a skipped file must fail the run");
+}
+
+#[test]
+fn plain_exec_has_the_documented_race() {
+    // Not a guarantee anyone should want, but it documents why --execdir
+    // exists: with --exec the absolute path is followed through the swap.
+    let (_dir, tree, outside) = race_tree();
+    let script = format!(
+        r#"case "$1" in */a/x) mv '{t}/b' '{t}/b.real' && ln -s '{o}' '{t}/b';; esac; rm -- "$1""#,
+        t = tree.display(),
+        o = outside.display()
+    );
+    let out = arfind(
+        &tree,
+        &[
+            ".", "-t", "f", "--exec", "/bin/sh", "-c", &script, "sh", "{}", ";",
+        ],
+    );
+    assert!(out.status.success());
+    assert!(
+        !outside.join("y").exists(),
+        "expected --exec to follow the swap"
+    );
+}
+
+#[test]
+fn execdir_runs_in_each_files_directory() {
+    let (_dir, root) = tree(&["a/x", "b/y"]);
+    let out = arfind(
+        &root,
+        &[
+            ".",
+            "-t",
+            "f",
+            "--execdir",
+            "/bin/sh",
+            "-c",
+            r#"echo "$(pwd) $1""#,
+            "sh",
+            "{}",
+            ";",
+        ],
+    );
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(
+        stdout.lines().collect::<Vec<_>>(),
+        [
+            format!("{} ./x", root.join("a").display()),
+            format!("{} ./y", root.join("b").display()),
+        ]
+    );
+}
+
+#[test]
+fn execdir_dry_run_shows_directory_and_relative_name() {
+    let (_dir, root) = tree(&["a/-rf"]);
+    let out = arfind(
+        &root,
+        &[".", "-t", "f", "--dry-run", "--execdir", "rm", "{}", ";"],
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout),
+        format!("cd {} && rm ./-rf\n", root.join("a").display())
+    );
+}
+
+#[test]
+fn execdir_refuses_relative_path_entries_before_searching() {
+    let (_dir, root) = tree(&["a/x"]);
+    let out = Command::new(env!("CARGO_BIN_EXE_arfind"))
+        .current_dir(&root)
+        .args([".", "--execdir", "rm", "{}", ";"])
+        .env("PATH", ".:/usr/bin:/bin")
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("PATH contains '.'"));
+    assert!(root.join("a/x").exists(), "nothing may run");
+
+    let out = arfind(&root, &[".", "--execdir", "./rm", "{}", ";"]);
+    assert!(!out.status.success());
+    assert!(root.join("a/x").exists());
+}
+
+#[test]
+fn execdir_conflicts_with_the_other_exec_modes() {
+    let (_dir, root) = tree(&["a/x"]);
+    for args in [
+        &[".", "--exec", "echo", ";", "--execdir", "echo", ";"][..],
+        &[".", "-X", "echo", ";", "--execdir", "echo", ";"],
+        &[".", "-c", "--execdir", "echo", ";"],
+    ] {
+        assert!(!arfind(&root, args).status.success(), "{args:?}");
+    }
+}

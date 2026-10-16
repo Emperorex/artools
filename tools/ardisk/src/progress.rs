@@ -12,7 +12,7 @@
 //! Nothing is ever written to stdout, so `--json` output stays clean.
 
 use crate::format_size_plain;
-use crossbeam_channel::{Sender, bounded};
+use crossbeam_channel::{Receiver, RecvTimeoutError, Sender, bounded};
 use std::{
     io::{self, IsTerminal, Write},
     sync::{
@@ -136,6 +136,23 @@ impl Sink {
     }
 }
 
+/// Calls `tick` every `interval` until told to stop.
+///
+/// `recv_timeout` doubles as the tick and the stop signal, so stopping never
+/// waits a full interval. Only a timeout means "keep going": a stop signal
+/// ends the loop, and so does a disconnected channel, which is what happens
+/// when the [`Reporter`] is dropped without [`Reporter::finish`] (e.g. while
+/// unwinding from a panic). `recv_timeout` returns `Disconnected` at once,
+/// so treating it as "keep going" would spin and flood stderr.
+fn tick_until_stopped(stopped: &Receiver<()>, interval: Duration, mut tick: impl FnMut()) {
+    loop {
+        match stopped.recv_timeout(interval) {
+            Err(RecvTimeoutError::Timeout) => tick(),
+            Ok(()) | Err(RecvTimeoutError::Disconnected) => return,
+        }
+    }
+}
+
 /// The thread that prints the counter. Stop it with [`Reporter::finish`].
 pub struct Reporter {
     stop: Sender<()>,
@@ -157,12 +174,10 @@ impl Reporter {
         let (stop, stopped) = bounded::<()>(1);
         let shared = Arc::clone(&progress);
         let handle = thread::spawn(move || {
-            // recv_timeout doubles as the tick and the stop signal, so
-            // finish() never waits a full interval.
-            while stopped.recv_timeout(interval).is_err() {
+            tick_until_stopped(&stopped, interval, || {
                 let text = describe(shared.snapshot(), started.elapsed(), inodes);
                 sink.show(&format!("scanning: {text}"));
-            }
+            });
         });
         Reporter {
             stop,
@@ -213,6 +228,59 @@ impl Status {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Runs the ticker on a thread with a 5 ms interval, applies `end` to
+    /// the stop channel after ~50 ms, and returns how many ticks happened.
+    /// Fails (instead of hanging) if the ticker doesn't return.
+    fn ticks_until(end: impl FnOnce(Sender<()>)) -> usize {
+        use std::sync::atomic::AtomicUsize;
+        let (stop, stopped) = bounded::<()>(1);
+        let ticks = Arc::new(AtomicUsize::new(0));
+        let counter = Arc::clone(&ticks);
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        thread::spawn(move || {
+            tick_until_stopped(&stopped, Duration::from_millis(5), || {
+                counter.fetch_add(1, Ordering::Relaxed);
+            });
+            let _ = done_tx.send(());
+        });
+        thread::sleep(Duration::from_millis(50));
+        end(stop);
+        done_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("the progress thread kept running");
+        ticks.load(Ordering::Relaxed)
+    }
+
+    #[test]
+    fn ticker_ticks_until_stopped() {
+        let n = ticks_until(|stop| stop.send(()).unwrap());
+        assert!(n >= 2, "expected regular ticks, got {n}");
+    }
+
+    #[test]
+    fn ticker_ends_when_the_sender_is_dropped() {
+        // Reporter dropped without finish(): the channel disconnects and the
+        // thread must end instead of spinning.
+        let n = ticks_until(drop);
+        assert!(n < 100, "ticked {n} times in ~50ms: spinning, not ticking");
+    }
+
+    #[test]
+    fn reporter_dropped_without_finish_does_not_keep_running() {
+        let progress = Arc::new(ScanProgress::default());
+        let reporter = Reporter::start(Arc::clone(&progress), false);
+        // What dropping the Reporter does to the thread: the sender goes
+        // away. The handle is kept so the thread's end can be observed.
+        let Reporter { stop, handle, .. } = reporter;
+        drop(stop);
+        let handle_finished = handle;
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !handle_finished.is_finished() {
+            assert!(Instant::now() < deadline, "progress thread kept running");
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
 
     #[test]
     fn digits_are_grouped_by_thousands() {

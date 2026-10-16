@@ -209,10 +209,14 @@ fn main() {
     });
 
     // Parsed before searching, so a bad command fails fast.
-    let exec = match (&args.exec, &args.exec_batch) {
-        (Some(words), _) => Some(ExecTemplate::parse(words, false)),
-        (None, Some(words)) => Some(ExecTemplate::parse(words, true)),
-        (None, None) => None,
+    let exec = match (&args.exec, &args.exec_batch, &args.execdir) {
+        (Some(words), _, _) => Some(ExecTemplate::parse(words, false)),
+        (None, Some(words), _) => Some(ExecTemplate::parse(words, true)),
+        (None, None, Some(words)) => Some(ExecTemplate::parse_execdir(
+            words,
+            std::env::var_os("PATH").as_deref(),
+        )),
+        (None, None, None) => None,
     }
     .transpose()
     .unwrap_or_else(|e| fail(&e));
@@ -220,7 +224,12 @@ fn main() {
     // typed after it (e.g. `--exec rm --dry-run`) would silently go to the
     // command. Refuse unless the user ended the command with ';' and so
     // made clear those words are meant for it.
-    if let Some(words) = args.exec.as_ref().or(args.exec_batch.as_ref()) {
+    if let Some(words) = args
+        .exec
+        .as_ref()
+        .or(args.exec_batch.as_ref())
+        .or(args.execdir.as_ref())
+    {
         let raw: Vec<String> = std::env::args().collect();
         let known: Vec<String> = Args::command()
             .get_arguments()
@@ -242,7 +251,7 @@ fn main() {
         }
     }
     if args.dry_run && exec.is_none() {
-        fail("--dry-run only applies to --exec or --exec-batch");
+        fail("--dry-run only applies to --exec, --exec-batch or --execdir");
     }
 
     let stats = SearchStats::new();

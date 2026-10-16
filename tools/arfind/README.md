@@ -37,7 +37,8 @@ arfind [OPTIONS] [PATH]
 | `--count`            | `-c`  | —         | Print total match count instead of paths                                        |
 | `--exec CMD...`      | —     | —         | Run `CMD` once per result, without a shell (see [Running commands](#running-commands)) |
 | `--exec-batch CMD...`| `-X`  | —         | Run `CMD` once with all results as arguments                                    |
-| `--dry-run`          | —     | —         | With `--exec`/`-X`: print the commands instead of running them                  |
+| `--execdir CMD...`   | —     | —         | Like `--exec`, but run from each result's directory with `./NAME` (safer on trees others can write to) |
+| `--dry-run`          | —     | —         | With `--exec`/`-X`/`--execdir`: print the commands instead of running them      |
 | `--max-depth N`      | —     | unlimited | Maximum directory depth to recurse into                                         |
 | `--exclude GLOB`     | —     | —         | Hide files/dirs matching a gitignore-style glob, e.g. `"*.log"`, `"target/**"`, `"build/"`; repeatable (see [Excluding paths](#excluding-paths)) |
 | `--exclude-dir NAME` | —     | —         | Don't descend into directories with this name or glob (e.g. `vendor`, `"build*"`); repeatable; alias: `--ignore` |
@@ -222,6 +223,21 @@ Running commands on search results is powerful, so arfind adds a few guarantees:
 - **`--dry-run`** prints each command, shell-quoted, instead of running it.
 - **No results, no command.** `-X` never runs the command with an empty list (unlike plain `xargs`, which would run `rm` with no arguments). Very long lists are split over several runs to stay below the system's argument limit.
 - **Errors are not hidden.** If the program cannot be started (e.g. not found), arfind stops at once. Otherwise every result is processed, failures are counted on stderr (`arfind: 2 of 40 commands failed`) and the exit status is `1`.
+
+### Trees other people can write to: use `--execdir`
+
+`--exec` and `-X` have the same race as `find -exec`. arfind collects the paths first and runs the commands afterwards, so in between, anyone who can write to a directory in the tree can replace it with a symlink. The command then gets an absolute path that leads through the symlink and acts on a file *outside* the tree. This matters when a privileged user runs a destructive command over a tree others can write to, for example root cleaning `/tmp`:
+
+```bash
+sudo arfind /tmp --older-than 7d -t f --exec rm      # racy: don't do this
+sudo arfind /tmp --older-than 7d -t f --execdir rm   # use this instead
+```
+
+`--execdir` works like `find -execdir`. Each command runs from the result's own directory and gets `./NAME` instead of the full path (`{}` is `./NAME`, `{//}` is `.`).
+
+- **The directory is checked when the command runs.** arfind opens it again from `/`, one directory at a time, without following symlinks, and starts the command inside exactly that directory. If a directory along the path has been swapped for a symlink since the search, that file is skipped with a message (`not running the command: a directory in its path is now a symlink…`), counted as a failure, and the others still run.
+- **The program is fixed before searching.** The working directory is the untrusted one, so the command is resolved to an absolute path first. A `PATH` with a relative or empty entry (`.`, `::`) is refused, as are relative program paths like `./script`; use a command name or an absolute path.
+- **Limits.** It runs one command per file (there is no batch form), and it protects the directories along the path, not the file itself. As with `find -execdir`, what the command does with `./NAME` (e.g. following a symlink at that name) is up to the command.
 
 Commands inherit arfind's terminal, so interactive programs work. With `--exec` they run one after another (an editor opens once per file); `-X` opens them all at once. Paths are not printed while running commands, and `--count` cannot be combined with them.
 

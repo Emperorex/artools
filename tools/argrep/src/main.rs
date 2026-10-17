@@ -15,8 +15,8 @@ use regex::Regex;
 use std::{
     collections::HashSet,
     fs,
-    io::{self, BufRead, IsTerminal},
-    path::PathBuf,
+    io::{self, BufRead, IsTerminal, Write},
+    path::{Path, PathBuf},
     sync::{Arc, atomic::Ordering},
     time::Instant,
 };
@@ -274,6 +274,14 @@ struct Args {
     )]
     files_without_match: bool,
 
+    /// With -l, -L or --files: end each file name with a NUL byte instead
+    /// of a newline, and print the name exactly as stored (no escaping,
+    /// no color). For safe pipelines with names containing spaces or
+    /// newlines: `argrep -l0 TODO . | xargs -0 sed -i ...`. Same as
+    /// ripgrep's -0/--null.
+    #[arg(short = '0', long = "null")]
+    null: bool,
+
     /// Print count of matching lines per file instead of the lines themselves
     #[arg(short = 'c', long = "count")]
     count_per_file: bool,
@@ -471,6 +479,13 @@ fn fail(message: &str, code: i32) -> ! {
 
 fn main() {
     let mut args = Args::parse();
+
+    // -0 only changes how file names are listed; anywhere else it would be
+    // silently ignored, which a script relying on NUL separators must not
+    // be left to discover by itself.
+    if args.null && !(args.files_with_matches || args.files_without_match || args.files) {
+        fail("-0/--null only applies to -l, -L and --files", 2);
+    }
 
     if args.files {
         // --files takes no QUERY — resolve_files_path decides whether the
@@ -762,28 +777,23 @@ fn main() {
     };
 
     if use_stdin {
-        grep_stdin(&config, &stats);
+        grep_stdin(&config, &stats, args.null);
     } else {
         let raw_path = args.path.as_deref().unwrap_or(".");
         let root_path = fs::canonicalize(raw_path).unwrap_or_else(|_| PathBuf::from(raw_path));
 
-        let line_number = config.line_number;
         let regex = config.regex.clone();
-        let files_with_matches = config.files_with_matches;
-        let files_without_match = config.files_without_match;
-        let files_only = config.files_only;
-        let count_per_file = config.count_per_file;
+        let mode = OutputMode {
+            names_only: config.files_with_matches
+                || config.files_without_match
+                || config.files_only,
+            count_per_file: config.count_per_file,
+            line_number: config.line_number,
+            null: args.null,
+        };
 
         parallel_grep(root_path, args.jobs, config, stats.clone(), move |result| {
-            print_result(
-                &result,
-                files_with_matches,
-                files_without_match,
-                files_only,
-                count_per_file,
-                line_number,
-                &regex,
-            );
+            print_result(&result, mode, &regex);
         });
     }
 
@@ -893,7 +903,7 @@ fn main() {
 
 /// Reads lines from stdin and prints those matching the config query.
 /// Used when argrep is invoked as part of a pipeline: cmd | argrep "pattern"
-fn grep_stdin(config: &argrep::SearchConfig, stats: &argrep::SearchStats) {
+fn grep_stdin(config: &argrep::SearchConfig, stats: &argrep::SearchStats, null: bool) {
     let stdin = io::stdin();
     let mut line_num = 0usize;
     let mut match_count = 0usize;
@@ -947,7 +957,7 @@ fn grep_stdin(config: &argrep::SearchConfig, stats: &argrep::SearchStats) {
                 // accumulate — print after EOF
             } else if config.files_with_matches {
                 // stdin has no filename — print "<stdin>" once then stop
-                println!("{}", "<stdin>".magenta());
+                print_file_name(Path::new("<stdin>"), null);
                 break;
             } else if config.files_without_match {
                 // -L: stdin just produced a match, so it's disqualified —
@@ -1047,7 +1057,7 @@ fn grep_stdin(config: &argrep::SearchConfig, stats: &argrep::SearchStats) {
     // -L wants to report. Unlike grep_file, there's no "file couldn't be
     // opened" case to guard against on the stdin path.
     if config.files_without_match && !config.quiet && match_count == 0 {
-        println!("{}", "<stdin>".magenta());
+        print_file_name(Path::new("<stdin>"), null);
     }
 }
 
@@ -1138,27 +1148,71 @@ fn print_stdin_line(line: &str, line_num: usize, is_context: bool, config: &argr
     }
 }
 
-/// Shared output formatter for parallel_grep results.
-fn print_result(
-    result: &argrep::MatchResult,
-    files_with_matches: bool,
-    files_without_match: bool,
-    files_only: bool,
+/// The exact bytes of a path, for `-0` output.
+fn path_bytes(path: &Path) -> std::borrow::Cow<'_, [u8]> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        std::borrow::Cow::Borrowed(path.as_os_str().as_bytes())
+    }
+    #[cfg(not(unix))]
+    {
+        std::borrow::Cow::Owned(path.to_string_lossy().into_owned().into_bytes())
+    }
+}
+
+/// Prints one file name for -l, -L or --files.
+///
+/// By default: escaped for the terminal (see `display_path`), colored, one
+/// per line. With `-0`: the exact bytes followed by a NUL, so `xargs -0` and
+/// other NUL-aware readers get every name back unchanged, including names
+/// with spaces, newlines or control characters. Flushed at once, because
+/// stdout is line-buffered, NUL-separated output never ends a line, and
+/// argrep exits through `process::exit`, which does not flush.
+fn print_file_name(path: &Path, null: bool) {
+    if null {
+        let mut out = io::stdout().lock();
+        let _ = out.write_all(&path_bytes(path));
+        let _ = out.write_all(b"\0");
+        let _ = out.flush();
+    } else {
+        println!("{}", display_path(path).magenta());
+    }
+}
+
+/// How results are printed, taken from the CLI flags once before the
+/// search starts.
+#[derive(Debug, Clone, Copy)]
+struct OutputMode {
+    /// -l, -L or --files: only file names are printed.
+    names_only: bool,
+    /// -c: one count per file.
     count_per_file: bool,
+    /// -n: line numbers.
     line_number: bool,
-    regex: &Regex,
-) {
+    /// -0: NUL-terminated, unescaped file names.
+    null: bool,
+}
+
+/// Shared output formatter for parallel_grep results.
+fn print_result(result: &argrep::MatchResult, mode: OutputMode, regex: &Regex) {
+    let OutputMode {
+        names_only,
+        count_per_file,
+        line_number,
+        null,
+    } = mode;
     if result.is_separator {
         println!("{}", "--".cyan());
         return;
     }
 
-    if files_with_matches || files_without_match || files_only {
+    if names_only {
         // -l, -L, and --files all emit the same bare filename result
         // (line_num: 0, no content) — what distinguishes them is entirely
         // *which files ever produced a result at all* (see grep_file/
         // emit_file_listing/grep_stdin), not how that result prints.
-        println!("{}", display_path(&result.file_path).magenta());
+        print_file_name(&result.file_path, null);
     } else if count_per_file {
         println!(
             "{}: {}",

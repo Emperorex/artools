@@ -162,6 +162,15 @@ How `-L` interacts with other flags:
 - **Unreadable files**: never reported by `-L`, in either direction. A file that fails to open isn't counted as "no match" (it was never actually searched), and neither is a file that fails partway through a read — only files that are opened successfully and read to EOF with zero matches are reported.
 - **`-v`**: not rejected — combining them means "files where every selected line matched", i.e. files with zero non-matching lines. A narrow but coherent combination, so it's allowed rather than forbidden.
 
+Use `-0`/`--null` with `-l`, `-L` or `--files` to end each file name with a NUL byte instead of a newline, for pipelines that must survive any file name:
+
+```
+argrep -l0 'TODO' src/ | xargs -0 sed -i 's/TODO/DONE/'
+argrep --files -0 --type rust . | xargs -0 wc -l
+```
+
+File names can contain spaces and even newlines, so a newline-separated list can't be split back into names reliably; NUL is the one byte a path can't contain. With `-0`, names are printed exactly as stored (no `\xHH` escaping, no color), since the reader is a program, not a terminal. Without `-0`, names stay escaped and newline-separated as usual (see Binary file handling). `-0` with any other output mode (matching lines, `-c`, `-o`) is a usage error rather than a silent no-op. Same flag as ripgrep's `-0`/`--null` and GNU grep's `-Z`.
+
 Use `-m`/`--max-count` to stop searching a file after `NUM` matching lines — useful for large logs and CI, where you often just need to know *whether* something matched, not every occurrence:
 
 ```
@@ -352,6 +361,7 @@ This is aimed squarely at rotated logs — `logrotate` compresses old logs as gz
 | `--max-count NUM`       | `-m`  | unlimited         | Stop searching a file after NUM matching lines (must be >= 1)                                                                                            |
 | `--files-with-matches`  | `-l`  | —                 | Print only filenames of files containing a match (conflicts with `-c`, `-L`)                                                                             |
 | `--files-without-match` | `-L`  | —                 | Print only filenames of files containing NO match (conflicts with `-l`, `-c`)                                                                            |
+| `--null`                | `-0`  | —                 | With `-l`, `-L` or `--files`: end each name with NUL instead of a newline, unescaped (for `xargs -0`)                                                     |
 | `--count`               | `-c`  | —                 | Print count of matching lines per file (conflicts with `-l`, `-L`)                                                                                       |
 | `--include PATTERN`     | —     | —                 | Only search files matching this glob (e.g. `"*.rs"`, `"*.log"`)                                                                                          |
 | `--exclude PATTERN`     | —     | —                 | Skip files matching this glob (e.g. `"*.min.js"`, `"*.lock"`); repeatable; wins over `--include` on overlap                                              |
@@ -475,6 +485,9 @@ argrep "ok" ./results.txt -v
 
 # List files missing a required header/marker
 argrep -L '^// SPDX-License-Identifier' . --include "*.rs"
+
+# Hand matching files to another command, safe for any file name
+argrep -l0 "deprecated_api" src/ | xargs -0 git add
 ```
 
 ### Stdin / pipeline mode
@@ -542,6 +555,7 @@ argrep -z 'OutOfMemoryError' /var/log/app/*.log.gz
 | Context lines          | `grep -C 2 "query" .`                          | `argrep -C 2 "query" .`                       |
 | Files only             | `grep -rl "query" .`                           | `argrep -l "query" .`                         |
 | Files without match    | `grep -rL "query" .`                           | `argrep -L "query" .`                         |
+| NUL-separated names    | `grep -rlZ "query" . \| xargs -0 …`            | `argrep -l0 "query" . \| xargs -0 …`          |
 | Search hidden files    | `grep -r "query" .` (no flag needed) *         | `argrep --hidden "query" .`                   |
 | Count per file         | `grep -rc "query" .`                           | `argrep -c "query" .`                         |
 | Invert match           | `grep -rv "query" .`                           | `argrep -v "query" .`                         |

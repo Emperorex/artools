@@ -340,6 +340,45 @@ This is aimed squarely at rotated logs — `logrotate` compresses old logs as gz
 
 `-z` has no effect combined with `--files`, since content — compressed or not — is never read in that mode either way.
 
+## JSON output
+
+`--json` prints results as JSON Lines (NDJSON): one JSON object per line, streamed, for CI, scripts and tooling. No parsing of `path:line:text`:
+
+```bash
+argrep 'TODO' src/ --json | jq -c 'select(.type == "match") | {path, line_number}'
+argrep 'TODO' src/ --json | jq -s 'last | .matched_lines'      # the summary is always last
+argrep -l 'deprecated' . --json | jq -r 'select(.type == "file") | .path'
+```
+
+```json
+{"type":"begin","path":"src/main.rs"}
+{"type":"match","path":"src/main.rs","line_number":12,"lines":{"text":"    // TODO: fix"},"submatches":[{"start":7,"end":11,"match":{"text":"TODO"}}]}
+{"type":"end","path":"src/main.rs","matched_lines":1}
+{"type":"summary","schema_version":1,"mode":"content","matched_lines":1,"files_with_matches":1,"files_searched":42,"bytes_read":81920,"errors":0,"elapsed_ms":3}
+```
+
+Event and field names follow `rg --json` where they overlap, so filters carry over in spirit, but fields are flat (no `data` wrapper) and `lines.text` has no trailing newline.
+
+### Schema (`schema_version: 1`)
+
+| `type`    | When | Fields |
+|-----------|------|--------|
+| `begin`   | Before a file's first event | `path` |
+| `match`   | A selected line | `path`, `line_number`, `lines.text`, `submatches` |
+| `context` | A `-A`/`-B`/`-C` line | same as `match` |
+| `end`     | After a file's last event | `path`, `matched_lines` |
+| `file`    | `-l`, `-L`, `--files`: one per listed file | `path` |
+| `summary` | Always the last line | `schema_version`, `mode`, `matched_lines`, `files_with_matches`, `files_searched`, `bytes_read`, `errors`, `elapsed_ms` |
+
+- `submatches` lists every match on the line: `start` and `end` are byte offsets into `lines.text`, `match.text` is the matched text. With `-r`, each submatch also has `replacement.text`, and `lines.text` stays the original line, so nothing is lost.
+- `mode` is `content` (default), `count` (`-c`: a `begin`/`end` pair per file with its count in `matched_lines`, no `match` events), `files_with_matches` (`-l`), `files_without_match` (`-L`) or `files` (`--files`).
+- `files_with_matches` is `null` with `-L` and `--files`, which never list the files that matched.
+- A file's events always appear together, from its `begin` to its `end`, even with many workers; files appear in no particular order.
+- Text and paths are exact: control characters are escaped by JSON (`\u001b`), never terminal-escaped, so a decoder gets the real bytes back. Invalid UTF-8 becomes U+FFFD. stdin is reported with the path `<stdin>`.
+- `schema_version` changes only for incompatible changes; new fields may be added without a bump.
+
+Combinations: `-o` adds nothing (every match is already under `submatches`) and is ignored, which also keeps `-A/-B/-C` working. `-q` and `-0` are rejected. Colour never appears. Exit codes are the same as without `--json` (see Exit codes).
+
 ## Options
 
 | Flag                    | Short | Default           | Description                                                                                                                                              |
@@ -361,6 +400,7 @@ This is aimed squarely at rotated logs — `logrotate` compresses old logs as gz
 | `--max-count NUM`       | `-m`  | unlimited         | Stop searching a file after NUM matching lines (must be >= 1)                                                                                            |
 | `--files-with-matches`  | `-l`  | —                 | Print only filenames of files containing a match (conflicts with `-c`, `-L`)                                                                             |
 | `--files-without-match` | `-L`  | —                 | Print only filenames of files containing NO match (conflicts with `-l`, `-c`)                                                                            |
+| `--json`                | —     | —                 | Print results as JSON Lines (begin/match/context/end, file, summary); see JSON output                                                                     |
 | `--null`                | `-0`  | —                 | With `-l`, `-L` or `--files`: end each name with NUL instead of a newline, unescaped (for `xargs -0`)                                                     |
 | `--count`               | `-c`  | —                 | Print count of matching lines per file (conflicts with `-l`, `-L`)                                                                                       |
 | `--include PATTERN`     | —     | —                 | Only search files matching this glob (e.g. `"*.rs"`, `"*.log"`)                                                                                          |
@@ -556,6 +596,7 @@ argrep -z 'OutOfMemoryError' /var/log/app/*.log.gz
 | Files only             | `grep -rl "query" .`                           | `argrep -l "query" .`                         |
 | Files without match    | `grep -rL "query" .`                           | `argrep -L "query" .`                         |
 | NUL-separated names    | `grep -rlZ "query" . \| xargs -0 …`            | `argrep -l0 "query" . \| xargs -0 …`          |
+| Machine-readable       | *(no equivalent)*                              | `argrep --json "query" .`                     |
 | Search hidden files    | `grep -r "query" .` (no flag needed) *         | `argrep --hidden "query" .`                   |
 | Count per file         | `grep -rc "query" .`                           | `argrep -c "query" .`                         |
 | Invert match           | `grep -rv "query" .`                           | `argrep -v "query" .`                         |

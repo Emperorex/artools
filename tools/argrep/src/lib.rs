@@ -13,7 +13,7 @@ use std::{
     io::{BufRead, BufReader, Cursor, Read},
     path::{Path, PathBuf},
     sync::{
-        Arc,
+        Arc, Mutex,
         atomic::{AtomicUsize, Ordering},
     },
     thread,
@@ -433,6 +433,12 @@ pub struct SearchConfig {
     /// the same incomplete-search treatment as above. 0 = unlimited. Has
     /// no effect on uncompressed files.
     pub max_decompressed_bytes: u64,
+    /// --json: results are printed as JSON events. Each file's results
+    /// are then delivered as one contiguous block (see `ResultSink`), so a
+    /// file's begin/match/end events never interleave with another file's,
+    /// and line content is passed on raw instead of terminal-escaped (the
+    /// JSON encoder escapes it).
+    pub json: bool,
 }
 
 /// Shared statistics counters
@@ -924,12 +930,60 @@ fn emit_file_listing(file_path: &Path, output_tx: &crossbeam_channel::Sender<Mat
     });
 }
 
+/// Serializes whole-file result blocks onto the output channel (see
+/// `ResultSink`). Sending on an unbounded channel never blocks, so the lock
+/// is only held for as long as it takes to queue one file's results.
+static FILE_BLOCK_ORDER: Mutex<()> = Mutex::new(());
+
+/// Where `grep_file` puts its results. In text mode each result is sent as
+/// soon as it exists, so output streams. In JSON mode the results of one
+/// file are kept until the file is done and then sent together, holding
+/// `FILE_BLOCK_ORDER`, so they arrive at the printer as one block even
+/// though several workers send concurrently (ripgrep buffers per file in
+/// parallel mode for the same reason).
+struct ResultSink<'a> {
+    tx: &'a crossbeam_channel::Sender<MatchResult>,
+    block: Option<Vec<MatchResult>>,
+}
+
+impl<'a> ResultSink<'a> {
+    fn new(tx: &'a crossbeam_channel::Sender<MatchResult>, per_file_blocks: bool) -> Self {
+        ResultSink {
+            tx,
+            block: per_file_blocks.then(Vec::new),
+        }
+    }
+
+    fn send(&mut self, result: MatchResult) {
+        match &mut self.block {
+            Some(block) => block.push(result),
+            None => {
+                let _ = self.tx.send(result);
+            }
+        }
+    }
+}
+
+impl Drop for ResultSink<'_> {
+    fn drop(&mut self) {
+        if let Some(block) = self.block.take()
+            && !block.is_empty()
+        {
+            let _order = FILE_BLOCK_ORDER.lock().unwrap_or_else(|e| e.into_inner());
+            for result in block {
+                let _ = self.tx.send(result);
+            }
+        }
+    }
+}
+
 pub fn grep_file(
     file_path: &Path,
     config: &SearchConfig,
     output_tx: &crossbeam_channel::Sender<MatchResult>,
     stats: &SearchStats,
 ) {
+    let mut sink = ResultSink::new(output_tx, config.json);
     let file = match File::open(file_path) {
         Ok(f) => f,
         Err(err) => {
@@ -1131,7 +1185,12 @@ pub fn grep_file(
         // gets packaged into a MatchResult below — matching itself always
         // uses the original `line`/`m.as_str()`, never this. See
         // sanitize_for_display's doc comment for why.
-        let clean_line = sanitize_for_display(line);
+        let clean_line = if config.json {
+            // JSON escapes control characters itself; keep the exact text.
+            std::borrow::Cow::Borrowed(line)
+        } else {
+            sanitize_for_display(line)
+        };
 
         // Apply -v inversion
         let should_emit = if config.invert {
@@ -1155,7 +1214,7 @@ pub fn grep_file(
 
             if config.files_with_matches {
                 // -l: emit the file once and stop reading further
-                let _ = output_tx.send(MatchResult {
+                sink.send(MatchResult {
                     file_path: file_path.to_path_buf(),
                     line_num: 0,
                     line_content: String::new(),
@@ -1185,7 +1244,7 @@ pub fn grep_file(
                         // -o with -r: each match's expansion on its own line.
                         for text in replaced_matches(&config.regex, line, replacement) {
                             let len = text.len();
-                            let _ = output_tx.send(MatchResult {
+                            sink.send(MatchResult {
                                 file_path: file_path.to_path_buf(),
                                 line_num,
                                 line_content: text,
@@ -1197,7 +1256,7 @@ pub fn grep_file(
                         }
                     } else {
                         for m in config.regex.find_iter(line) {
-                            let _ = output_tx.send(MatchResult {
+                            sink.send(MatchResult {
                                 file_path: file_path.to_path_buf(),
                                 line_num,
                                 line_content: sanitize_for_display(m.as_str()).to_string(),
@@ -1219,7 +1278,7 @@ pub fn grep_file(
                         };
 
                         if has_printed_anything && first_line_to_print > last_printed_line + 1 {
-                            let _ = output_tx.send(MatchResult {
+                            sink.send(MatchResult {
                                 file_path: file_path.to_path_buf(),
                                 line_num: 0,
                                 line_content: String::new(),
@@ -1232,7 +1291,7 @@ pub fn grep_file(
 
                         while let Some((b_num, b_content)) = before_buffer.pop_front() {
                             if b_num > last_printed_line {
-                                let _ = output_tx.send(MatchResult {
+                                sink.send(MatchResult {
                                     file_path: file_path.to_path_buf(),
                                     line_num: b_num,
                                     line_content: b_content,
@@ -1255,7 +1314,7 @@ pub fn grep_file(
                         }
                         None => (clean_line.to_string(), None),
                     };
-                    let _ = output_tx.send(MatchResult {
+                    sink.send(MatchResult {
                         file_path: file_path.to_path_buf(),
                         line_num,
                         line_content,
@@ -1286,7 +1345,7 @@ pub fn grep_file(
             && !config.files_without_match
         {
             if after_remaining > 0 {
-                let _ = output_tx.send(MatchResult {
+                sink.send(MatchResult {
                     file_path: file_path.to_path_buf(),
                     line_num,
                     line_content: clean_line.to_string(),
@@ -1310,7 +1369,7 @@ pub fn grep_file(
 
     // -c: emit one result per file with the total count
     if config.count_per_file {
-        let _ = output_tx.send(MatchResult {
+        sink.send(MatchResult {
             file_path: file_path.to_path_buf(),
             line_num: 0,
             line_content: String::new(),
@@ -1331,7 +1390,7 @@ pub fn grep_file(
     // the same global matched_lines/exit-code contract as everything
     // else, so -q + -L needs no special-cased exit code.
     if config.files_without_match && !config.quiet && match_count == 0 && !had_io_error {
-        let _ = output_tx.send(MatchResult {
+        sink.send(MatchResult {
             file_path: file_path.to_path_buf(),
             line_num: 0,
             line_content: String::new(),

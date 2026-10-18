@@ -1,3 +1,5 @@
+mod json_output;
+
 use arcommon::{
     filetypes::{type_globs, type_name_parser},
     jobs::{MAX_JOBS, default_jobs},
@@ -11,13 +13,14 @@ use clap::Parser;
 use clap::builder::TypedValueParser as _;
 use colored::Colorize;
 use glob::Pattern;
+use json_output::{JsonPrinter, Mode as JsonMode, Totals};
 use regex::Regex;
 use std::{
     collections::HashSet,
     fs,
     io::{self, BufRead, IsTerminal, Write},
     path::{Path, PathBuf},
-    sync::{Arc, atomic::Ordering},
+    sync::{Arc, Mutex, atomic::Ordering},
     time::Instant,
 };
 
@@ -282,6 +285,16 @@ struct Args {
     #[arg(short = '0', long = "null")]
     null: bool,
 
+    /// Print results as JSON Lines (one JSON object per line) for scripts
+    /// and CI: begin/match/context/end events per file, file events for
+    /// -l/-L/--files, and a final summary with schema_version. Field names
+    /// follow `rg --json`; see the README for the schema. Text and paths
+    /// are exact (JSON-escaped, never terminal-escaped). With -r, each
+    /// submatch carries its replacement; -o adds nothing, since every
+    /// match is already listed under "submatches".
+    #[arg(long, conflicts_with_all = ["quiet", "null"])]
+    json: bool,
+
     /// Print count of matching lines per file instead of the lines themselves
     #[arg(short = 'c', long = "count")]
     count_per_file: bool,
@@ -485,6 +498,12 @@ fn main() {
     // be left to discover by itself.
     if args.null && !(args.files_with_matches || args.files_without_match || args.files) {
         fail("-0/--null only applies to -l, -L and --files", 2);
+    }
+    // --json always lists each match's text and offsets under
+    // "submatches", so -o has nothing to add; dropping it here also keeps
+    // -A/-B/-C working, which -o would otherwise switch off.
+    if args.json {
+        args.only_matching = false;
     }
 
     if args.files {
@@ -717,6 +736,21 @@ fn main() {
     }
     let respect_gitignore = !args.no_ignore;
 
+    // --json reports each replacement next to its submatch and keeps the
+    // line exactly as read, so the search itself runs without -r.
+    let json_replacement = if args.json { args.replace.take() } else { None };
+    let json_mode = if args.files {
+        JsonMode::Files
+    } else if args.files_with_matches {
+        JsonMode::FilesWithMatches
+    } else if args.files_without_match {
+        JsonMode::FilesWithoutMatch
+    } else if args.count_per_file {
+        JsonMode::Count
+    } else {
+        JsonMode::Content
+    };
+
     let config = Arc::new(SearchConfig {
         regex,
         // Cosmetic/informational only (not used for matching — that's
@@ -753,6 +787,7 @@ fn main() {
         replace: args.replace.clone(),
         max_line_bytes: usize::try_from(args.max_line_size).unwrap_or(usize::MAX),
         max_decompressed_bytes: args.max_decompressed_size,
+        json: args.json,
     });
 
     let stats = SearchStats::new();
@@ -776,8 +811,34 @@ fn main() {
         }
     };
 
+    let json_printer = args.json.then(|| {
+        Arc::new(Mutex::new(JsonPrinter::stdout(
+            json_mode,
+            config.regex.clone(),
+            json_replacement.clone(),
+        )))
+    });
+
     if use_stdin {
-        grep_stdin(&config, &stats, args.null);
+        let mut guard = json_printer.as_ref().map(|p| p.lock().unwrap());
+        let out = StdinOut {
+            null: args.null,
+            json: guard.as_deref_mut(),
+        };
+        grep_stdin(&config, &stats, out);
+    } else if let Some(printer) = &json_printer {
+        let raw_path = args.path.as_deref().unwrap_or(".");
+        let root_path = fs::canonicalize(raw_path).unwrap_or_else(|_| PathBuf::from(raw_path));
+        let printer = Arc::clone(printer);
+        parallel_grep(
+            root_path,
+            args.jobs,
+            config.clone(),
+            stats.clone(),
+            move |result| {
+                printer.lock().unwrap().result(&result);
+            },
+        );
     } else {
         let raw_path = args.path.as_deref().unwrap_or(".");
         let root_path = fs::canonicalize(raw_path).unwrap_or_else(|_| PathBuf::from(raw_path));
@@ -798,6 +859,23 @@ fn main() {
     }
 
     let duration = start_time.elapsed();
+
+    // Written before the exit-status logic below, which leaves through
+    // process::exit (no destructors, no implicit flush).
+    if let Some(printer) = &json_printer {
+        printer.lock().unwrap().finish(Totals {
+            matched_lines: stats.matched_lines.load(Ordering::Relaxed),
+            // stdin is one input, though no file was opened for it.
+            files_searched: if use_stdin {
+                1
+            } else {
+                stats.total_files.load(Ordering::Relaxed)
+            },
+            bytes_read: stats.bytes_read.load(Ordering::Relaxed),
+            errors: stats.io_errors.load(Ordering::Relaxed),
+            elapsed_ms: duration.as_millis(),
+        });
+    }
 
     // --stats and --debug both print this summary block — --debug
     // additionally prints per-file/per-dir operational error lines as it
@@ -903,7 +981,74 @@ fn main() {
 
 /// Reads lines from stdin and prints those matching the config query.
 /// Used when argrep is invoked as part of a pipeline: cmd | argrep "pattern"
-fn grep_stdin(config: &argrep::SearchConfig, stats: &argrep::SearchStats, null: bool) {
+/// Where `grep_stdin` writes: the usual text output, or `--json` events.
+/// JSON events are built from the same `MatchResult` records the file
+/// search produces, so both paths share one JSON writer.
+struct StdinOut<'a> {
+    /// `-0`: NUL-terminated name for -l/-L.
+    null: bool,
+    json: Option<&'a mut JsonPrinter<io::Stdout>>,
+}
+
+impl StdinOut<'_> {
+    const NAME: &'static str = "<stdin>";
+
+    fn record(
+        line_num: usize,
+        text: &str,
+        is_context: bool,
+        count: Option<usize>,
+    ) -> argrep::MatchResult {
+        argrep::MatchResult {
+            file_path: PathBuf::from(Self::NAME),
+            line_num,
+            line_content: text.to_string(),
+            count,
+            is_context,
+            is_separator: false,
+            highlights: None,
+        }
+    }
+
+    /// -l / -L: the input's name.
+    fn name(&mut self) {
+        match &mut self.json {
+            Some(j) => j.result(&Self::record(0, "", false, None)),
+            None => print_file_name(Path::new(Self::NAME), self.null),
+        }
+    }
+
+    /// A matching or context line.
+    fn line(
+        &mut self,
+        text: &str,
+        line_num: usize,
+        is_context: bool,
+        config: &argrep::SearchConfig,
+    ) {
+        match &mut self.json {
+            Some(j) => j.result(&Self::record(line_num, text, is_context, None)),
+            None => print_stdin_line(text, line_num, is_context, config),
+        }
+    }
+
+    /// The "--" between context groups (text output only).
+    fn separator(&mut self) {
+        if self.json.is_none() {
+            println!("{}", "--".cyan());
+        }
+    }
+
+    /// -c: the count at EOF.
+    fn count(&mut self, n: usize) {
+        match &mut self.json {
+            Some(j) => j.result(&Self::record(0, "", false, Some(n))),
+            None => println!("{}: {}", Self::NAME.magenta(), n.to_string().green()),
+        }
+    }
+}
+
+fn grep_stdin(config: &argrep::SearchConfig, stats: &argrep::SearchStats, mut out: StdinOut<'_>) {
     let stdin = io::stdin();
     let mut line_num = 0usize;
     let mut match_count = 0usize;
@@ -957,7 +1102,7 @@ fn grep_stdin(config: &argrep::SearchConfig, stats: &argrep::SearchStats, null: 
                 // accumulate — print after EOF
             } else if config.files_with_matches {
                 // stdin has no filename — print "<stdin>" once then stop
-                print_file_name(Path::new("<stdin>"), null);
+                out.name();
                 break;
             } else if config.files_without_match {
                 // -L: stdin just produced a match, so it's disqualified —
@@ -991,12 +1136,12 @@ fn grep_stdin(config: &argrep::SearchConfig, stats: &argrep::SearchStats, null: 
                     };
 
                     if has_printed_anything && first_line_to_print > last_printed_line + 1 {
-                        println!("{}", "--".cyan());
+                        out.separator();
                     }
 
                     while let Some((b_num, b_content)) = before_buffer.pop_front() {
                         if b_num > last_printed_line {
-                            print_stdin_line(&b_content, b_num, true, config);
+                            out.line(&b_content, b_num, true, config);
                             last_printed_line = b_num;
                         }
                     }
@@ -1007,7 +1152,7 @@ fn grep_stdin(config: &argrep::SearchConfig, stats: &argrep::SearchStats, null: 
                         let r = replace_matches(&config.regex, &line, replacement);
                         print_stdin_highlighted(&r.text, &r.spans, line_num, config);
                     }
-                    None => print_stdin_line(&line, line_num, false, config),
+                    None => out.line(&line, line_num, false, config),
                 }
                 last_printed_line = line_num;
                 has_printed_anything = true;
@@ -1029,7 +1174,7 @@ fn grep_stdin(config: &argrep::SearchConfig, stats: &argrep::SearchStats, null: 
             && !config.files_without_match
         {
             if after_remaining > 0 {
-                print_stdin_line(&line, line_num, true, config);
+                out.line(&line, line_num, true, config);
                 last_printed_line = line_num;
                 after_remaining -= 1;
             }
@@ -1044,11 +1189,7 @@ fn grep_stdin(config: &argrep::SearchConfig, stats: &argrep::SearchStats, null: 
     }
 
     if config.count_per_file && !config.quiet {
-        println!(
-            "{}: {}",
-            "<stdin>".magenta(),
-            match_count.to_string().green()
-        );
+        out.count(match_count);
     }
 
     // -L: only reachable here if the loop ran to completion (EOF) without
@@ -1057,7 +1198,7 @@ fn grep_stdin(config: &argrep::SearchConfig, stats: &argrep::SearchStats, null: 
     // -L wants to report. Unlike grep_file, there's no "file couldn't be
     // opened" case to guard against on the stdin path.
     if config.files_without_match && !config.quiet && match_count == 0 {
-        print_file_name(Path::new("<stdin>"), null);
+        out.name();
     }
 }
 

@@ -75,6 +75,7 @@ fn default_config(query: &str, ignore_case: bool) -> std::sync::Arc<argrep::Sear
         replace: None,
         max_line_bytes: argrep::DEFAULT_MAX_LINE_BYTES,
         max_decompressed_bytes: argrep::DEFAULT_MAX_DECOMPRESSED_BYTES,
+        json: false,
     })
 }
 
@@ -235,6 +236,7 @@ fn compressed_config(query: &str, search_compressed: bool) -> StdArc<SearchConfi
         replace: None,
         max_line_bytes: argrep::DEFAULT_MAX_LINE_BYTES,
         max_decompressed_bytes: argrep::DEFAULT_MAX_DECOMPRESSED_BYTES,
+        json: false,
     })
 }
 
@@ -531,6 +533,7 @@ fn multi_pattern_config(patterns: &[&str], ignore_case: bool) -> StdArc<SearchCo
         replace: None,
         max_line_bytes: argrep::DEFAULT_MAX_LINE_BYTES,
         max_decompressed_bytes: argrep::DEFAULT_MAX_DECOMPRESSED_BYTES,
+        json: false,
     })
 }
 
@@ -903,6 +906,7 @@ fn hidden_config(query: &str, hidden: bool, no_ignore: bool) -> StdArc<SearchCon
         replace: None,
         max_line_bytes: argrep::DEFAULT_MAX_LINE_BYTES,
         max_decompressed_bytes: argrep::DEFAULT_MAX_DECOMPRESSED_BYTES,
+        json: false,
     })
 }
 
@@ -1068,6 +1072,7 @@ fn type_config(
         replace: None,
         max_line_bytes: argrep::DEFAULT_MAX_LINE_BYTES,
         max_decompressed_bytes: argrep::DEFAULT_MAX_DECOMPRESSED_BYTES,
+        json: false,
     })
 }
 
@@ -1225,6 +1230,7 @@ fn custom_ignore_dir_is_excluded() {
         replace: None,
         max_line_bytes: argrep::DEFAULT_MAX_LINE_BYTES,
         max_decompressed_bytes: argrep::DEFAULT_MAX_DECOMPRESSED_BYTES,
+        json: false,
     });
     let stats = SearchStats::new();
     let results: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
@@ -1292,6 +1298,7 @@ fn stats_counts_are_accurate() {
         replace: None,
         max_line_bytes: argrep::DEFAULT_MAX_LINE_BYTES,
         max_decompressed_bytes: argrep::DEFAULT_MAX_DECOMPRESSED_BYTES,
+        json: false,
     });
     let stats = SearchStats::new();
     let stats_clone = stats.clone();
@@ -1335,6 +1342,7 @@ fn stats_config(query: &str, exclude: &[&str]) -> StdArc<SearchConfig> {
         replace: None,
         max_line_bytes: argrep::DEFAULT_MAX_LINE_BYTES,
         max_decompressed_bytes: argrep::DEFAULT_MAX_DECOMPRESSED_BYTES,
+        json: false,
     })
 }
 
@@ -1494,6 +1502,7 @@ fn files_only_config(
         replace: None,
         max_line_bytes: argrep::DEFAULT_MAX_LINE_BYTES,
         max_decompressed_bytes: argrep::DEFAULT_MAX_DECOMPRESSED_BYTES,
+        json: false,
     })
 }
 
@@ -1660,6 +1669,7 @@ fn only_matching_output_escapes_control_characters_in_matched_text() {
         replace: None,
         max_line_bytes: argrep::DEFAULT_MAX_LINE_BYTES,
         max_decompressed_bytes: argrep::DEFAULT_MAX_DECOMPRESSED_BYTES,
+        json: false,
     });
     let results: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
     let r = Arc::clone(&results);
@@ -1708,6 +1718,7 @@ fn context_lines_with_control_characters_are_also_escaped() {
         replace: None,
         max_line_bytes: argrep::DEFAULT_MAX_LINE_BYTES,
         max_decompressed_bytes: argrep::DEFAULT_MAX_DECOMPRESSED_BYTES,
+        json: false,
     });
     let results: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
     let r = Arc::clone(&results);
@@ -1776,6 +1787,7 @@ fn control_characters_do_not_affect_whether_a_line_matches() {
             replace: None,
             max_line_bytes: argrep::DEFAULT_MAX_LINE_BYTES,
             max_decompressed_bytes: argrep::DEFAULT_MAX_DECOMPRESSED_BYTES,
+            json: false,
         })
     }
 
@@ -1859,6 +1871,7 @@ fn multiple_workers_find_same_matches_as_single_worker() {
             replace: None,
             max_line_bytes: argrep::DEFAULT_MAX_LINE_BYTES,
             max_decompressed_bytes: argrep::DEFAULT_MAX_DECOMPRESSED_BYTES,
+            json: false,
         });
         let results: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
         let r = Arc::clone(&results);
@@ -1948,6 +1961,7 @@ fn invert_returns_non_matching_lines() {
         replace: None,
         max_line_bytes: argrep::DEFAULT_MAX_LINE_BYTES,
         max_decompressed_bytes: argrep::DEFAULT_MAX_DECOMPRESSED_BYTES,
+        json: false,
     });
     let results: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
     let r = Arc::clone(&results);
@@ -2002,6 +2016,7 @@ fn invert_with_no_matches_returns_all_lines() {
         replace: None,
         max_line_bytes: argrep::DEFAULT_MAX_LINE_BYTES,
         max_decompressed_bytes: argrep::DEFAULT_MAX_DECOMPRESSED_BYTES,
+        json: false,
     });
     let results: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
     let r = Arc::clone(&results);
@@ -2062,6 +2077,7 @@ fn files_with_matches_returns_only_filenames() {
         replace: None,
         max_line_bytes: argrep::DEFAULT_MAX_LINE_BYTES,
         max_decompressed_bytes: argrep::DEFAULT_MAX_DECOMPRESSED_BYTES,
+        json: false,
     });
     let results: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
     let r = Arc::clone(&results);
@@ -2121,6 +2137,7 @@ fn files_with_matches_emits_each_file_once() {
         replace: None,
         max_line_bytes: argrep::DEFAULT_MAX_LINE_BYTES,
         max_decompressed_bytes: argrep::DEFAULT_MAX_DECOMPRESSED_BYTES,
+        json: false,
     });
     let results: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
     let r = Arc::clone(&results);
@@ -2195,6 +2212,7 @@ fn files_without_match_returns_only_unmatched_filenames() {
         replace: None,
         max_line_bytes: argrep::DEFAULT_MAX_LINE_BYTES,
         max_decompressed_bytes: argrep::DEFAULT_MAX_DECOMPRESSED_BYTES,
+        json: false,
     });
     let results: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
     let r = Arc::clone(&results);
@@ -2258,6 +2276,7 @@ fn files_without_match_emits_nothing_when_every_file_matches() {
         replace: None,
         max_line_bytes: argrep::DEFAULT_MAX_LINE_BYTES,
         max_decompressed_bytes: argrep::DEFAULT_MAX_DECOMPRESSED_BYTES,
+        json: false,
     });
     let results: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
     let r = Arc::clone(&results);
@@ -2324,6 +2343,7 @@ fn files_without_match_with_invert_reports_files_where_every_line_matches() {
         replace: None,
         max_line_bytes: argrep::DEFAULT_MAX_LINE_BYTES,
         max_decompressed_bytes: argrep::DEFAULT_MAX_DECOMPRESSED_BYTES,
+        json: false,
     });
     let results: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
     let r = Arc::clone(&results);
@@ -2383,6 +2403,7 @@ fn files_without_match_stops_reading_after_first_match() {
         replace: None,
         max_line_bytes: argrep::DEFAULT_MAX_LINE_BYTES,
         max_decompressed_bytes: argrep::DEFAULT_MAX_DECOMPRESSED_BYTES,
+        json: false,
     });
     let stats = SearchStats::new();
     let (output_tx, output_rx) = crossbeam_channel::unbounded();
@@ -2460,6 +2481,7 @@ fn files_without_match_excludes_unreadable_files() {
         replace: None,
         max_line_bytes: argrep::DEFAULT_MAX_LINE_BYTES,
         max_decompressed_bytes: argrep::DEFAULT_MAX_DECOMPRESSED_BYTES,
+        json: false,
     });
     let stats = SearchStats::new();
     let results: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
@@ -2528,6 +2550,7 @@ fn files_without_match_quiet_produces_no_output() {
         replace: None,
         max_line_bytes: argrep::DEFAULT_MAX_LINE_BYTES,
         max_decompressed_bytes: argrep::DEFAULT_MAX_DECOMPRESSED_BYTES,
+        json: false,
     });
 
     let call_count = Arc::new(AtomicUsize::new(0));
@@ -2598,6 +2621,7 @@ fn count_per_file_returns_correct_counts() {
         replace: None,
         max_line_bytes: argrep::DEFAULT_MAX_LINE_BYTES,
         max_decompressed_bytes: argrep::DEFAULT_MAX_DECOMPRESSED_BYTES,
+        json: false,
     });
     let results: Arc<Mutex<Vec<(String, usize)>>> = Arc::new(Mutex::new(Vec::new()));
     let r = Arc::clone(&results);
@@ -2666,6 +2690,7 @@ fn count_per_file_emits_result_for_every_file() {
         replace: None,
         max_line_bytes: argrep::DEFAULT_MAX_LINE_BYTES,
         max_decompressed_bytes: argrep::DEFAULT_MAX_DECOMPRESSED_BYTES,
+        json: false,
     });
     let results: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
     let r = Arc::clone(&results);
@@ -2736,6 +2761,7 @@ fn invert_with_count_counts_non_matching_lines() {
         replace: None,
         max_line_bytes: argrep::DEFAULT_MAX_LINE_BYTES,
         max_decompressed_bytes: argrep::DEFAULT_MAX_DECOMPRESSED_BYTES,
+        json: false,
     });
     let results: Arc<Mutex<Vec<(String, usize)>>> = Arc::new(Mutex::new(Vec::new()));
     let r = Arc::clone(&results);
@@ -2808,6 +2834,7 @@ fn invert_with_files_with_matches_returns_files_with_a_non_matching_line() {
         replace: None,
         max_line_bytes: argrep::DEFAULT_MAX_LINE_BYTES,
         max_decompressed_bytes: argrep::DEFAULT_MAX_DECOMPRESSED_BYTES,
+        json: false,
     });
     let results: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
     let r = Arc::clone(&results);
@@ -2878,6 +2905,7 @@ fn invert_with_context_builds_context_around_inverted_matches() {
         replace: None,
         max_line_bytes: argrep::DEFAULT_MAX_LINE_BYTES,
         max_decompressed_bytes: argrep::DEFAULT_MAX_DECOMPRESSED_BYTES,
+        json: false,
     });
     let results: Arc<Mutex<Vec<(String, bool)>>> = Arc::new(Mutex::new(Vec::new()));
     let r = Arc::clone(&results);
@@ -2955,6 +2983,7 @@ fn include_pattern_searches_only_matching_files() {
         replace: None,
         max_line_bytes: argrep::DEFAULT_MAX_LINE_BYTES,
         max_decompressed_bytes: argrep::DEFAULT_MAX_DECOMPRESSED_BYTES,
+        json: false,
     });
     let results: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
     let r = Arc::clone(&results);
@@ -3011,6 +3040,7 @@ fn include_pattern_no_files_match_returns_empty() {
         replace: None,
         max_line_bytes: argrep::DEFAULT_MAX_LINE_BYTES,
         max_decompressed_bytes: argrep::DEFAULT_MAX_DECOMPRESSED_BYTES,
+        json: false,
     });
     let results: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
     let r = Arc::clone(&results);
@@ -3063,6 +3093,7 @@ fn include_wildcard_matches_all_files() {
         replace: None,
         max_line_bytes: argrep::DEFAULT_MAX_LINE_BYTES,
         max_decompressed_bytes: argrep::DEFAULT_MAX_DECOMPRESSED_BYTES,
+        json: false,
     });
     let config_wild = StdArc::new(SearchConfig {
         regex: build_matcher(
@@ -3100,6 +3131,7 @@ fn include_wildcard_matches_all_files() {
         replace: None,
         max_line_bytes: argrep::DEFAULT_MAX_LINE_BYTES,
         max_decompressed_bytes: argrep::DEFAULT_MAX_DECOMPRESSED_BYTES,
+        json: false,
     });
 
     let run = |config: std::sync::Arc<argrep::SearchConfig>| {
@@ -3169,6 +3201,7 @@ fn before_context_includes_leading_lines() {
         replace: None,
         max_line_bytes: argrep::DEFAULT_MAX_LINE_BYTES,
         max_decompressed_bytes: argrep::DEFAULT_MAX_DECOMPRESSED_BYTES,
+        json: false,
     });
 
     let results: Arc<Mutex<Vec<(usize, String, bool)>>> = Arc::new(Mutex::new(Vec::new()));
@@ -3235,6 +3268,7 @@ fn after_context_includes_trailing_lines() {
         replace: None,
         max_line_bytes: argrep::DEFAULT_MAX_LINE_BYTES,
         max_decompressed_bytes: argrep::DEFAULT_MAX_DECOMPRESSED_BYTES,
+        json: false,
     });
 
     let results: Arc<Mutex<Vec<(usize, String, bool)>>> = Arc::new(Mutex::new(Vec::new()));
@@ -3304,6 +3338,7 @@ fn context_both_and_group_separator() {
         replace: None,
         max_line_bytes: argrep::DEFAULT_MAX_LINE_BYTES,
         max_decompressed_bytes: argrep::DEFAULT_MAX_DECOMPRESSED_BYTES,
+        json: false,
     });
 
     let results: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
@@ -3379,6 +3414,7 @@ fn query_is_a_regex_by_default() {
         replace: None,
         max_line_bytes: argrep::DEFAULT_MAX_LINE_BYTES,
         max_decompressed_bytes: argrep::DEFAULT_MAX_DECOMPRESSED_BYTES,
+        json: false,
     });
 
     let matches: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
@@ -3438,6 +3474,7 @@ fn fixed_strings_mode_matches_literally() {
         replace: None,
         max_line_bytes: argrep::DEFAULT_MAX_LINE_BYTES,
         max_decompressed_bytes: argrep::DEFAULT_MAX_DECOMPRESSED_BYTES,
+        json: false,
     });
 
     let matches: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
@@ -3509,6 +3546,7 @@ fn whole_word_matches_only_word_boundaries() {
         replace: None,
         max_line_bytes: argrep::DEFAULT_MAX_LINE_BYTES,
         max_decompressed_bytes: argrep::DEFAULT_MAX_DECOMPRESSED_BYTES,
+        json: false,
     });
 
     let matches: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
@@ -3570,6 +3608,7 @@ fn whole_line_matches_only_exact_line() {
         replace: None,
         max_line_bytes: argrep::DEFAULT_MAX_LINE_BYTES,
         max_decompressed_bytes: argrep::DEFAULT_MAX_DECOMPRESSED_BYTES,
+        json: false,
     });
 
     let matches: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
@@ -3626,6 +3665,7 @@ fn quiet_mode_produces_no_output() {
         replace: None,
         max_line_bytes: argrep::DEFAULT_MAX_LINE_BYTES,
         max_decompressed_bytes: argrep::DEFAULT_MAX_DECOMPRESSED_BYTES,
+        json: false,
     });
 
     let call_count = Arc::new(AtomicUsize::new(0));
@@ -3681,6 +3721,7 @@ fn quiet_mode_with_no_matches_reports_zero() {
         replace: None,
         max_line_bytes: argrep::DEFAULT_MAX_LINE_BYTES,
         max_decompressed_bytes: argrep::DEFAULT_MAX_DECOMPRESSED_BYTES,
+        json: false,
     });
 
     let call_count = Arc::new(AtomicUsize::new(0));
@@ -3729,6 +3770,7 @@ fn only_matching_emits_one_row_per_occurrence() {
         replace: None,
         max_line_bytes: argrep::DEFAULT_MAX_LINE_BYTES,
         max_decompressed_bytes: argrep::DEFAULT_MAX_DECOMPRESSED_BYTES,
+        json: false,
     });
 
     let matches: Arc<Mutex<Vec<(usize, String)>>> = Arc::new(Mutex::new(Vec::new()));
@@ -3784,6 +3826,7 @@ fn count_per_file_takes_priority_over_only_matching() {
         replace: None,
         max_line_bytes: argrep::DEFAULT_MAX_LINE_BYTES,
         max_decompressed_bytes: argrep::DEFAULT_MAX_DECOMPRESSED_BYTES,
+        json: false,
     });
 
     let matches: Arc<Mutex<Vec<Option<usize>>>> = Arc::new(Mutex::new(Vec::new()));
@@ -3833,6 +3876,7 @@ fn max_count_stops_after_n_matching_lines() {
         replace: None,
         max_line_bytes: argrep::DEFAULT_MAX_LINE_BYTES,
         max_decompressed_bytes: argrep::DEFAULT_MAX_DECOMPRESSED_BYTES,
+        json: false,
     });
 
     let matches: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
@@ -3881,6 +3925,7 @@ fn max_count_caps_the_count_per_file_total() {
         replace: None,
         max_line_bytes: argrep::DEFAULT_MAX_LINE_BYTES,
         max_decompressed_bytes: argrep::DEFAULT_MAX_DECOMPRESSED_BYTES,
+        json: false,
     });
 
     let matches: Arc<Mutex<Vec<Option<usize>>>> = Arc::new(Mutex::new(Vec::new()));
@@ -3932,6 +3977,7 @@ fn max_count_with_only_matching_counts_lines_not_occurrences() {
         replace: None,
         max_line_bytes: argrep::DEFAULT_MAX_LINE_BYTES,
         max_decompressed_bytes: argrep::DEFAULT_MAX_DECOMPRESSED_BYTES,
+        json: false,
     });
 
     let matches: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
@@ -3981,6 +4027,7 @@ fn max_count_still_flushes_trailing_context() {
         replace: None,
         max_line_bytes: argrep::DEFAULT_MAX_LINE_BYTES,
         max_decompressed_bytes: argrep::DEFAULT_MAX_DECOMPRESSED_BYTES,
+        json: false,
     });
 
     let matches: Arc<Mutex<Vec<(String, bool)>>> = Arc::new(Mutex::new(Vec::new()));
@@ -4035,6 +4082,7 @@ fn exclude_skips_matching_files() {
         replace: None,
         max_line_bytes: argrep::DEFAULT_MAX_LINE_BYTES,
         max_decompressed_bytes: argrep::DEFAULT_MAX_DECOMPRESSED_BYTES,
+        json: false,
     });
 
     let results: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
@@ -4089,6 +4137,7 @@ fn exclude_wins_over_include_on_overlap() {
         replace: None,
         max_line_bytes: argrep::DEFAULT_MAX_LINE_BYTES,
         max_decompressed_bytes: argrep::DEFAULT_MAX_DECOMPRESSED_BYTES,
+        json: false,
     });
 
     let results: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
@@ -4138,6 +4187,7 @@ fn exclude_dir_glob_skips_matching_directories() {
         replace: None,
         max_line_bytes: argrep::DEFAULT_MAX_LINE_BYTES,
         max_decompressed_bytes: argrep::DEFAULT_MAX_DECOMPRESSED_BYTES,
+        json: false,
     });
 
     let results: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));

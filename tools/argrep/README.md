@@ -228,6 +228,14 @@ Built-in types (deliberately a small, hand-picked starter set rather than `ripgr
 
 `*.h` is under `c` only, not `cpp` — a bare `.h` file is far more commonly plain C in practice (C++ headers more often use `.hpp`/`.hh`/`.hxx`). If a codebase mixes both, `--type c --type cpp` together covers it.
 
+`--type-list` prints this table from the command line, one type per line, so you don't need the README to look up a name or its globs. It takes no QUERY or PATH and can't be combined with other options:
+
+```
+argrep --type-list                 # all built-in types
+argrep --type-list | grep rust     # rust: *.rs
+argrep --type rust 'fn ' .         # search only *.rs
+```
+
 `--type` and `--type-not` are both repeatable:
 
 ```
@@ -239,9 +247,9 @@ How `--type`/`--type-not` interact with `--include`/`--exclude` and each other:
 - **`--type` + `--include`**: **ANDed** — a file must satisfy both (unlike `--type`'s own multiple globs, or multiple `--type` flags, which are OR'd against each other).
 - **`--type-not` + `--exclude`**: checked together, either one excludes a file — same "any negative filter excludes" rule `--exclude` already follows.
 - **`--type` + `--type-not` on the same file**: `--type-not` wins, same "exclude wins" precedent as `--include`/`--exclude`.
-- An unknown type name (e.g. `--type cobol`) is a CLI parse-time error listing the known types, not a silently-empty filter.
+- An unknown type name (e.g. `--type cobol`) is a CLI parse-time error listing the known types (and pointing to `--type-list` for their globs), not a silently-empty filter.
 
-`--type-add` (define your own types), `--type-clear` (remove a built-in type), and `--type-list` (print this table from the CLI) are intentionally not included in this first pass — happy to add them if they'd be useful, but didn't want to build out a config-file-style type system before there's a real need for one.
+`--type-add` (define your own types) and `--type-clear` (remove a built-in type) are intentionally not included yet — happy to add them if they'd be useful, but didn't want to build out a config-file-style type system before there's a real need for one.
 
 Use `--exclude-dir PATTERN` to skip whole directories during traversal — matched against the directory's **basename only** (not the full path), same as GNU grep's `--exclude-dir`, and applied *before* a matching directory is ever handed to a worker thread, so excluded subtrees cost no traversal time:
 
@@ -407,6 +415,7 @@ Combinations: `-o` adds nothing (every match is already under `submatches`) and 
 | `--exclude PATTERN`     | —     | —                 | Skip files matching this glob (e.g. `"*.min.js"`, `"*.lock"`); repeatable; wins over `--include` on overlap                                              |
 | `--type NAME`           | —     | —                 | Only search files of this built-in type (e.g. `"rust"`, `"python"`); repeatable (OR'd); ANDed with `--include`                                           |
 | `--type-not NAME`       | —     | —                 | Skip files of this built-in type; repeatable; wins over `--type`/`--include` on overlap                                                                  |
+| `--type-list`           | —     | —                 | Print the built-in types and their globs (`rust: *.rs`), one per line, and exit; no QUERY needed                                                         |
 | `--exclude-dir PATTERN` | —     | built-in defaults | Skip directories matching this name or glob (e.g. `"node_modules"`, `"build*"`), matched by basename; repeatable; alias: `--ignore`                      |
 | `--no-ignore`           | —     | —                 | Disable the built-in directory defaults (`.git`, `node_modules`, `__pycache__`, `target`) — explicit `--exclude-dir`/`--ignore` still applies            |
 | `--hidden`              | —     | —                 | Search hidden files/directories (dot-prefixed names), independent of `--no-ignore` (see Usage above)                                                     |

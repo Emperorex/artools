@@ -1,7 +1,7 @@
 mod json_output;
 
 use arcommon::{
-    filetypes::{type_globs, type_name_parser},
+    filetypes::{type_globs, type_list},
     jobs::{MAX_JOBS, default_jobs},
 };
 use argrep::{
@@ -128,6 +128,13 @@ fn context_lines_parser(value: &str) -> Result<usize, String> {
 }
 
 /// CLI arguments for argrep
+/// clap value parser for `--type` / `--type-not`: the shared check, plus a
+/// pointer to `--type-list`, which shows each type's globs.
+fn type_name_parser(s: &str) -> Result<String, String> {
+    arcommon::filetypes::type_name_parser(s)
+        .map_err(|err| format!("{err}; run `argrep --type-list` to see their globs"))
+}
+
 #[derive(Parser, Debug)]
 #[command(
     author,
@@ -324,6 +331,12 @@ struct Args {
     #[arg(long = "type-not", value_parser = type_name_parser)]
     type_not: Vec<String>,
 
+    /// List the built-in types for --type/--type-not with their globs, one
+    /// per line (`rust: *.rs`), and exit. Takes no QUERY or PATH and can't
+    /// be combined with other options: it lists, it doesn't search.
+    #[arg(long = "type-list", exclusive = true)]
+    type_list: bool,
+
     /// Show NUM lines of leading context before matching lines
     #[arg(short = 'B', long = "before-context", value_parser = context_lines_parser)]
     before_context: Option<usize>,
@@ -492,6 +505,11 @@ fn fail(message: &str, code: i32) -> ! {
 
 fn main() {
     let mut args = Args::parse();
+
+    if args.type_list {
+        print!("{}", type_list());
+        return;
+    }
 
     // -0 only changes how file names are listed; anywhere else it would be
     // silently ignored, which a script relying on NUL separators must not

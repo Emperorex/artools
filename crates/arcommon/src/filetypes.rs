@@ -46,6 +46,15 @@ pub fn known_type_names() -> String {
         .join(", ")
 }
 
+/// The built-in types for `--type-list`: one `name: glob, glob` line per
+/// type, in table order, each ending with a newline.
+pub fn type_list() -> String {
+    TYPE_TABLE
+        .iter()
+        .map(|(name, globs)| format!("{name}: {}\n", globs.join(", ")))
+        .collect()
+}
+
 /// clap value parser for `--type` / `--type-not`: validates the name at
 /// parse time, so an unknown type is a usage error listing the known ones.
 pub fn type_name_parser(s: &str) -> Result<String, String> {
@@ -75,6 +84,19 @@ mod tests {
                 glob::Pattern::new(g).unwrap();
             }
         }
+    }
+
+    #[test]
+    fn type_list_has_one_line_per_type_in_table_order() {
+        let list = type_list();
+        let lines: Vec<&str> = list.lines().collect();
+        assert_eq!(lines.len(), TYPE_TABLE.len());
+        assert_eq!(lines[0], "rust: *.rs");
+        assert!(lines.contains(&"python: *.py, *.pyi"));
+        for ((name, globs), line) in TYPE_TABLE.iter().zip(&lines) {
+            assert_eq!(*line, format!("{name}: {}", globs.join(", ")));
+        }
+        assert!(list.ends_with('\n'));
     }
 
     #[test]

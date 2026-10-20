@@ -1,6 +1,6 @@
 use arcommon::jobs::{MAX_JOBS, default_jobs};
 use ardisk::{
-    Collect, DEFAULT_IGNORES, ScanConfig, ScanOutput,
+    Collect, DEFAULT_IGNORES, ScanConfig, ScanOutput, SizeUnits,
     age::{Age, MtimeFilter, check_window, parse_age},
     aggregate_sizes,
     bar::render_list_with_bars,
@@ -38,10 +38,11 @@ fn parse_count(s: &str) -> Result<u64, String> {
     })
 }
 
-/// Parses a human-readable size string into bytes.
+/// Parses a human-readable size string into bytes in `units`: with the
+/// default binary units `1KB` is 1024 bytes, with `--si` it is 1000.
 /// Supported suffixes: B, KB, MB, GB, TB (case-insensitive).
 /// Examples: "500B", "100KB", "10MB", "2GB", "1TB"
-fn parse_threshold(s: &str) -> Result<u64, String> {
+fn parse_size_in(s: &str, units: SizeUnits) -> Result<u64, String> {
     let s = s.trim();
     let (num_part, suffix) = s
         .find(|c: char| c.is_alphabetic())
@@ -63,17 +64,13 @@ fn parse_threshold(s: &str) -> Result<u64, String> {
         return Err(format!("Threshold must be a positive value, got '{}'.", s));
     }
 
-    const KB: f64 = 1024.0;
-    const MB: f64 = KB * 1024.0;
-    const GB: f64 = MB * 1024.0;
-    const TB: f64 = GB * 1024.0;
-
+    let kb = units.base() as f64;
     let multiplier = match suffix.to_uppercase().as_str() {
         "B" => 1.0,
-        "KB" => KB,
-        "MB" => MB,
-        "GB" => GB,
-        "TB" => TB,
+        "KB" => kb,
+        "MB" => kb * kb,
+        "GB" => kb * kb * kb,
+        "TB" => kb * kb * kb * kb,
         other => {
             return Err(format!(
                 "Unknown unit '{}'. Use B, KB, MB, GB, or TB.",
@@ -89,6 +86,30 @@ fn parse_threshold(s: &str) -> Result<u64, String> {
     }
 
     Ok(bytes as u64)
+}
+
+/// Parses a size in the default binary units (see [`parse_size_in`]).
+fn parse_threshold(s: &str) -> Result<u64, String> {
+    parse_size_in(s, SizeUnits::Binary)
+}
+
+/// A size as typed on the command line (`--min-size 1.5GB`). Checked when
+/// parsed, turned into bytes only once `--si` is known, since the same
+/// text means a different number of bytes in binary and SI units.
+#[derive(Debug, Clone, PartialEq)]
+struct SizeArg(String);
+
+impl SizeArg {
+    fn parse(s: &str) -> Result<SizeArg, String> {
+        parse_threshold(s)?;
+        Ok(SizeArg(s.to_string()))
+    }
+
+    fn bytes(&self, units: SizeUnits) -> u64 {
+        // Valid in binary units, so valid in SI: the same text is never
+        // more bytes with --si.
+        parse_size_in(&self.0, units).expect("validated when parsed")
+    }
 }
 
 /// When to draw usage bars in the flat directory list (`--bar`).
@@ -190,9 +211,16 @@ struct Args {
         // present, so --min-size would be silently accepted (and ignored)
         // next to every mode that conflicts with --duplicates.
         conflicts_with_all = ["largest_files", "by_type", "inodes", "max_depth", "threshold"],
-        value_parser = parse_threshold
+        value_parser = SizeArg::parse
     )]
-    min_size: Option<u64>,
+    min_size: Option<SizeArg>,
+
+    /// Use SI units, powers of 1000 (1 kB = 1000 bytes), as `du --si` and
+    /// drive vendors do, instead of the default powers of 1024. Applies
+    /// to every size printed and to sizes given in --threshold and
+    /// --min-size. JSON output stays in plain bytes either way.
+    #[arg(long, conflicts_with = "inodes")]
+    si: bool,
 
     /// Print the result as one JSON document on stdout instead of text.
     /// Works with every mode (directory report, --largest-files,
@@ -335,6 +363,15 @@ fn build_ignore_dirs(no_ignore: bool, extra: Vec<String>) -> HashSet<String> {
 fn main() {
     let args = Args::parse();
 
+    let units = if args.si {
+        SizeUnits::Si
+    } else {
+        SizeUnits::Binary
+    };
+    // Before anything is printed: progress, reports and errors all format
+    // sizes through this setting.
+    ardisk::set_size_units(units);
+
     let ignore_dirs = build_ignore_dirs(args.no_ignore, args.ignore.clone());
     let target_path = fs::canonicalize(&args.path).unwrap_or_else(|_| PathBuf::from(&args.path));
 
@@ -397,7 +434,11 @@ fn main() {
 
     // Phase 1: Parallel file scanning
     // Empty files are never duplicates-of-interest, so the floor is 1 byte.
-    let min_len = args.min_size.unwrap_or(1).max(1);
+    let min_len = args
+        .min_size
+        .as_ref()
+        .map_or(1, |size| size.bytes(units))
+        .max(1);
     let collect = if args.duplicates {
         Collect::Duplicates { min_len }
     } else if args.by_type {
@@ -458,7 +499,7 @@ fn main() {
         Some(t) => match if args.inodes {
             parse_count(t)
         } else {
-            parse_threshold(t)
+            parse_size_in(t, units)
         } {
             Ok(bytes) => Some(bytes),
             Err(e) => {
@@ -753,7 +794,7 @@ fn warn_unreadable(report: &DuplicateReport, debug: bool) {
 
 #[cfg(test)]
 mod tests {
-    use super::{Args, build_ignore_dirs, default_jobs, parse_threshold};
+    use super::{Args, SizeUnits, build_ignore_dirs, default_jobs, parse_threshold};
     use clap::Parser;
 
     // ── -j / --jobs boundary ─────────────────────────────────────────────────
@@ -1160,7 +1201,42 @@ mod tests {
     fn min_size_is_parsed_like_threshold() {
         let args =
             Args::try_parse_from(["ardisk", ".", "--duplicates", "--min-size", "1MB"]).unwrap();
-        assert_eq!(args.min_size, Some(parse_threshold("1MB").unwrap()));
+        let size = args.min_size.expect("--min-size given");
+        assert_eq!(
+            size.bytes(SizeUnits::Binary),
+            parse_threshold("1MB").unwrap()
+        );
+        assert_eq!(size.bytes(SizeUnits::Si), 1_000_000);
+    }
+
+    #[test]
+    fn sizes_are_read_in_the_chosen_units() {
+        use super::parse_size_in;
+        assert_eq!(parse_size_in("1KB", SizeUnits::Binary), Ok(1024));
+        assert_eq!(parse_size_in("1kb", SizeUnits::Si), Ok(1000));
+        assert_eq!(parse_size_in("1.5GB", SizeUnits::Si), Ok(1_500_000_000));
+        assert_eq!(parse_size_in("2TB", SizeUnits::Si), Ok(2_000_000_000_000));
+        assert_eq!(parse_size_in("10B", SizeUnits::Si), Ok(10));
+        assert!(parse_size_in("10", SizeUnits::Si).is_err());
+    }
+
+    #[test]
+    fn si_flag_parses_and_conflicts_with_inodes() {
+        assert!(Args::try_parse_from(["ardisk", ".", "--si"]).unwrap().si);
+        assert!(!Args::try_parse_from(["ardisk", "."]).unwrap().si);
+        assert!(Args::try_parse_from(["ardisk", ".", "--si", "--inodes"]).is_err());
+        for extra in [
+            &["--json"][..],
+            &["--largest-files", "3"],
+            &["--duplicates", "--min-size", "1MB"],
+            &["--by-type"],
+            &["--tree"],
+            &["--threshold", "1GB"],
+        ] {
+            let mut args = vec!["ardisk", ".", "--si"];
+            args.extend_from_slice(extra);
+            assert!(Args::try_parse_from(&args).is_ok(), "{args:?}");
+        }
     }
 
     #[test]

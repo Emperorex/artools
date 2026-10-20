@@ -26,7 +26,10 @@ use std::{
     collections::{BinaryHeap, HashMap, HashSet},
     fs,
     path::{Path, PathBuf},
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
 };
 use types::{TypeAccumulator, TypeTable};
 
@@ -703,6 +706,56 @@ pub fn aggregate_sizes(
     aggregated
 }
 
+/// How human-readable sizes are written and read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SizeUnits {
+    /// The default: powers of 1024, written `KB`, `MB`, `GB`, `TB`.
+    #[default]
+    Binary,
+    /// `--si`: powers of 1000, written `kB`, `MB`, `GB`, `TB`, as
+    /// `du --si` and drive vendors count.
+    Si,
+}
+
+impl SizeUnits {
+    /// Bytes in one `KB`/`kB`.
+    pub fn base(self) -> u64 {
+        match self {
+            SizeUnits::Binary => 1024,
+            SizeUnits::Si => 1000,
+        }
+    }
+
+    /// Labels for one base, base², base³, base⁴.
+    fn labels(self) -> [&'static str; 4] {
+        match self {
+            SizeUnits::Binary => ["KB", "MB", "GB", "TB"],
+            SizeUnits::Si => ["kB", "MB", "GB", "TB"],
+        }
+    }
+}
+
+/// The units every size in this process is written in. Set once by the
+/// binary from `--si` before anything is printed; a global because sizes
+/// are formatted in many places (reports, tree, bars, progress) that take
+/// plain `fn(u64) -> String` formatters, the same way `colored` keeps its
+/// on/off switch.
+static SI_UNITS: AtomicBool = AtomicBool::new(false);
+
+/// Chooses the units for all later size output.
+pub fn set_size_units(units: SizeUnits) {
+    SI_UNITS.store(units == SizeUnits::Si, Ordering::Relaxed);
+}
+
+/// The units set by [`set_size_units`] (binary unless changed).
+pub fn size_units() -> SizeUnits {
+    if SI_UNITS.load(Ordering::Relaxed) {
+        SizeUnits::Si
+    } else {
+        SizeUnits::Binary
+    }
+}
+
 /// How big a size is, which decides its colour in [`format_size`].
 enum SizeTier {
     Bytes,
@@ -713,22 +766,43 @@ enum SizeTier {
 }
 
 fn size_text(bytes: u64) -> (SizeTier, String) {
-    const KB: u64 = 1024;
-    const MB: u64 = KB * 1024;
-    const GB: u64 = MB * 1024;
-    const TB: u64 = GB * 1024;
+    size_text_in(bytes, size_units())
+}
 
-    if bytes >= TB {
-        (SizeTier::Tb, format!("{:.2} TB", bytes as f64 / TB as f64))
-    } else if bytes >= GB {
-        (SizeTier::Gb, format!("{:.2} GB", bytes as f64 / GB as f64))
-    } else if bytes >= MB {
-        (SizeTier::Mb, format!("{:.2} MB", bytes as f64 / MB as f64))
-    } else if bytes >= KB {
-        (SizeTier::Kb, format!("{:.2} KB", bytes as f64 / KB as f64))
+fn size_text_in(bytes: u64, units: SizeUnits) -> (SizeTier, String) {
+    let kb = units.base();
+    let (mb, gb, tb) = (kb * kb, kb * kb * kb, kb * kb * kb * kb);
+    let [lk, lm, lg, lt] = units.labels();
+
+    if bytes >= tb {
+        (
+            SizeTier::Tb,
+            format!("{:.2} {lt}", bytes as f64 / tb as f64),
+        )
+    } else if bytes >= gb {
+        (
+            SizeTier::Gb,
+            format!("{:.2} {lg}", bytes as f64 / gb as f64),
+        )
+    } else if bytes >= mb {
+        (
+            SizeTier::Mb,
+            format!("{:.2} {lm}", bytes as f64 / mb as f64),
+        )
+    } else if bytes >= kb {
+        (
+            SizeTier::Kb,
+            format!("{:.2} {lk}", bytes as f64 / kb as f64),
+        )
     } else {
         (SizeTier::Bytes, format!("{} B", bytes))
     }
+}
+
+/// [`format_size_plain`] in explicit units, independent of the global
+/// setting.
+pub fn format_size_in(bytes: u64, units: SizeUnits) -> String {
+    size_text_in(bytes, units).1
 }
 
 /// Formats raw bytes into human-readable strings (e.g., KB, MB, GB, TB),
@@ -764,6 +838,32 @@ mod tests {
     // speculatively — most directories have neither file, so at scale that
     // was a wasted open() per directory plus, with --debug on, a flood of
     // harmless "No such file" noise.
+
+    // ── Size units (--si) ────────────────────────────────────────────────────
+
+    #[test]
+    fn binary_and_si_units_format_differently() {
+        use super::{SizeUnits::*, format_size_in};
+        assert_eq!(format_size_in(999, Binary), "999 B");
+        assert_eq!(format_size_in(999, Si), "999 B");
+        assert_eq!(format_size_in(1000, Binary), "1000 B");
+        assert_eq!(format_size_in(1000, Si), "1.00 kB");
+        assert_eq!(format_size_in(1024, Binary), "1.00 KB");
+        assert_eq!(format_size_in(1024, Si), "1.02 kB");
+        assert_eq!(format_size_in(1_500_000, Binary), "1.43 MB");
+        assert_eq!(format_size_in(1_500_000, Si), "1.50 MB");
+        assert_eq!(format_size_in(5_000_000_000, Si), "5.00 GB");
+        assert_eq!(format_size_in(5_000_000_000, Binary), "4.66 GB");
+        assert_eq!(format_size_in(2_000_000_000_000, Si), "2.00 TB");
+        assert_eq!(format_size_in(1 << 40, Binary), "1.00 TB");
+    }
+
+    #[test]
+    fn binary_is_the_default_units() {
+        assert_eq!(super::SizeUnits::default(), super::SizeUnits::Binary);
+        assert_eq!(super::SizeUnits::Si.base(), 1000);
+        assert_eq!(super::SizeUnits::Binary.base(), 1024);
+    }
 
     // ── TopFiles ─────────────────────────────────────────────────────────────
 

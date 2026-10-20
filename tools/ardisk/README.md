@@ -37,6 +37,7 @@ ardisk [OPTIONS] [PATH]
 | `--duplicates`      | —     | —         | Report groups of files with identical content; read-only (see [Finding duplicate files](#finding-duplicate-files)) |
 | `--min-size SIZE`   | —     | `1B`      | With `--duplicates`: ignore files smaller than `SIZE` (e.g. `1MB`) |
 | `--inodes`          | —     | —         | Count inodes instead of bytes, like `du --inodes` (see [Counting inodes](#counting-inodes)) |
+| `--si`              | —     | —         | Use powers of 1000 (`kB`, `MB`) instead of 1024, for output and size arguments (see [Size units](#size-units)) |
 | `--json`            | —     | —         | Print the result as one JSON document on stdout (see [JSON output](#json-output)) |
 | `--include PATTERN` | —     | —         | Only count files matching this glob pattern (e.g. `"*.rs"`, `"*.mp4"`) |
 | `--older-than AGE`  | —     | —         | Only count files last modified at least `AGE` ago, e.g. `1y`, `6mo`, `30d` (see [Filtering by age](#filtering-by-age)) |
@@ -66,11 +67,27 @@ scanning: 214,880 dirs, 1,902,311 files, 182.40 GB, 41.3s
 
 ## Size units
 
-Supported in `--threshold`: `B`, `KB`, `MB`, `GB`, `TB` (case-insensitive).
+By default sizes use powers of 1024, like `du -h` and `dust`: `1 KB` is 1,024 bytes, `1 MB` is 1,048,576. `--si` switches to powers of 1000, like `du --si` and the sizes drive vendors print: `1 kB` is 1,000 bytes, `1 MB` is 1,000,000.
+
+```bash
+ardisk ~/Downloads --largest-files 1          #    1.43 MB  video.mp4
+ardisk ~/Downloads --largest-files 1 --si     #    1.50 MB  video.mp4
+```
+
+| Unit | Default    | `--si`     |
+|------|------------|------------|
+| `KB` | 1,024 B    | 1,000 B (`kB`) |
+| `MB` | 1,024² B   | 1,000² B   |
+| `GB` | 1,024³ B   | 1,000³ B   |
+| `TB` | 1,024⁴ B   | 1,000⁴ B   |
+
+`--si` applies to every size ardisk prints (reports, `--tree`, `--bar`, `--by-type`, `--duplicates`, `--progress`) and also to sizes you type, so they mean what the report shows: with `--si`, `--threshold 500MB` is 500,000,000 bytes. JSON output always carries plain byte counts, with or without `--si`. `--si` can't be combined with `--inodes`, which counts inodes rather than bytes.
+
+Suffixes in `--threshold` and `--min-size`: `B`, `KB`, `MB`, `GB`, `TB` (case-insensitive).
 
 ```bash
 ardisk . --threshold 500MB
-ardisk . --threshold 1.5GB
+ardisk . --threshold 1.5GB --si
 ```
 
 ## Filtering by age
@@ -596,6 +613,7 @@ ardisk / -j 8 --top 20
 | Total only          | `du -sh .`                         | `ardisk . --summarize --apparent-size`      |
 | Physical total      | `du -s .`                          | `ardisk . --summarize`                      |
 | Filter by size      | not supported                      | `ardisk . --threshold 1GB`                  |
+| SI units (1000)     | `du --si -s .`                     | `ardisk . --summarize --si`                 |
 | Filter by file type | not supported                      | `ardisk . --include "*.mp4"`                |
 | Space per file type | not supported                      | `ardisk . --by-type`                        |
 | Biggest files       | `find . -type f -printf '%s %p\n' \| sort -rn \| head` | `ardisk . --largest-files 20`      |

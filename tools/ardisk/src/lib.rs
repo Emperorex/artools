@@ -712,8 +712,7 @@ pub enum SizeUnits {
     /// The default: powers of 1024, written `KB`, `MB`, `GB`, `TB`.
     #[default]
     Binary,
-    /// `--si`: powers of 1000, written `kB`, `MB`, `GB`, `TB`, as
-    /// `du --si` and drive vendors count.
+    /// `--si`: powers of 1000, written `kB`, `MB`, `GB`, `TB`
     Si,
 }
 

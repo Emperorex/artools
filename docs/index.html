@@ -424,7 +424,7 @@
       display: flex;
       align-items: center;
       justify-content: space-between;
-      flex-wrap: gap;
+      flex-wrap: wrap;
       gap: 1rem;
     }
 
@@ -530,37 +530,50 @@
   <div class="tool-grid">
     <div class="tool-card">
       <div class="tool-card-header">
-        <span class="tool-name"><span class="ar">ar</span>find<span class="tool-ver">v0.2.4</span></span>
+        <span class="tool-name"><span class="ar">ar</span>find<span class="tool-ver">v0.2.5</span></span>
         <span class="tool-alt">replaces find</span>
       </div>
-      <p class="tool-desc">Parallel directory traversal with glob pattern matching, type filtering, and smart defaults that skip <code style="font-family:var(--mono);font-size:0.78rem">.git</code> and <code style="font-family:var(--mono);font-size:0.78rem">node_modules</code> automatically.</p>
+      <p class="tool-desc">Parallel directory traversal with glob matching, built-in file types, size and age filters, and smart defaults that skip <code style="font-family:var(--mono);font-size:0.78rem">.git</code> and <code style="font-family:var(--mono);font-size:0.78rem">node_modules</code> automatically. Runs commands on results without a shell, and prints NUL-separated paths for <code style="font-family:var(--mono);font-size:0.78rem">xargs -0</code>.</p>
       <div class="tool-flags">
         <span class="flag">--name</span>
         <span class="flag">-t f/d/l</span>
+        <span class="flag">--type</span>
+        <span class="flag">--extension</span>
         <span class="flag">--size</span>
+        <span class="flag">--older-than</span>
         <span class="flag">--empty</span>
         <span class="flag">--max-depth</span>
+        <span class="flag">--exclude</span>
+        <span class="flag">--exec</span>
+        <span class="flag">-X batch</span>
+        <span class="flag">--execdir</span>
+        <span class="flag">-0 print0</span>
         <span class="flag">--count</span>
+        <span class="flag">-x one-fs</span>
         <span class="flag">-H hidden</span>
       </div>
     </div>
 
     <div class="tool-card">
       <div class="tool-card-header">
-        <span class="tool-name"><span class="ar">ar</span>disk<span class="tool-ver">v0.2.8</span></span>
+        <span class="tool-name"><span class="ar">ar</span>disk<span class="tool-ver">v0.3.0</span></span>
         <span class="tool-alt">replaces du</span>
       </div>
-      <p class="tool-desc">Bottom-up parallel disk usage analysis. Shows the heaviest directories first with accurate rollup sizes using a single-pass DP algorithm. Also draws a tree view, lists the largest files, groups duplicates, breaks usage down by file type and counts inodes, with JSON output for scripts.</p>
+      <p class="tool-desc">Bottom-up parallel disk usage analysis. Shows the heaviest directories first with accurate rollup sizes using a single-pass DP algorithm. Also draws a tree view, lists the largest files, groups duplicates, breaks usage down by file type and counts inodes. Sizes in binary (KiB-style) or SI units, a live progress counter, and JSON output for scripts.</p>
       <div class="tool-flags">
         <span class="flag">--top N</span>
         <span class="flag">--max-depth</span>
         <span class="flag">--tree</span>
+        <span class="flag">--bar</span>
         <span class="flag">--exclude</span>
         <span class="flag">--largest-files</span>
         <span class="flag">--by-type</span>
         <span class="flag">--duplicates</span>
         <span class="flag">--inodes</span>
+        <span class="flag">--older-than</span>
+        <span class="flag">--si</span>
         <span class="flag">-x one-fs</span>
+        <span class="flag">--progress</span>
         <span class="flag">--json</span>
       </div>
     </div>
@@ -570,19 +583,29 @@
         <span class="tool-name"><span class="ar">ar</span>grep<span class="tool-ver">v0.3.1</span></span>
         <span class="tool-alt">replaces grep</span>
       </div>
-      <p class="tool-desc">Parallel text search across file trees. Full regex by default, with <code style="font-family:var(--mono);font-size:0.78rem">-F</code> for literal strings. Skips binaries automatically, supports piped stdin, and works as a drop-in for common grep workflows.</p>
+      <p class="tool-desc">Parallel text search across file trees. Full regex by default, with <code style="font-family:var(--mono);font-size:0.78rem">-F</code> for literal strings. Skips binaries and special files, searches gzip archives, filters by built-in file types, and emits JSON Lines or NUL-separated names for scripts. Works as a drop-in for common grep workflows.</p>
       <div class="tool-flags">
         <span class="flag">-i case</span>
+        <span class="flag">-S smart</span>
+        <span class="flag">-e / -f</span>
         <span class="flag">-F literal</span>
         <span class="flag">-w word</span>
         <span class="flag">-x line</span>
         <span class="flag">-n lines</span>
         <span class="flag">-v invert</span>
         <span class="flag">-o matched</span>
+        <span class="flag">-r replace</span>
+        <span class="flag">-A/-B/-C</span>
         <span class="flag">-l files</span>
         <span class="flag">-c count</span>
         <span class="flag">-m limit</span>
         <span class="flag">-q quiet</span>
+        <span class="flag">-z gzip</span>
+        <span class="flag">-0 null</span>
+        <span class="flag">--json</span>
+        <span class="flag">--type</span>
+        <span class="flag">--type-list</span>
+        <span class="flag">--stats</span>
         <span class="flag">--include</span>
         <span class="flag">--exclude</span>
         <span class="flag">--exclude-dir</span>
@@ -611,6 +634,18 @@
         <br>
         <br><span class="uc-comment"># Count empty files in a directory</span>
         <br><span class="uc-cmd">arfind</span> <span class="uc-arg">.</span> <span class="uc-flag">-t</span> <span class="uc-arg">f</span> <span class="uc-flag">--empty</span> <span class="uc-flag">--count</span>
+        <br>
+        <br><span class="uc-comment"># Python files untouched for six months</span>
+        <br><span class="uc-cmd">arfind</span> <span class="uc-arg">.</span> <span class="uc-flag">--type</span> <span class="uc-arg">python</span> <span class="uc-flag">--older-than</span> <span class="uc-arg">6mo</span>
+        <br>
+        <br><span class="uc-comment"># Run a command per result, no shell involved (preview first)</span>
+        <br><span class="uc-cmd">arfind</span> <span class="uc-arg">/var/log</span> <span class="uc-flag">--name</span> <span class="uc-arg">"*.log"</span> <span class="uc-flag">--older-than</span> <span class="uc-arg">90d</span> <span class="uc-flag">--dry-run</span> <span class="uc-flag">--exec</span> <span class="uc-arg">rm</span>
+        <br>
+        <br><span class="uc-comment"># On trees others can write to, avoid the symlink race</span>
+        <br><span class="uc-cmd">sudo arfind</span> <span class="uc-arg">/tmp</span> <span class="uc-flag">-t</span> <span class="uc-arg">f</span> <span class="uc-flag">--older-than</span> <span class="uc-arg">7d</span> <span class="uc-flag">--execdir</span> <span class="uc-arg">rm</span>
+        <br>
+        <br><span class="uc-comment"># Safe pipelines with any file name</span>
+        <br><span class="uc-cmd">arfind</span> <span class="uc-arg">.</span> <span class="uc-flag">--type</span> <span class="uc-arg">rust</span> <span class="uc-flag">-0</span> <span class="uc-pipe">|</span> <span class="uc-cmd">xargs</span> <span class="uc-flag">-0</span> <span class="uc-flag">-n1</span> <span class="uc-cmd">argrep</span> <span class="uc-flag">-l0</span> <span class="uc-arg">TODO</span>
       </div>
     </div>
 
@@ -643,6 +678,12 @@
         <br>
         <br><span class="uc-comment"># Out of inodes? Count them, staying on this volume</span>
         <br><span class="uc-cmd">ardisk</span> <span class="uc-arg">~</span> <span class="uc-flag">-x</span> <span class="uc-flag">--inodes</span>
+        <br>
+        <br><span class="uc-comment"># Sizes in powers of 1000, like Finder and drive vendors</span>
+        <br><span class="uc-cmd">ardisk</span> <span class="uc-arg">~</span> <span class="uc-flag">--si</span> <span class="uc-flag">--top</span> <span class="uc-arg">10</span>
+        <br>
+        <br><span class="uc-comment"># Live counter on a big scan, machine-readable result</span>
+        <br><span class="uc-cmd">ardisk</span> <span class="uc-arg">/data</span> <span class="uc-flag">--progress</span> <span class="uc-flag">--json</span> <span class="uc-pipe">&gt;</span> <span class="uc-arg">usage.json</span>
       </div>
     </div>
 
@@ -678,6 +719,24 @@
         <br>
         <br><span class="uc-comment"># Skip generated/vendor directories</span>
         <br><span class="uc-cmd">argrep</span> <span class="uc-arg">"TODO"</span> <span class="uc-arg">.</span> <span class="uc-flag">--exclude-dir</span> <span class="uc-arg">node_modules</span>
+        <br>
+        <br><span class="uc-comment"># Search only Rust and Python files</span>
+        <br><span class="uc-cmd">argrep</span> <span class="uc-arg">"unsafe"</span> <span class="uc-arg">.</span> <span class="uc-flag">--type</span> <span class="uc-arg">rust</span> <span class="uc-flag">--type</span> <span class="uc-arg">python</span>
+        <br>
+        <br><span class="uc-comment"># Which types exist?</span>
+        <br><span class="uc-cmd">argrep</span> <span class="uc-flag">--type-list</span>
+        <br>
+        <br><span class="uc-comment"># Search rotated, gzipped logs</span>
+        <br><span class="uc-cmd">argrep</span> <span class="uc-flag">-z</span> <span class="uc-arg">"timeout"</span> <span class="uc-arg">/var/log</span>
+        <br>
+        <br><span class="uc-comment"># Preview a rename (files are never changed)</span>
+        <br><span class="uc-cmd">argrep</span> <span class="uc-arg">"old_name"</span> <span class="uc-arg">src/</span> <span class="uc-flag">-r</span> <span class="uc-arg">"new_name"</span> <span class="uc-flag">-n</span>
+        <br>
+        <br><span class="uc-comment"># JSON Lines for scripts and editors</span>
+        <br><span class="uc-cmd">argrep</span> <span class="uc-arg">"TODO"</span> <span class="uc-arg">.</span> <span class="uc-flag">--json</span> <span class="uc-pipe">|</span> <span class="uc-cmd">jq</span> <span class="uc-arg">'select(.type=="match")'</span>
+        <br>
+        <br><span class="uc-comment"># NUL-separated file names for xargs -0</span>
+        <br><span class="uc-cmd">argrep</span> <span class="uc-flag">-l0</span> <span class="uc-arg">"FIXME"</span> <span class="uc-arg">.</span> <span class="uc-pipe">|</span> <span class="uc-cmd">xargs</span> <span class="uc-flag">-0</span> <span class="uc-cmd">wc</span> <span class="uc-flag">-l</span>
       </div>
     </div>
 

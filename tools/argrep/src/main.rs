@@ -1307,19 +1307,6 @@ fn print_stdin_line(line: &str, line_num: usize, is_context: bool, config: &argr
     }
 }
 
-/// The exact bytes of a path, for `-0` output.
-fn path_bytes(path: &Path) -> std::borrow::Cow<'_, [u8]> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::ffi::OsStrExt;
-        std::borrow::Cow::Borrowed(path.as_os_str().as_bytes())
-    }
-    #[cfg(not(unix))]
-    {
-        std::borrow::Cow::Owned(path.to_string_lossy().into_owned().into_bytes())
-    }
-}
-
 /// Prints one file name for -l, -L or --files.
 ///
 /// By default: escaped for the terminal (see `display_path`), colored, one
@@ -1331,7 +1318,7 @@ fn path_bytes(path: &Path) -> std::borrow::Cow<'_, [u8]> {
 fn print_file_name(path: &Path, null: bool) {
     if null {
         let mut out = io::stdout().lock();
-        let _ = out.write_all(&path_bytes(path));
+        let _ = out.write_all(&arcommon::fs::path_bytes(path));
         let _ = out.write_all(b"\0");
         let _ = out.flush();
     } else {

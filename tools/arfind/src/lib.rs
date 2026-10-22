@@ -143,8 +143,7 @@ pub struct Args {
     pub count: bool,
 
     /// End each path with a NUL byte instead of a newline and print it
-    /// exactly as stored (no escaping, no color), like find -print0 and
-    /// fd -0. For pipelines that must survive any file name:
+    /// exactly as stored (no escaping, no color)
     /// `arfind . --name '*.log' -0 | xargs -0 rm`. Pairs with argrep -0.
     #[arg(
         short = '0',

@@ -11,7 +11,8 @@ use colored::Colorize;
 use glob::Pattern;
 use std::{
     collections::HashSet,
-    fs, io,
+    fs,
+    io::{self, BufWriter, Write},
     path::PathBuf,
     sync::{Arc, Mutex, atomic::Ordering},
     time::{Instant, SystemTime},
@@ -285,6 +286,19 @@ fn main() {
                 exit_code = 1;
             }
         }
+    } else if args.print0 {
+        // -0: exact bytes, NUL-terminated. Buffered, since a listing can be
+        // millions of paths, and flushed once at the end: stdout's own
+        // buffer is line-based, and NUL-separated output never ends a line.
+        let out = Arc::new(Mutex::new(BufWriter::new(io::stdout())));
+        let sink = Arc::clone(&out);
+        parallel_find(root_path, args.jobs, config, stats.clone(), move |item| {
+            let mut w = sink.lock().unwrap();
+            let _ = w.write_all(&arcommon::fs::path_bytes(&item.path));
+            let _ = w.write_all(b"\0");
+        });
+        // Flushed before the statistics and the exit status below.
+        let _ = out.lock().unwrap().flush();
     } else {
         parallel_find(root_path, args.jobs, config, stats.clone(), move |item| {
             if !count_only {

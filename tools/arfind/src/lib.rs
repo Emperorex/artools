@@ -142,6 +142,16 @@ pub struct Args {
     #[arg(short = 'c', long)]
     pub count: bool,
 
+    /// End each path with a NUL byte instead of a newline and print it
+    /// exactly as stored (no escaping, no color)
+    /// `arfind . --name '*.log' -0 | xargs -0 rm`. Pairs with argrep -0.
+    #[arg(
+        short = '0',
+        long = "print0",
+        conflicts_with_all = ["count", "exec", "exec_batch", "execdir", "dry_run"]
+    )]
+    pub print0: bool,
+
     /// Run a command once for each result instead of printing it, like
     /// find -exec / fd -x. Everything after --exec up to a ';' argument (or
     /// the end of the line) is the command. Placeholders: {} path, {/} file

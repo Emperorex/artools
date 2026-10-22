@@ -35,6 +35,7 @@ arfind [OPTIONS] [PATH]
 | `--size SIZE`        | —     | —         | Filter by file size: `100MB` or `+100MB` (larger than), `-1KB` (smaller than)   |
 | `--empty`            | `-e`  | —         | Match only empty files (0 bytes) or empty directories (no children)             |
 | `--count`            | `-c`  | —         | Print total match count instead of paths                                        |
+| `--print0`           | `-0`  | —         | End each path with NUL instead of a newline, unescaped (for `xargs -0`; see [NUL-separated output](#nul-separated-output)) |
 | `--exec CMD...`      | —     | —         | Run `CMD` once per result, without a shell (see [Running commands](#running-commands)) |
 | `--exec-batch CMD...`| `-X`  | —         | Run `CMD` once with all results as arguments                                    |
 | `--execdir CMD...`   | —     | —         | Like `--exec`, but run from each result's directory with `./NAME` (safer on trees others can write to) |
@@ -184,6 +185,18 @@ arfind /System/Volumes/Data -x -t f --size +1GB   # macOS: just the data volume
 
 On macOS, `/` and your data live on separate APFS volumes joined by firmlinks (`/Users`, `/Applications`, ...), so `arfind / -x` stays on the small system volume. Search `/System/Volumes/Data` to cover your files. `-x` is Unix-only; elsewhere arfind prints a warning and searches normally. With `--debug`, each mount point it does not enter is reported on stderr.
 
+## NUL-separated output
+
+`-0` / `--print0` ends each path with a NUL byte instead of a newline, like `find -print0` and `fd -0`. File names can contain spaces and even newlines, so a newline-separated list can't be split back into names reliably; NUL is the one byte a path can't contain:
+
+```bash
+arfind . --name '*.log' --older-than 30d -0 | xargs -0 rm
+arfind . --type rust -0 | xargs -0 wc -l
+arfind src -t f -0 | xargs -0 -n1 argrep -l0 TODO | xargs -0 git add   # with argrep -0 (one PATH per run)
+```
+
+With `-0`, paths are printed exactly as stored: no `\xHH` escaping and no color, since the reader is a program, not a terminal (see Terminal safety). `-0` can't be combined with `--count` or the exec options, which print something other than paths. For running a command on each result, `--exec`/`--execdir` avoid the pipe altogether.
+
 ## Running commands
 
 `--exec` runs a command for every result, like `find -exec` or `fd -x`. `-X` / `--exec-batch` runs it once with all results, like `find -exec ... +` or `fd -X`:
@@ -245,6 +258,8 @@ Commands inherit arfind's terminal, so interactive programs work. With `--exec` 
 
 File names can contain ESC and other control characters, which a terminal would otherwise execute (clearing the screen, rewriting earlier lines, changing the window title). arfind prints every such character as a visible escape: a file named `x<ESC>[2J.txt` is listed as `x\x1b[2J.txt`. This covers C0 controls (including tab and newline), DEL and C1 controls (U+0080–U+009F).
 
+`-0`/`--print0` is the deliberate exception: it is for programs such as `xargs -0`, so it prints the exact bytes of each name (see [NUL-separated output](#nul-separated-output)).
+
 `--dry-run` writes names that contain control characters in `$'...'` form (`$'x\x1b[2J.txt'`), so the line is safe to print and still reproduces the exact name when pasted into bash, zsh or ksh. Commands run by `--exec`/`--exec-batch` always receive the exact, unescaped name.
 
 ## Examples
@@ -305,6 +320,7 @@ arfind /home -j 8 --name "*.txt"
 | Skip directory       | `find . -not -path '*/node_modules/*'` | automatic                            |
 | Respect `.gitignore` | manual (`grep`/exclude flags)          | automatic (`--no-ignore` to disable) |
 | Count results        | `find . \| wc -l`                      | `arfind . --count`                   |
+| NUL-separated paths  | `find . -print0 \| xargs -0 …`          | `arfind . -0 \| xargs -0 …`          |
 | Run per result       | `find . -name '*.rs' -exec wc -l {} \;` | `arfind . --type rust --exec wc -l`  |
 | Run once for all     | `find . -name '*.rs' -exec wc -l {} +`  | `arfind . --type rust -X wc -l`      |
 | Find empty files     | `find . -empty -type f`                | `arfind . -t f --empty`              |

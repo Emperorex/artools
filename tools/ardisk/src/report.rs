@@ -40,13 +40,20 @@ use std::{
 /// Version of the JSON document layout.
 pub const SCHEMA_VERSION: u32 = 1;
 
+/// How many items `--top N` lets through: `--top 0` means no limit, which
+/// is how a complete snapshot for `--diff` is taken. Documents still record
+/// the `top` that was given, so `0` there means "all".
+pub fn top_limit(top: usize) -> usize {
+    if top == 0 { usize::MAX } else { top }
+}
+
 // ── Selection shared by text and JSON output ────────────────────────────────
 
 /// What the directory report lists, i.e. the knobs behind `--top`,
 /// `--max-depth`, `--threshold`, `--include` and `--summarize`.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
 pub struct DirectoryQuery {
-    /// `--top`: maximum number of directories listed.
+    /// `--top`: maximum number of directories listed; 0 means all.
     pub top: usize,
     /// `--max-depth`: deepest level listed (the root is depth 0).
     pub max_depth: Option<usize>,
@@ -65,7 +72,11 @@ pub struct DirectoryQuery {
 
 impl DirectoryQuery {
     fn limit(&self) -> usize {
-        if self.summarize { 0 } else { self.top }
+        if self.summarize {
+            0
+        } else {
+            top_limit(self.top)
+        }
     }
 }
 
@@ -522,7 +533,7 @@ pub fn write_duplicates<W: Write>(
         root: &meta.root,
         lossy: 0,
     };
-    let limit = if summarize { 0 } else { top };
+    let limit = if summarize { 0 } else { top_limit(top) };
     let header = header(meta, "duplicates", true, &mut fmt);
     let groups = report
         .groups
@@ -606,7 +617,7 @@ pub fn write_by_type<W: Write>(
         root: &meta.root,
         lossy: 0,
     };
-    let limit = if summarize { 0 } else { top };
+    let limit = if summarize { 0 } else { top_limit(top) };
     let header = header(meta, "by_type", meta.apparent_size, &mut fmt);
     let types = table
         .rows
@@ -672,7 +683,7 @@ pub fn render_by_type_text(table: &TypeTable, top: usize, summarize: bool) -> St
         );
     }
 
-    let shown = &table.rows[..table.rows.len().min(top)];
+    let shown = &table.rows[..table.rows.len().min(top_limit(top))];
     let rest = &table.rows[shown.len()..];
 
     // (label, files, size, share) per line.

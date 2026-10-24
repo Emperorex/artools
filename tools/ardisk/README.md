@@ -26,10 +26,11 @@ ardisk [OPTIONS] [PATH]
 
 | Flag                | Short | Default   | Description                                                            |
 |---------------------|-------|-----------|------------------------------------------------------------------------|
-| `--top N`           | `-n`  | `20`      | Number of top directories to display                                   |
+| `--top N`           | `-n`  | `20`      | Number of top directories to display; `0` lists all (for `--diff` snapshots) |
 | `--max-depth N`     | —     | unlimited | Maximum depth of directories to display in the report                  |
 | `--threshold SIZE`  | —     | —         | Only show directories larger than this size (e.g. `100MB`, `1GB`)      |
 | `--summarize`       | `-s`  | —         | Print only the grand total for the root directory                      |
+| `--diff BEFORE AFTER` | —   | —         | Compare two `--json` snapshots instead of scanning (see [Comparing snapshots](#comparing-snapshots)) |
 | `--tree`            | —     | —         | Draw the directory report as a tree, biggest first (see [Tree view](#tree-view)) |
 | `--bar[=WHEN]`      | —     | `auto`    | Usage bar and percentage next to each directory: `auto` (terminal only), `always`, `never`; `--bar` alone means `always` (see [Usage bars](#usage-bars)) |
 | `--largest-files N` | —     | —         | List the `N` largest individual files instead of the directory report (see [Finding the largest files](#finding-the-largest-files)) |
@@ -348,6 +349,42 @@ ardisk /var --inodes -s                  # just the total
 
 In JSON the document has `"mode": "inodes"`, no `size_mode`, `params.threshold_inodes`, `summary.total_inodes` and entries of the form `{ "path": "var/lib", "inodes": 398212, "depth": 2, "kind": "directory" }`.
 
+## Comparing snapshots
+
+`--diff BEFORE AFTER` shows what changed between two runs: which directories grew, shrank, appeared or disappeared. Save a snapshot with `--json --top 0`, let time pass (a deploy, a cleanup, a week of logs), save another, and compare. No scan runs, so the comparison is instant and the same every time, which also makes it easy to use in CI:
+
+```bash
+ardisk /data --json --top 0 > before.json
+# ... time passes ...
+ardisk /data --json --top 0 > after.json
+
+ardisk --diff before.json after.json
+```
+
+```text
++ 120.00 MB  /data/logs  (1.00 GB → 1.12 GB)
++  12.10 MB  /data/cache  (new)
+-   3.20 MB  /data/tmp/old  (gone)
+-   3.20 MB  /data/tmp  (7.50 MB → 4.30 MB)
+= unchanged: 1,204 directories
+  total  1.40 GB → 1.53 GB  (+128.90 MB)
+```
+
+`+` is a directory that grew or appeared, `-` one that shrank or disappeared, biggest change first. Each line shows the change, then the size before and after, or `new` / `gone`. A directory's size includes everything below it, so a change also shows on its parents. The scanned root itself is the `total` line.
+
+```bash
+ardisk --diff before.json after.json --top 30            # more rows (--top 0 for all)
+ardisk --diff before.json after.json --threshold 10MB    # ignore changes under 10 MB
+ardisk --diff before.json after.json --si                # sizes in kB/MB/GB of 1000
+ardisk --diff before.json after.json --json              # machine-readable deltas
+ardisk /data --json --top 0 | ardisk --diff before.json -   # compare with right now
+```
+
+- **Save snapshots with `--top 0`.** A snapshot lists only what `--top` (default 20), `--max-depth` and `--threshold` let through. A directory missing from a complete snapshot really wasn't there, so it shows as new or gone. A directory missing from a partial snapshot may just have been below its cutoff, so ardisk doesn't guess: it skips it and warns on stderr that the snapshot is partial, saying how to save a complete one.
+- **Like with like.** Both snapshots must be directory reports of the same root, taken the same way: both disk usage or both `--apparent-size`, with the same `--include`, `--exclude`, `--ignore`, `--no-hidden`, `-x` and age filters. Anything else would compare different measurements, so ardisk refuses with a message saying what differs. Two `--inodes` snapshots can be compared too; then `--threshold` is a number of inodes.
+- **Options.** `--diff` is a mode of its own: it takes no PATH and works only with `--top`, `--threshold` (smallest change shown, in the snapshots' unit), `--si` and `--json`. `-` reads one of the snapshots from stdin.
+- Moves and renames show as one directory gone and another new; file contents are not compared.
+
 ## JSON output
 
 `--json` changes only the **output format**. It does not turn on `--largest-files`, `--duplicates` or `--by-type`; it serializes the result of whichever mode you picked:
@@ -380,7 +417,7 @@ Every document is one object with the same header:
 
 Paths in `entries` and `groups` are **relative to `root`**, use `/` as separator, and the root itself is `"."`. Sizes are integers in bytes. A path that is not valid UTF-8 is written with the invalid bytes replaced by U+FFFD, and ardisk prints a warning to stderr.
 
-The list obeys the same limits as the text report: `--top` (default 20) for directories, duplicate groups and file types, `--max-depth`, `--threshold`, and `--summarize`, which lists nothing and keeps only `summary`. Use `truncated` to tell whether a list was cut, and raise `--top` to get more. Ties in size are ordered by path, so output does not depend on thread count or timing.
+The list obeys the same limits as the text report: `--top` (default 20) for directories, duplicate groups and file types, `--max-depth`, `--threshold`, and `--summarize`, which lists nothing and keeps only `summary`. Use `truncated` to tell whether a list was cut, and raise `--top` to get more; `--top 0` lists everything (a JSON `params.top` of `0` means "no limit"). Ties in size are ordered by path, so output does not depend on thread count or timing.
 
 **`directories`**
 
@@ -495,9 +532,42 @@ ardisk ~ --by-type --top 100 --json \
 ardisk ~ --duplicates --min-size 1MB --summarize --json \
   | jq '.summary.potentially_reclaimable_bytes / 1048576'
 
-# save a snapshot for later comparison
-ardisk ~/Projects --exclude 'target/**' --json > projects.json
+# save a complete snapshot for later comparison with --diff
+ardisk ~/Projects --exclude 'target/**' --json --top 0 > projects.json
+
+# directories that grew by more than 100 MB since then
+ardisk ~/Projects --exclude 'target/**' --json --top 0 \
+  | ardisk --diff projects.json - --json --threshold 100MB \
+  | jq -r '.entries[] | select(.change == "grew" or .change == "new") | .path'
 ```
+
+**`diff`** (written by `--diff ... --json`, see [Comparing snapshots](#comparing-snapshots))
+
+```json
+{
+  "schema_version": 1,
+  "mode": "diff",
+  "root": "/data",
+  "unit": "bytes",
+  "size_mode": "disk",
+  "before": { "file": "before.json", "total": 1503238553, "complete": true },
+  "after":  { "file": "after.json",  "total": 1638400000, "complete": true },
+  "params": { "top": 20, "threshold": null },
+  "summary": { "total_delta": 135161447, "new": 1, "gone": 1, "grew": 2, "shrank": 1,
+               "unchanged": 1204, "not_comparable": 0, "below_threshold": 0 },
+  "entries": [
+    { "path": "logs",    "change": "grew", "before": 1048576000, "after": 1174405120, "delta": 125829120 },
+    { "path": "cache",   "change": "new",  "before": null,       "after": 12687769,   "delta": 12687769 },
+    { "path": "tmp/old", "change": "gone", "before": 3355443,    "after": null,       "delta": -3355443 }
+  ],
+  "truncated": false
+}
+```
+
+- `unit` is `"bytes"` or `"inodes"` (then `size_mode` is absent, and `before`/`after`/`delta`/`threshold` are counts).
+- `change` is `new`, `gone`, `grew` or `shrank`; `delta` is `after − before`, with a missing side counted as 0. Entries are ordered by the size of the change, biggest first, then by path.
+- `complete` tells whether a snapshot listed every directory. `not_comparable` counts directories listed in only one snapshot while the other is partial.
+- `truncated` is `true` when `--top` cut the list; the `summary` counts always cover every change.
 
 ## Excluding paths
 
@@ -633,5 +703,5 @@ ardisk / -j 8 --top 20
 | Code | Meaning                                                 |
 |------|---------------------------------------------------------|
 | `0`  | Success                                                 |
-| `1`  | Invalid `--threshold`/`--include`/`--exclude` value or config error |
+| `1`  | Invalid `--threshold`/`--include`/`--exclude` value or config error; `--diff` snapshots that can't be read or compared |
 | `2`  | Invalid CLI usage — bad or missing flag (e.g. `-j 0`, `--largest-files 0`) |

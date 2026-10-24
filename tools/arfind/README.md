@@ -40,6 +40,8 @@ arfind [OPTIONS] [PATH]
 | `--exec-batch CMD...`| `-X`  | —         | Run `CMD` once with all results as arguments                                    |
 | `--execdir CMD...`   | —     | —         | Like `--exec`, but run from each result's directory with `./NAME` (safer on trees others can write to) |
 | `--dry-run`          | —     | —         | With `--exec`/`-X`/`--execdir`: print the commands instead of running them      |
+| `--sort KEY`         | —     | —         | Sort results by `name`, `path`, `size` or `time`, ascending (see [Sorting results](#sorting-results)) |
+| `--reverse`          | —     | —         | With `--sort`: largest, newest or Z-A first                                     |
 | `--max-depth N`      | —     | unlimited | Maximum directory depth to recurse into                                         |
 | `--exclude GLOB`     | —     | —         | Hide files/dirs matching a gitignore-style glob, e.g. `"*.log"`, `"target/**"`, `"build/"`; repeatable (see [Excluding paths](#excluding-paths)) |
 | `--exclude-dir NAME` | —     | —         | Don't descend into directories with this name or glob (e.g. `vendor`, `"build*"`); repeatable; alias: `--ignore` |
@@ -197,6 +199,29 @@ arfind src -t f -0 | xargs -0 -n1 argrep -l0 TODO | xargs -0 git add   # with ar
 
 With `-0`, paths are printed exactly as stored: no `\xHH` escaping and no color, since the reader is a program, not a terminal (see Terminal safety). `-0` can't be combined with `--count` or the exec options, which print something other than paths. For running a command on each result, `--exec`/`--execdir` avoid the pipe altogether.
 
+## Sorting results
+
+arfind searches with several threads, so by default results appear in the order the workers find them, which changes from run to run. `--sort` prints them in a fixed order instead:
+
+| Key    | Order (ascending)                              | `--reverse`       |
+|--------|------------------------------------------------|-------------------|
+| `name` | file name only, A-Z; equal names by path       | Z-A               |
+| `path` | full path, so each directory's contents stay together | Z-A        |
+| `size` | smallest first                                 | largest first     |
+| `time` | modification time, oldest first                | newest first      |
+
+```bash
+arfind . -t f --sort size --reverse | head -20     # the 20 largest files
+arfind ~/Downloads -t f --sort time --reverse      # newest downloads first
+arfind . --type rust --sort name                   # by file name, wherever they live
+arfind src --type rust --sort path -0 | xargs -0 cat > all.rs   # concatenate in a stable order
+```
+
+- **Deterministic.** Names compare byte by byte (case-sensitive, like `LC_ALL=C sort`). Entries with the same key are ordered by path, ascending even with `--reverse`, so the same tree always gives the same output.
+- **Output starts when the search ends.** Sorting needs every result, so nothing is printed until the whole tree has been searched, and the results are held in memory.
+- **Size and time are the entry's own**, as with `--size` and `--older-than`: a symlink sorts by its own size and mtime, not its target's, and a directory by the size the filesystem reports for the directory itself, not the size of its contents (use `-t f` to sort files only, or `ardisk` for directory totals). An entry that vanishes during the search sorts last.
+- **Works with `-0` and the exec options.** `--exec`/`--execdir` run, and `-X` passes paths, in the sorted order; without `--sort` they use path order. `--sort` can't be combined with `--count`.
+
 ## Running commands
 
 `--exec` runs a command for every result, like `find -exec` or `fd -x`. `-X` / `--exec-batch` runs it once with all results, like `find -exec ... +` or `fd -X`:
@@ -230,7 +255,7 @@ Running commands on search results is powerful, so arfind adds a few guarantees:
 
 - **No shell.** The command is started directly, with every path as one separate argument. Nothing in a file name is ever interpreted: spaces, quotes, `;`, `$(...)`, backticks and newlines are just characters. For pipes or `&&`, call a shell yourself and pass the path as an argument: `--exec sh -c 'gzip -c "$1" > "$1.gz"' sh {}`.
 - **No option injection.** Results are absolute paths starting with `/`, so `{}`, `{//}` and `{.}` can never be mistaken for an option. `{/}` and `{/.}` are bare file names: when one starts an argument and the name starts with `-`, arfind passes `./-rf` instead of `-rf`, as `find -execdir` does. So `--exec ls {/}` on a file named `--version` lists `./--version` instead of running `ls --version`.
-- **Search first, then run.** The whole search finishes before the first command starts, and commands run one at a time in sorted path order. A command that renames, moves or deletes files cannot affect which files are found, so nothing is processed twice or skipped.
+- **Search first, then run.** The whole search finishes before the first command starts, and commands run one at a time in path order (or in `--sort` order). A command that renames, moves or deletes files cannot affect which files are found, so nothing is processed twice or skipped.
 - **The command can't be a result.** `--exec {}` (running the files you found) is rejected.
 - **Options in the wrong place are refused.** In `arfind . --exec rm -f --dry-run`, `--dry-run` would be passed to `rm` and the files deleted for real. If an argument of the command is spelled like one of arfind's long options, arfind refuses to run anything unless the command is ended with `;`, which tells it those words really are for the command (`--exec rsync --dry-run {} host: ';'`).
 - **`--dry-run`** prints each command, shell-quoted, instead of running it.
@@ -305,6 +330,9 @@ arfind ~ -t f --older-than 1y
 # Stay on this volume
 arfind / -x --name "*.conf"
 
+# The 20 largest files, biggest first
+arfind . -t f --sort size --reverse | head -20
+
 # Use multiple workers for large trees
 arfind /home -j 8 --name "*.txt"
 ```
@@ -328,6 +356,8 @@ arfind /home -j 8 --name "*.txt"
 | Modified > 30 days   | `find . -mtime +30`                    | `arfind . --older-than 30d`          |
 | Modified < 1 day     | `find . -mtime -1`                     | `arfind . --newer-than 1d`           |
 | Stay on one fs       | `find . -xdev`                         | `arfind . -x`                        |
+| Largest files first  | `find . -type f -printf '%s %p\n' \| sort -rn` | `arfind . -t f --sort size --reverse` |
+| Newest first         | `find . -printf '%T@ %p\n' \| sort -rn` | `arfind . --sort time --reverse`  |
 | Exclude by glob      | `find . -not -name '*.log'`            | `arfind . --exclude '*.log'`         |
 
 ## Performance

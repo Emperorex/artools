@@ -153,6 +153,11 @@ fn fail(message: &str) -> ! {
 fn main() {
     let args = Args::parse();
 
+    if args.type_list {
+        print!("{}", arcommon::filetypes::type_list());
+        return;
+    }
+
     if let Some(ref t) = args.file_type
         && t != "f"
         && t != "d"

@@ -31,6 +31,7 @@ arfind [OPTIONS] [PATH]
 | `--file-type KIND`   | `-t`  | —         | Filter by entry kind: `f` (file), `d` (directory), `l` (symlink)                |
 | `--type NAME`        | —     | —         | Only files of a built-in type, e.g. `rust`, `python`; same names as argrep (see [File types](#file-types)); repeatable |
 | `--type-not NAME`    | —     | —         | Skip files of a built-in type; repeatable; wins over `--type`/`--extension`     |
+| `--type-list`        | —     | —         | Print the built-in types and their globs (`rust: *.rs`), one per line, and exit |
 | `--extension EXT`    | —     | —         | Only files with this extension, e.g. `rs`, `.md`, `tar.gz` (case-insensitive); repeatable |
 | `--size SIZE`        | —     | —         | Filter by file size: `100MB` or `+100MB` (larger than), `-1KB` (smaller than)   |
 | `--empty`            | `-e`  | —         | Match only empty files (0 bytes) or empty directories (no children)             |
@@ -87,7 +88,19 @@ files, and does not read `.git/info/exclude` or a global git ignore file.
 
 ## File types
 
-`--type NAME` selects files by a built-in type. The names and globs are **the same as argrep's `--type`**, so `arfind . --type rust` lists exactly the files `argrep PATTERN . --type rust` would search:
+`--type NAME` selects files by a built-in type. The names and globs are **the same as argrep's `--type`**, so `arfind . --type rust` lists exactly the files `argrep PATTERN . --type rust` would search. `arfind --type-list` prints them, one `name: globs` line per type, exactly like `argrep --type-list`:
+
+```bash
+$ arfind --type-list
+rust: *.rs
+python: *.py, *.pyi
+...
+$ arfind --type-list | grep script     # which type covers .mjs?
+javascript: *.js, *.jsx, *.mjs, *.cjs
+typescript: *.ts, *.tsx
+```
+
+`--type-list` takes no PATH and no other options. The built-in types are:
 
 | Type         | Globs                             |
 |--------------|-----------------------------------|
@@ -125,7 +138,7 @@ How they combine:
 - They are **AND'ed** with everything else: `--name`, `-t`, `--size`, `--older-than`, ...
 - They select **files only**. While `--type` or `--extension` is active, directories are not listed (they are still searched); `--type-not` never hides a directory.
 - `-t` is short for `--file-type` (entry kind), not for `--type`. `--type f` is an error that points you to `-t f`.
-- An unknown type name is an error listing the known types.
+- An unknown type name is an error listing the known types and pointing to `--type-list`.
 
 ## Excluding paths
 

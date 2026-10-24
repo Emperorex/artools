@@ -1767,8 +1767,9 @@ mod tests {
 
     // ── --type / --type-not ────────────────────────────────────────────────
     // Deliberately a small, fixed built-in type table for now (see
-    // TYPE_TABLE's doc comment) — --type-add/--type-clear/--type-list are
-    // left for later, per the review that requested this feature.
+    // TYPE_TABLE's doc comment) — --type-add/--type-clear are left for
+    // later, per the review that requested this feature. --type-list is
+    // tested in tests/type_list_output.rs.
 
     #[test]
     fn type_defaults_to_empty() {

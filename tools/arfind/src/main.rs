@@ -131,16 +131,14 @@ fn collect(
     std::mem::take(&mut *found.lock().unwrap())
 }
 
-/// Writes one result as the unsorted output does: escaped, directories in
-/// bold blue, one per line; or with `-0` the exact path bytes and a NUL.
+/// Writes one result as the unsorted output does: escaped, colored by kind,
+/// one per line; or with `-0` the exact path bytes and a NUL.
 fn write_item(out: &mut impl Write, item: &MatchResult, print0: bool) -> io::Result<()> {
     if print0 {
         out.write_all(&arcommon::fs::path_bytes(&item.path))?;
         out.write_all(b"\0")
-    } else if item.is_dir {
-        writeln!(out, "{}", arcommon::display_path(&item.path).blue().bold())
     } else {
-        writeln!(out, "{}", arcommon::display_path(&item.path))
+        writeln!(out, "{}", item.display())
     }
 }
 
@@ -343,11 +341,7 @@ fn main() {
     } else {
         parallel_find(root_path, args.jobs, config, stats.clone(), move |item| {
             if !count_only {
-                if item.is_dir {
-                    println!("{}", arcommon::display_path(&item.path).blue().bold());
-                } else {
-                    println!("{}", arcommon::display_path(&item.path));
-                }
+                println!("{}", item.display());
             }
         });
     }

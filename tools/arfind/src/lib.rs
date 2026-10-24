@@ -361,10 +361,79 @@ impl Default for SearchStats {
     }
 }
 
+/// What kind of entry a result is, as the directory listing reports it
+/// (a symlink is a symlink, whatever it points to). Decides its color.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EntryKind {
+    File,
+    Dir,
+    Symlink,
+    Fifo,
+    Socket,
+    BlockDevice,
+    CharDevice,
+    /// Anything else the platform reports.
+    Other,
+}
+
+impl EntryKind {
+    /// The kind of an entry from its (not followed) file type.
+    pub fn of(file_type: fs::FileType) -> Self {
+        if file_type.is_symlink() {
+            return EntryKind::Symlink;
+        }
+        if file_type.is_dir() {
+            return EntryKind::Dir;
+        }
+        if file_type.is_file() {
+            return EntryKind::File;
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::FileTypeExt;
+            if file_type.is_fifo() {
+                return EntryKind::Fifo;
+            }
+            if file_type.is_socket() {
+                return EntryKind::Socket;
+            }
+            if file_type.is_block_device() {
+                return EntryKind::BlockDevice;
+            }
+            if file_type.is_char_device() {
+                return EntryKind::CharDevice;
+            }
+        }
+        EntryKind::Other
+    }
+
+    /// `text` in this kind's color, the defaults of GNU `ls --color`
+    /// (dircolors): directories bold blue, symlinks bold cyan, FIFOs
+    /// yellow, sockets bold magenta, devices bold yellow, regular files
+    /// uncolored. `colored` drops the color when stdout is not a terminal
+    /// or `NO_COLOR` is set (`CLICOLOR_FORCE=1` keeps it).
+    ///
+    /// Takes the text by value so it is wrapped, not copied: this runs for
+    /// every printed result.
+    pub fn paint(self, text: String) -> colored::ColoredString {
+        let text = colored::ColoredString::from(text);
+        match self {
+            EntryKind::Dir => text.blue().bold(),
+            EntryKind::Symlink => text.cyan().bold(),
+            EntryKind::Fifo => text.yellow(),
+            EntryKind::Socket => text.magenta().bold(),
+            EntryKind::BlockDevice | EntryKind::CharDevice => text.yellow().bold(),
+            EntryKind::File | EntryKind::Other => text,
+        }
+    }
+}
+
 /// Output item representing a match with its type metadata
 pub struct MatchResult {
     pub path: PathBuf,
-    pub is_dir: bool,
+    /// The entry's kind; a symlink is `Symlink` even if it points to a
+    /// directory.
+    pub kind: EntryKind,
     /// The entry's own size and modification time (not following a
     /// symlink), for `--sort`. Only set when
     /// [`SearchConfig::collect_metadata`] is on, and `None` if they could
@@ -378,14 +447,25 @@ pub struct MatchResult {
 impl MatchResult {
     /// A result for `path`, carrying size and mtime from `metadata` when
     /// `keep` is set.
-    fn new(path: PathBuf, is_dir: bool, metadata: Option<&fs::Metadata>, keep: bool) -> Self {
+    fn new(path: PathBuf, kind: EntryKind, metadata: Option<&fs::Metadata>, keep: bool) -> Self {
         let metadata = metadata.filter(|_| keep);
         MatchResult {
             path,
-            is_dir,
+            kind,
             size: metadata.map(|m| m.len()),
             modified: metadata.and_then(|m| m.modified().ok()),
         }
+    }
+
+    /// Whether this result is a directory (not a symlink to one).
+    pub fn is_dir(&self) -> bool {
+        self.kind == EntryKind::Dir
+    }
+
+    /// The path as printed to a terminal: control characters escaped (see
+    /// [`arcommon::display_path`]), colored by kind.
+    pub fn display(&self) -> colored::ColoredString {
+        self.kind.paint(arcommon::display_path(&self.path))
     }
 }
 
@@ -583,9 +663,16 @@ fn check_root(
         return None;
     }
 
+    // The root is normally canonical, so not a symlink; if it still is
+    // one to a directory, it is listed as the directory it was searched as.
+    let kind = if is_dir {
+        EntryKind::Dir
+    } else {
+        EntryKind::of(metadata.file_type())
+    };
     Some(MatchResult::new(
         canonical_root.to_path_buf(),
-        is_dir,
+        kind,
         Some(&metadata),
         config.collect_metadata,
     ))
@@ -827,7 +914,7 @@ pub fn scan_directory(
                     }
                     let _ = output_tx.send(MatchResult::new(
                         entry_path.clone(),
-                        is_dir,
+                        EntryKind::of(file_type),
                         metadata_cache.as_ref(),
                         config.collect_metadata,
                     ));
@@ -878,7 +965,8 @@ pub fn scan_directory(
 #[cfg(test)]
 mod tests {
     use super::{
-        Args, MatchResult, SortKey, default_jobs, path_order, root_match_name, sort_results,
+        Args, EntryKind, MatchResult, SortKey, default_jobs, path_order, root_match_name,
+        sort_results,
     };
     use clap::Parser;
     use std::path::{Path, PathBuf};
@@ -918,7 +1006,7 @@ mod tests {
     fn bare(path: &str) -> MatchResult {
         MatchResult {
             path: PathBuf::from(path),
-            is_dir: false,
+            kind: EntryKind::File,
             size: None,
             modified: None,
         }
@@ -954,15 +1042,37 @@ mod tests {
     }
 
     #[test]
+    fn entry_kind_from_file_type() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let d = dir.path();
+        std::fs::write(d.join("f"), "").unwrap();
+        std::fs::create_dir(d.join("d")).unwrap();
+        let kind = |name: &str| {
+            EntryKind::of(std::fs::symlink_metadata(d.join(name)).unwrap().file_type())
+        };
+        assert_eq!(kind("f"), EntryKind::File);
+        assert_eq!(kind("d"), EntryKind::Dir);
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink("d", d.join("l")).unwrap();
+            assert_eq!(kind("l"), EntryKind::Symlink, "not followed");
+            std::os::unix::net::UnixListener::bind(d.join("s")).unwrap();
+            assert_eq!(kind("s"), EntryKind::Socket);
+            let null = std::fs::symlink_metadata("/dev/null").unwrap().file_type();
+            assert_eq!(EntryKind::of(null), EntryKind::CharDevice);
+        }
+    }
+
+    #[test]
     fn keeps_size_and_time_only_when_asked() {
         let dir = tempfile::TempDir::new().unwrap();
         let f = dir.path().join("f");
         std::fs::write(&f, "abc").unwrap();
         let m = std::fs::symlink_metadata(&f).unwrap();
-        let kept = MatchResult::new(f.clone(), false, Some(&m), true);
+        let kept = MatchResult::new(f.clone(), EntryKind::File, Some(&m), true);
         assert_eq!(kept.size, Some(3));
         assert_eq!(kept.modified, m.modified().ok());
-        let dropped = MatchResult::new(f, false, Some(&m), false);
+        let dropped = MatchResult::new(f, EntryKind::File, Some(&m), false);
         assert!(dropped.size.is_none() && dropped.modified.is_none());
     }
 
@@ -984,7 +1094,7 @@ mod tests {
         std::fs::write(&big, "xxxxxxxx").unwrap();
         let with_meta = |p: &Path| {
             let m = std::fs::symlink_metadata(p).unwrap();
-            MatchResult::new(p.to_path_buf(), false, Some(&m), true)
+            MatchResult::new(p.to_path_buf(), EntryKind::File, Some(&m), true)
         };
         let mut v = vec![bare("/gone"), with_meta(&big), with_meta(&small)];
         sort_results(&mut v, SortKey::Size, false);

@@ -142,6 +142,13 @@ pub struct Args {
     #[arg(long = "type-not", value_name = "NAME", value_parser = types::type_name_parser)]
     pub type_not: Vec<String>,
 
+    /// List the built-in types for --type/--type-not with their globs, one
+    /// per line (`rust: *.rs`), and exit. The same list as argrep
+    /// --type-list. Takes no PATH and can't be combined with other options:
+    /// it lists, it doesn't search.
+    #[arg(long = "type-list", exclusive = true)]
+    pub type_list: bool,
+
     /// Only match files with this extension, e.g. rs, .md, tar.gz
     /// (case-insensitive). Repeatable; OR'ed with --type.
     #[arg(long, value_name = "EXT", value_parser = types::extension_parser)]
@@ -1088,6 +1095,24 @@ mod tests {
         assert!(Args::try_parse_from(["arfind", ".", "--type", "cobol"]).is_err());
         assert!(Args::try_parse_from(["arfind", ".", "--type", "f"]).is_err());
         assert!(Args::try_parse_from(["arfind", ".", "--file-type", "f"]).is_ok());
+    }
+
+    #[test]
+    fn type_list_parses_alone_only() {
+        let a = Args::try_parse_from(["arfind", "--type-list"]).unwrap();
+        assert!(a.type_list);
+        assert!(!Args::try_parse_from(["arfind"]).unwrap().type_list);
+        // It lists, it doesn't search: no PATH, no other options.
+        for extra in [
+            &["."][..],
+            &["--type", "rust"],
+            &["-t", "f"],
+            &["--sort", "name"],
+        ] {
+            let mut argv = vec!["arfind", "--type-list"];
+            argv.extend_from_slice(extra);
+            assert!(Args::try_parse_from(&argv).is_err(), "{argv:?}");
+        }
     }
 
     #[test]

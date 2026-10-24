@@ -2,8 +2,8 @@
 //! argrep so `--type rust` selects exactly the same files in both.
 //!
 //! A small, hand-picked set rather than ripgrep's database of hundreds of
-//! types. User-defined types (`--type-add`) and a `--type-list` flag are
-//! left for a later change.
+//! types. Both tools print it with `--type-list` ([`type_list`]).
+//! User-defined types (`--type-add`) are left for a later change.
 
 /// Built-in types: name and file-name globs.
 pub const TYPE_TABLE: &[(&str, &[&str])] = &[

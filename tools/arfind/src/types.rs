@@ -11,14 +11,15 @@ use glob::Pattern;
 pub use arcommon::filetypes::{TYPE_TABLE, known_type_names, type_globs};
 
 /// clap value parser for `--type` / `--type-not`: unknown names are a usage
-/// error listing the known types. The entry kinds `f`, `d` and `l` get a
-/// pointer to `-t`, since that is what someone typing `--type f` wants.
+/// error listing the known types, with a pointer to `--type-list` for their
+/// globs (as in argrep). The entry kinds `f`, `d` and `l` get a pointer to
+/// `-t` instead, since that is what someone typing `--type f` wants.
 pub fn type_name_parser(s: &str) -> Result<String, String> {
     arcommon::filetypes::type_name_parser(s).map_err(|err| {
         if matches!(s, "f" | "d" | "l") {
             format!("{err}; to filter by entry kind use -t {s} (--file-type {s})")
         } else {
-            err
+            format!("{err}; run `arfind --type-list` to see their globs")
         }
     })
 }
@@ -112,8 +113,10 @@ mod tests {
         assert_eq!(type_name_parser("rust").unwrap(), "rust");
         let err = type_name_parser("cobol").unwrap_err();
         assert!(err.contains("known types: rust, python"), "{err}");
+        assert!(err.contains("arfind --type-list"), "{err}");
         let err = type_name_parser("f").unwrap_err();
         assert!(err.contains("-t f"), "{err}");
+        assert!(!err.contains("--type-list"), "{err}");
     }
 
     #[test]

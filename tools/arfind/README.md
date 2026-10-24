@@ -300,6 +300,24 @@ File names can contain ESC and other control characters, which a terminal would 
 
 `--dry-run` writes names that contain control characters in `$'...'` form (`$'x\x1b[2J.txt'`), so the line is safe to print and still reproduces the exact name when pasted into bash, zsh or ksh. Commands run by `--exec`/`--exec-batch` always receive the exact, unescaped name.
 
+## Colors
+
+On a terminal, arfind colors each result by its kind, with the same defaults as GNU `ls --color`:
+
+| Kind                         | Color        |
+|------------------------------|--------------|
+| directory                    | bold blue    |
+| symlink                      | bold cyan    |
+| FIFO (named pipe)            | yellow       |
+| socket                       | bold magenta |
+| block or character device    | bold yellow  |
+| regular file                 | uncolored    |
+
+- **The entry's own kind.** A symlink is cyan even when it points to a directory, as in `ls`. The kind comes from the directory listing arfind reads anyway, so coloring adds no extra system calls.
+- **Terminal only.** Piped or redirected output has no color codes, so scripts and `grep` see plain paths. `NO_COLOR` (any value) or `CLICOLOR=0` turns color off on a terminal too; `CLICOLOR_FORCE=1` keeps it in a pipe, e.g. `CLICOLOR_FORCE=1 arfind . | less -R`.
+- **`-0` is never colored**, and neither are `--count` and `--dry-run` output.
+- Colors are fixed for now; `LS_COLORS` is not read.
+
 ## Examples
 
 ```bash

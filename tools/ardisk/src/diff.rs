@@ -141,12 +141,20 @@ fn parse(name: String, doc: RawDoc) -> Result<Snapshot, String> {
     } else {
         "total_inodes"
     };
-    let total = doc
-        .summary
-        .get(total_key)
-        .and_then(|v| v.as_u64())
-        .or_else(|| entries.get(".").copied())
-        .unwrap_or(0);
+    // The root total is required: from `summary` (ardisk always writes
+    // it), or else from the root's own entry. Never assumed to be 0, which
+    // would hide a damaged or hand-cut snapshot behind a plausible diff.
+    let total = match doc.summary.get(total_key) {
+        Some(v) => v.as_u64().ok_or_else(|| {
+            format!("{name}: summary.{total_key} is {v}, not a non-negative integer")
+        })?,
+        None => entries.get(".").copied().ok_or_else(|| {
+            format!(
+                "{name} has no summary.{total_key} and no entry for the root \".\"; \
+                 is it a complete ardisk --json document?"
+            )
+        })?,
+    };
 
     let param = |key: &str| doc.params.get(key).filter(|v| !v.is_null());
     let threshold = param("threshold_bytes").or_else(|| param("threshold_inodes"));
@@ -523,9 +531,12 @@ struct SideJson<'a> {
     complete: bool,
 }
 
+/// Deltas are `i128`, written as exact JSON integers: `after - before` of
+/// two `u64` values can exceed `i64` in either direction (by up to
+/// `u64::MAX`), and a clamped value would be silently wrong.
 #[derive(Serialize)]
 struct SummaryJson {
-    total_delta: i64,
+    total_delta: i128,
     new: usize,
     gone: usize,
     grew: usize,
@@ -541,7 +552,7 @@ struct EntryJson<'a> {
     change: Change,
     before: Option<u64>,
     after: Option<u64>,
-    delta: i64,
+    delta: i128,
 }
 
 #[derive(Serialize)]
@@ -558,10 +569,6 @@ struct DiffDoc<'a> {
     summary: SummaryJson,
     entries: Vec<EntryJson<'a>>,
     truncated: bool,
-}
-
-fn clamp(v: i128) -> i64 {
-    i64::try_from(v).unwrap_or(if v < 0 { i64::MIN } else { i64::MAX })
 }
 
 /// Writes the `diff` document (see the README for the layout).
@@ -592,7 +599,7 @@ pub fn write_json<W: Write>(
         },
         params: query,
         summary: SummaryJson {
-            total_delta: clamp(i128::from(diff.total_after) - i128::from(diff.total_before)),
+            total_delta: i128::from(diff.total_after) - i128::from(diff.total_before),
             new: count(Change::New),
             gone: count(Change::Gone),
             grew: count(Change::Grew),
@@ -609,7 +616,7 @@ pub fn write_json<W: Write>(
                 change: r.change,
                 before: r.before,
                 after: r.after,
-                delta: clamp(r.delta()),
+                delta: r.delta(),
             })
             .collect(),
         truncated: sel.not_shown > 0,
@@ -833,6 +840,97 @@ mod tests {
         );
         let err = check_comparable(&b, &filtered).unwrap_err();
         assert!(err.contains(r#"exclude: [] vs ["*.log"]"#), "{err}");
+    }
+
+    /// Deltas between u64 sizes span ±u64::MAX; the JSON must carry them
+    /// exactly, not clamped to i64.
+    #[test]
+    fn json_deltas_are_exact_at_the_u64_limits() {
+        let max = u64::MAX;
+        let small = snap(
+            "s",
+            &doc(
+                "directories",
+                false,
+                FULL,
+                &[(".", 0), ("a", 0), ("b", max)],
+            ),
+        );
+        let huge = snap(
+            "h",
+            &doc(
+                "directories",
+                false,
+                FULL,
+                &[(".", max), ("a", max), ("b", 0)],
+            ),
+        );
+        for (b, a, sign) in [(&small, &huge, ""), (&huge, &small, "-")] {
+            let d = compare(b, a);
+            let q = DiffQuery::default();
+            let mut out = Vec::new();
+            write_json(&mut out, &d, &select(&d, &q), &q, b, a).unwrap();
+            let text = String::from_utf8(out).unwrap();
+            // Checked in the text: serde_json::Value would not hold the
+            // values exactly, and consumers parse the text.
+            let exact = format!("{sign}{max}");
+            assert!(
+                text.contains(&format!("\"total_delta\": {exact},")),
+                "{text}"
+            );
+            assert_eq!(
+                text.matches(&format!("\"delta\": {exact}\n")).count(),
+                1,
+                "{text}"
+            );
+            let other = if sign.is_empty() {
+                format!("-{max}")
+            } else {
+                max.to_string()
+            };
+            assert_eq!(
+                text.matches(&format!("\"delta\": {other}\n")).count(),
+                1,
+                "{text}"
+            );
+            assert!(!text.contains(&i64::MAX.to_string()) && !text.contains(&i64::MIN.to_string()));
+        }
+    }
+
+    #[test]
+    fn the_root_total_is_required() {
+        let base = |summary: &str, entries: &str| {
+            format!(
+                r#"{{"schema_version":1,"mode":"directories","root":"/d","size_mode":"disk",
+                   "params":{{}},{summary}"entries":[{entries}],"truncated":false}}"#
+            )
+        };
+        // No summary and no root entry: an error, not a total of 0.
+        let err = load_from("x", base("", r#"{"path":"a","bytes":5}"#).as_bytes()).unwrap_err();
+        assert!(
+            err.contains("no summary.total_bytes and no entry for the root"),
+            "{err}"
+        );
+        // A summary total of the wrong type is not skipped.
+        let bad = base(
+            r#""summary":{"total_bytes":"lots"},"#,
+            r#"{"path":".","bytes":5}"#,
+        );
+        let err = load_from("x", bad.as_bytes()).unwrap_err();
+        assert!(err.contains(r#"summary.total_bytes is "lots""#), "{err}");
+        let negative = base(r#""summary":{"total_bytes":-1},"#, "");
+        assert!(load_from("x", negative.as_bytes()).is_err());
+        // Without a summary, the root entry is the total.
+        let s = load_from("x", base("", r#"{"path":".","bytes":7}"#).as_bytes()).unwrap();
+        assert_eq!(s.total, 7);
+        // An inode snapshot needs summary.total_inodes, not total_bytes.
+        let inodes = base(
+            r#""summary":{"total_bytes":3},"#,
+            r#"{"path":"a","inodes":1}"#,
+        )
+        .replace(r#""mode":"directories""#, r#""mode":"inodes""#);
+        let err = load_from("x", inodes.as_bytes()).unwrap_err();
+        assert!(err.contains("summary.total_inodes"), "{err}");
     }
 
     #[test]

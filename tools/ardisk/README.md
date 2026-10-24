@@ -382,6 +382,7 @@ ardisk /data --json --top 0 | ardisk --diff before.json -   # compare with right
 
 - **Save snapshots with `--top 0`.** A snapshot lists only what `--top` (default 20), `--max-depth` and `--threshold` let through, and a `--summarize` snapshot lists no directories at all (only its total is compared). A directory missing from a complete snapshot really wasn't there, so it shows as new or gone. A directory missing from a partial snapshot may just have been below its cutoff, so ardisk doesn't guess: it skips it and warns on stderr that the snapshot is partial, saying how to save a complete one.
 - **Like with like.** Both snapshots must be directory reports of the same root, taken the same way: both disk usage or both `--apparent-size`, with the same `--include`, `--exclude`, `--ignore`, `--no-hidden`, `-x` and age filters. Anything else would compare different measurements, so ardisk refuses with a message saying what differs. Two `--inodes` snapshots can be compared too; then `--threshold` is a number of inodes.
+- **Checked input.** A snapshot must be an ardisk `--json` directory or inode report with a root total (`summary.total_bytes` / `total_inodes`, or at least the root's own `"."` entry) and a number for every listed directory. A file that is cut off, hand-edited into a different shape, or holds a wrong type is refused with a message naming the problem, instead of being compared as if its missing values were 0.
 - **Options.** `--diff` is a mode of its own: it takes no PATH and works only with `--top`, `--threshold` (smallest change shown, in the snapshots' unit), `--si` and `--json`. `-` reads one of the snapshots from stdin.
 - Moves and renames show as one directory gone and another new; file contents are not compared.
 
@@ -565,7 +566,7 @@ ardisk ~/Projects --exclude 'target/**' --json --top 0 \
 ```
 
 - `unit` is `"bytes"` or `"inodes"` (then `size_mode` is absent, and `before`/`after`/`delta`/`threshold` are counts).
-- `change` is `new`, `gone`, `grew` or `shrank`; `delta` is `after − before`, with a missing side counted as 0. Entries are ordered by the size of the change, biggest first, then by path.
+- `change` is `new`, `gone`, `grew` or `shrank`; `delta` is `after − before`, with a missing side counted as 0. `delta` and `summary.total_delta` are exact integers: like the sizes they come from, they can exceed 64-bit signed range only above 8 EiB. (Tools that read JSON numbers as doubles, such as `jq` or JavaScript, round any integer above 2^53, about 9 PB, sizes included.) Entries are ordered by the size of the change, biggest first, then by path.
 - `complete` tells whether a snapshot listed every directory. `not_comparable` counts directories listed in only one snapshot while the other is partial.
 - `truncated` is `true` when `--top` cut the list; the `summary` counts always cover every change.
 

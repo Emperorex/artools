@@ -10,8 +10,8 @@ use ardisk::{
     progress::{Reporter, ScanProgress, Status, group_digits},
     report::{
         DirectoryQuery, DirectorySummary, Filters, InodeSummary, ReportMeta, render_by_type_text,
-        select_directories, write_by_type, write_directories, write_duplicates, write_inodes,
-        write_largest_files,
+        select_directories, top_limit, write_by_type, write_directories, write_duplicates,
+        write_inodes, write_largest_files,
     },
     tree::{render_tree_text, tree_lines},
 };
@@ -160,7 +160,9 @@ struct Args {
     #[arg(long)]
     max_depth: Option<usize>,
 
-    /// Number of top directories to display in the report
+    /// Number of top directories to display in the report (also caps
+    /// duplicate groups, file types and --diff rows). 0 means no limit:
+    /// `--json --top 0` saves a complete snapshot for --diff.
     #[arg(short = 'n', long, default_value_t = 20)]
     top: usize,
 
@@ -346,6 +348,25 @@ struct Args {
     /// --no-ignore to count .git, node_modules and other ignored entries.
     #[arg(long = "no-hidden")]
     no_hidden: bool,
+
+    /// Compare two snapshots saved with --json and show what grew, shrank,
+    /// appeared or disappeared, biggest change first. No scan is run. Both
+    /// must be directory reports (or both --inodes reports) of the same
+    /// root, taken with the same options; save them with --top 0 so every
+    /// directory is listed. Works with --top, --threshold (smallest change
+    /// shown), --si and --json. Use - to read one snapshot from stdin.
+    #[arg(
+        long,
+        num_args = 2,
+        value_names = ["BEFORE", "AFTER"],
+        conflicts_with_all = [
+            "path", "debug", "max_depth", "include", "summarize", "largest_files",
+            "duplicates", "min_size", "by_type", "progress", "older_than", "newer_than",
+            "one_file_system", "bar", "tree", "inodes", "apparent_size", "ignore",
+            "exclude", "no_ignore", "no_hidden", "jobs",
+        ]
+    )]
+    diff: Option<Vec<PathBuf>>,
 }
 
 /// Builds the set of directory names to skip, given `--no-ignore` and any
@@ -371,6 +392,11 @@ fn main() {
     // Before anything is printed: progress, reports and errors all format
     // sizes through this setting.
     ardisk::set_size_units(units);
+
+    if let Some(files) = &args.diff {
+        run_diff(&args, &files[0], &files[1], units);
+        return;
+    }
 
     let ignore_dirs = build_ignore_dirs(args.no_ignore, args.ignore.clone());
     let target_path = fs::canonicalize(&args.path).unwrap_or_else(|_| PathBuf::from(&args.path));
@@ -723,6 +749,66 @@ fn main() {
     }
 }
 
+/// `--diff BEFORE AFTER`: compares two `--json` snapshots; no scan.
+fn run_diff(args: &Args, before: &std::path::Path, after: &std::path::Path, units: SizeUnits) {
+    use ardisk::diff::{
+        DiffQuery, Unit, check_comparable, compare, load, partial_warning, render_text, select,
+        write_json,
+    };
+    let fail = |msg: &str| -> ! {
+        eprintln!("{}", format!("error: {msg}").red());
+        std::process::exit(1);
+    };
+    let stdin = std::path::Path::new("-");
+    if before == stdin && after == stdin {
+        fail("only one of the two snapshots can be read from stdin (-)");
+    }
+    let before = load(before).unwrap_or_else(|e| fail(&e));
+    let after = load(after).unwrap_or_else(|e| fail(&e));
+    check_comparable(&before, &after).unwrap_or_else(|e| fail(&e));
+
+    if before.unit == Unit::Inodes && args.si {
+        fail("--si applies to sizes, but these snapshots count inodes");
+    }
+    let threshold = args.threshold.as_ref().map(|t| {
+        match before.unit {
+            Unit::Bytes => parse_size_in(t, units),
+            Unit::Inodes => t.trim().parse::<u64>().map_err(|_| {
+                format!(
+                    "Invalid threshold '{}'. These snapshots count inodes, so use a whole \
+                     number, e.g. 1000.",
+                    t.trim()
+                )
+            }),
+        }
+        .unwrap_or_else(|e| fail(&e))
+    });
+
+    let diff = compare(&before, &after);
+    let query = DiffQuery {
+        top: args.top,
+        threshold,
+    };
+    let selection = select(&diff, &query);
+
+    if args.json {
+        let stdout = io::stdout();
+        let mut out = io::BufWriter::new(stdout.lock());
+        match write_json(&mut out, &diff, &selection, &query, &before, &after)
+            .and_then(|()| out.flush())
+        {
+            Ok(()) => {}
+            Err(e) if e.kind() == io::ErrorKind::BrokenPipe => {}
+            Err(e) => fail(&format!("cannot write JSON: {e}")),
+        }
+    } else {
+        print!("{}", render_text(&diff, &selection));
+    }
+    if let Some(warning) = partial_warning(&diff, &before, &after) {
+        eprintln!("{}", warning.yellow());
+    }
+}
+
 /// "s" unless `n` is exactly one.
 fn plural(n: usize) -> &'static str {
     if n == 1 { "" } else { "s" }
@@ -732,7 +818,7 @@ fn plural(n: usize) -> &'static str {
 /// reclaimable space (or only the totals with `--summarize`), then a summary.
 fn print_duplicates(report: &DuplicateReport, top: usize, summarize: bool) {
     if !summarize {
-        for group in report.groups.iter().take(top) {
+        for group in report.groups.iter().take(top_limit(top)) {
             println!(
                 "{} identical files, {} each, {} reclaimable",
                 group.paths.len(),
@@ -749,7 +835,7 @@ fn print_duplicates(report: &DuplicateReport, top: usize, summarize: bool) {
     let shown = if summarize {
         0
     } else {
-        report.groups.len().min(top)
+        report.groups.len().min(top_limit(top))
     };
     let more = if summarize || shown == report.groups.len() {
         String::new()

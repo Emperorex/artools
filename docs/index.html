@@ -558,10 +558,10 @@
 
     <div class="tool-card">
       <div class="tool-card-header">
-        <span class="tool-name"><span class="ar">ar</span>disk<span class="tool-ver">v0.3.0</span></span>
+        <span class="tool-name"><span class="ar">ar</span>disk<span class="tool-ver">v0.3.1</span></span>
         <span class="tool-alt">replaces du</span>
       </div>
-      <p class="tool-desc">Bottom-up parallel disk usage analysis. Shows the heaviest directories first with accurate rollup sizes using a single-pass DP algorithm. Also draws a tree view, lists the largest files, groups duplicates, breaks usage down by file type and counts inodes. Sizes in binary (KiB-style) or SI units, a live progress counter, and JSON output for scripts.</p>
+      <p class="tool-desc">Bottom-up parallel disk usage analysis. Shows the heaviest directories first with accurate rollup sizes using a single-pass DP algorithm. Also draws a tree view, lists the largest files, groups duplicates, breaks usage down by file type and counts inodes. Sizes in binary (KiB-style) or SI units, a live progress counter, JSON output for scripts, and a diff of two saved snapshots that shows what grew, shrank, appeared or disappeared.</p>
       <div class="tool-flags">
         <span class="flag">--top N</span>
         <span class="flag">--max-depth</span>
@@ -577,6 +577,7 @@
         <span class="flag">-x one-fs</span>
         <span class="flag">--progress</span>
         <span class="flag">--json</span>
+        <span class="flag">--diff</span>
       </div>
     </div>
 
@@ -689,6 +690,10 @@
         <br>
         <br><span class="uc-comment"># Live counter on a big scan, machine-readable result</span>
         <br><span class="uc-cmd">ardisk</span> <span class="uc-arg">/data</span> <span class="uc-flag">--progress</span> <span class="uc-flag">--json</span> <span class="uc-pipe">&gt;</span> <span class="uc-arg">usage.json</span>
+        <br>
+        <br><span class="uc-comment"># What changed since last week? Save full snapshots, then compare</span>
+        <br><span class="uc-cmd">ardisk</span> <span class="uc-arg">/data</span> <span class="uc-flag">--json</span> <span class="uc-flag">--top</span> <span class="uc-arg">0</span> <span class="uc-pipe">&gt;</span> <span class="uc-arg">after.json</span>
+        <br><span class="uc-cmd">ardisk</span> <span class="uc-flag">--diff</span> <span class="uc-arg">before.json</span> <span class="uc-arg">after.json</span> <span class="uc-flag">--threshold</span> <span class="uc-arg">10MB</span>
       </div>
     </div>
 

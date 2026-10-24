@@ -1,4 +1,5 @@
 pub mod bar;
+pub mod diff;
 pub mod duplicates;
 pub mod progress;
 pub mod report;

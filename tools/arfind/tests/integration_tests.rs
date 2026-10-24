@@ -56,6 +56,7 @@ fn collect_names(
         one_file_system: false,
         mtime: Default::default(),
         name_kind: Default::default(),
+        collect_metadata: false,
     });
 
     let stats = SearchStats::new();
@@ -252,6 +253,7 @@ fn stats_count_files_and_dirs_correctly() {
         one_file_system: false,
         mtime: Default::default(),
         name_kind: Default::default(),
+        collect_metadata: false,
     });
 
     let stats = SearchStats::new();
@@ -295,6 +297,7 @@ fn stats_count_root_even_when_max_depth_stops_recursion() {
         one_file_system: false,
         mtime: Default::default(),
         name_kind: Default::default(),
+        collect_metadata: false,
     });
 
     let stats = SearchStats::new();
@@ -331,6 +334,7 @@ fn stats_count_child_dir_examined_even_when_not_recursed_into() {
         one_file_system: false,
         mtime: Default::default(),
         name_kind: Default::default(),
+        collect_metadata: false,
     });
 
     let stats = SearchStats::new();
@@ -466,6 +470,7 @@ fn multiple_workers_produce_same_results_as_single_worker() {
             one_file_system: false,
             mtime: Default::default(),
             name_kind: Default::default(),
+            collect_metadata: false,
         });
         let results: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
         let results_clone = Arc::clone(&results);
@@ -545,6 +550,7 @@ fn size_min_filters_small_files() {
         one_file_system: false,
         mtime: Default::default(),
         name_kind: Default::default(),
+        collect_metadata: false,
     });
 
     let names = collect_with_config(root, config);
@@ -584,6 +590,7 @@ fn size_max_filters_large_files() {
         one_file_system: false,
         mtime: Default::default(),
         name_kind: Default::default(),
+        collect_metadata: false,
     });
 
     let names = collect_with_config(root, config);
@@ -623,6 +630,7 @@ fn size_filter_does_not_affect_directories() {
         one_file_system: false,
         mtime: Default::default(),
         name_kind: Default::default(),
+        collect_metadata: false,
     });
 
     let names = collect_with_config(root, config);
@@ -655,6 +663,7 @@ fn empty_finds_zero_byte_files() {
         one_file_system: false,
         mtime: Default::default(),
         name_kind: Default::default(),
+        collect_metadata: false,
     });
 
     let names = collect_with_config(root, config);
@@ -686,6 +695,7 @@ fn empty_finds_empty_directories() {
         one_file_system: false,
         mtime: Default::default(),
         name_kind: Default::default(),
+        collect_metadata: false,
     });
 
     let names = collect_with_config(root, config);
@@ -720,6 +730,7 @@ fn empty_false_returns_all_files() {
         one_file_system: false,
         mtime: Default::default(),
         name_kind: Default::default(),
+        collect_metadata: false,
     });
 
     let names = collect_with_config(root, config);
@@ -746,6 +757,7 @@ fn config_with_gitignore(pattern: &str, respect_gitignore: bool) -> Arc<SearchCo
         one_file_system: false,
         mtime: Default::default(),
         name_kind: Default::default(),
+        collect_metadata: false,
     })
 }
 

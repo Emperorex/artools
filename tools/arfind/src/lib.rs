@@ -21,6 +21,7 @@ use crossbeam_channel::{Sender, unbounded};
 use glob::Pattern;
 use ignore::gitignore::Gitignore;
 use std::{
+    cmp::Ordering as CmpOrdering,
     collections::HashSet,
     fs,
     path::{Path, PathBuf},
@@ -29,7 +30,30 @@ use std::{
         atomic::{AtomicUsize, Ordering},
     },
     thread,
+    time::SystemTime,
 };
+
+/// `--sort` keys. Every key sorts ascending (A→Z, smallest first, oldest
+/// first); `--reverse` flips it.
+#[derive(clap::ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SortKey {
+    /// File name only (byte order, case-sensitive), ties broken by path
+    Name,
+    /// Full path (byte order): each directory's contents stay together
+    Path,
+    /// Size in bytes, as reported for the entry itself (a symlink's own
+    /// size, a directory's entry size, not its contents)
+    Size,
+    /// Modification time (of a symlink itself, not its target)
+    Time,
+}
+
+impl SortKey {
+    /// Whether this key needs each result's metadata.
+    pub fn needs_metadata(self) -> bool {
+        matches!(self, SortKey::Size | SortKey::Time)
+    }
+}
 
 /// CLI arguments
 #[derive(Parser, Debug)]
@@ -205,6 +229,18 @@ pub struct Args {
     /// run (shell quoted) instead of running them.
     #[arg(long)]
     pub dry_run: bool,
+
+    /// Sort results by name, path, size or time (ascending: A-Z, smallest
+    /// first, oldest first) instead of printing them in traversal order.
+    /// Output starts once the search is complete. Ties are broken by path,
+    /// so the order is the same on every run. Also sets the order in which
+    /// --exec/--execdir run and -X passes paths.
+    #[arg(long, value_name = "KEY", value_enum, conflicts_with = "count")]
+    pub sort: Option<SortKey>,
+
+    /// With --sort: reverse the order (Z-A, largest first, newest first).
+    #[arg(long, requires = "sort")]
+    pub reverse: bool,
 }
 
 /// Task sent to workers
@@ -262,6 +298,10 @@ pub struct SearchConfig {
     pub mtime: age::MtimeFilter,
     /// `--type`, `--type-not`, `--extension`.
     pub name_kind: types::NameKindFilter,
+    /// Attach each result's own metadata (lstat) to its [`MatchResult`],
+    /// for `--sort size`/`--sort time`. Fetched by the workers, reusing the
+    /// metadata the filters already read.
+    pub collect_metadata: bool,
 }
 
 impl SearchConfig {
@@ -285,6 +325,7 @@ impl SearchConfig {
             one_file_system: false,
             mtime: age::MtimeFilter::default(),
             name_kind: types::NameKindFilter::default(),
+            collect_metadata: false,
         }
     }
 }
@@ -317,6 +358,102 @@ impl Default for SearchStats {
 pub struct MatchResult {
     pub path: PathBuf,
     pub is_dir: bool,
+    /// The entry's own size and modification time (not following a
+    /// symlink), for `--sort`. Only set when
+    /// [`SearchConfig::collect_metadata`] is on, and `None` if they could
+    /// not be read (e.g. the entry vanished). Just these two values rather
+    /// than the whole `fs::Metadata` (176 bytes on Linux): every result
+    /// crosses a channel and sorted results are held in memory.
+    pub size: Option<u64>,
+    pub modified: Option<SystemTime>,
+}
+
+impl MatchResult {
+    /// A result for `path`, carrying size and mtime from `metadata` when
+    /// `keep` is set.
+    fn new(path: PathBuf, is_dir: bool, metadata: Option<&fs::Metadata>, keep: bool) -> Self {
+        let metadata = metadata.filter(|_| keep);
+        MatchResult {
+            path,
+            is_dir,
+            size: metadata.map(|m| m.len()),
+            modified: metadata.and_then(|m| m.modified().ok()),
+        }
+    }
+}
+
+/// Orders paths the way `Path::cmp` does (component by component), for the
+/// clean absolute paths arfind reports, but as one byte scan: with the
+/// separator ranked below every other byte, byte order and component order
+/// agree (`/a/x` < `/a-b` < `/a.b/c`, as `a` < `a-b` < `a.b`).
+/// `Path::cmp` re-parses both paths into components on every call, which
+/// dominated `--sort` time on large trees.
+pub fn path_order(a: &Path, b: &Path) -> CmpOrdering {
+    let x = a.as_os_str().as_encoded_bytes();
+    let y = b.as_os_str().as_encoded_bytes();
+    let same = x.iter().zip(y).take_while(|(p, q)| p == q).count();
+    let rank = |c: u8| {
+        if std::path::is_separator(char::from(c)) {
+            0
+        } else {
+            u16::from(c) + 1
+        }
+    };
+    match (x.get(same), y.get(same)) {
+        (Some(&p), Some(&q)) => rank(p).cmp(&rank(q)),
+        _ => x.len().cmp(&y.len()),
+    }
+}
+
+/// Sorts results for `--sort`. Every key is ascending, `reverse` flips it.
+/// Ties, and entries of equal key, are ordered by path (always ascending),
+/// so the output is deterministic despite the parallel walk. Entries whose
+/// size or time could not be read sort last in either direction.
+pub fn sort_results(results: &mut Vec<MatchResult>, key: SortKey, reverse: bool) {
+    fn by<T: Ord>(a: Option<T>, b: Option<T>, reverse: bool) -> CmpOrdering {
+        match (a, b) {
+            (Some(a), Some(b)) if reverse => b.cmp(&a),
+            (Some(a), Some(b)) => a.cmp(&b),
+            (Some(_), None) => CmpOrdering::Less,
+            (None, Some(_)) => CmpOrdering::Greater,
+            (None, None) => CmpOrdering::Equal,
+        }
+    }
+    match key {
+        SortKey::Path => {
+            if reverse {
+                results.sort_unstable_by(|a, b| path_order(&b.path, &a.path));
+            } else {
+                results.sort_unstable_by(|a, b| path_order(&a.path, &b.path));
+            }
+        }
+        SortKey::Name => {
+            // Where each file name starts in its path, found once per entry
+            // rather than by re-parsing both paths in every comparison.
+            let mut keyed: Vec<(Option<usize>, MatchResult)> = std::mem::take(results)
+                .into_iter()
+                .map(|m| {
+                    let start = m
+                        .path
+                        .file_name()
+                        .map(|n| m.path.as_os_str().len() - n.len());
+                    (start, m)
+                })
+                .collect();
+            fn name((start, m): &(Option<usize>, MatchResult)) -> Option<&[u8]> {
+                start.map(|s| &m.path.as_os_str().as_encoded_bytes()[s..])
+            }
+            keyed.sort_by(|a, b| {
+                by(name(a), name(b), reverse).then_with(|| path_order(&a.1.path, &b.1.path))
+            });
+            results.extend(keyed.into_iter().map(|(_, m)| m));
+        }
+        SortKey::Size => results
+            .sort_by(|a, b| by(a.size, b.size, reverse).then_with(|| path_order(&a.path, &b.path))),
+        SortKey::Time => results.sort_by(|a, b| {
+            by(a.modified, b.modified, reverse).then_with(|| path_order(&a.path, &b.path))
+        }),
+    }
 }
 
 /// Extracts the name `find`'s `-name` test would compare the root against.
@@ -439,10 +576,12 @@ fn check_root(
         return None;
     }
 
-    Some(MatchResult {
-        path: canonical_root.to_path_buf(),
+    Some(MatchResult::new(
+        canonical_root.to_path_buf(),
         is_dir,
-    })
+        Some(&metadata),
+        config.collect_metadata,
+    ))
 }
 
 pub fn parallel_find(
@@ -673,10 +812,18 @@ pub fn scan_directory(
 
                 if size_ok && age_ok {
                     stats.matched_count.fetch_add(1, Ordering::Relaxed);
-                    let _ = output_tx.send(MatchResult {
-                        path: entry_path.clone(),
+                    // --sort size/time: read here, in the workers, and
+                    // reuse what the filters above already fetched.
+                    // DirEntry::metadata does not follow symlinks.
+                    if config.collect_metadata && metadata_cache.is_none() {
+                        metadata_cache = entry.metadata().ok();
+                    }
+                    let _ = output_tx.send(MatchResult::new(
+                        entry_path.clone(),
                         is_dir,
-                    });
+                        metadata_cache.as_ref(),
+                        config.collect_metadata,
+                    ));
                 }
             }
         }
@@ -723,9 +870,127 @@ pub fn scan_directory(
 
 #[cfg(test)]
 mod tests {
-    use super::{Args, default_jobs, root_match_name};
+    use super::{
+        Args, MatchResult, SortKey, default_jobs, path_order, root_match_name, sort_results,
+    };
     use clap::Parser;
-    use std::path::Path;
+    use std::path::{Path, PathBuf};
+
+    // ── --sort ───────────────────────────────────────────────────────────────
+
+    #[test]
+    fn sort_flags_parse() {
+        let a = Args::try_parse_from(["arfind", ".", "--sort", "size", "--reverse"]).unwrap();
+        assert_eq!(a.sort, Some(SortKey::Size));
+        assert!(a.reverse);
+        for (v, k) in [
+            ("name", SortKey::Name),
+            ("path", SortKey::Path),
+            ("time", SortKey::Time),
+        ] {
+            let a = Args::try_parse_from(["arfind", ".", "--sort", v]).unwrap();
+            assert_eq!(a.sort, Some(k));
+            assert!(!a.reverse);
+        }
+        assert!(Args::try_parse_from(["arfind", ".", "--sort", "mtime"]).is_err());
+        assert!(Args::try_parse_from(["arfind", ".", "--reverse"]).is_err());
+        assert!(Args::try_parse_from(["arfind", ".", "--sort", "name", "-c"]).is_err());
+        // Works with -0 and the exec options.
+        assert!(Args::try_parse_from(["arfind", ".", "--sort", "name", "-0"]).is_ok());
+        assert!(Args::try_parse_from(["arfind", ".", "--sort", "time", "--exec", "echo"]).is_ok());
+    }
+
+    #[test]
+    fn only_size_and_time_need_metadata() {
+        assert!(SortKey::Size.needs_metadata());
+        assert!(SortKey::Time.needs_metadata());
+        assert!(!SortKey::Name.needs_metadata());
+        assert!(!SortKey::Path.needs_metadata());
+    }
+
+    fn bare(path: &str) -> MatchResult {
+        MatchResult {
+            path: PathBuf::from(path),
+            is_dir: false,
+            size: None,
+            modified: None,
+        }
+    }
+
+    fn paths(v: &[MatchResult]) -> Vec<&str> {
+        v.iter().map(|m| m.path.to_str().unwrap()).collect()
+    }
+
+    #[test]
+    fn name_sort_uses_the_file_name_and_breaks_ties_by_path() {
+        let mut v = vec![bare("/r/b/x"), bare("/r/z/a"), bare("/r/a/x"), bare("/r/m")];
+        sort_results(&mut v, SortKey::Name, false);
+        assert_eq!(paths(&v), ["/r/z/a", "/r/m", "/r/a/x", "/r/b/x"]);
+        // Reverse flips the names; equal names stay in path order.
+        sort_results(&mut v, SortKey::Name, true);
+        assert_eq!(paths(&v), ["/r/a/x", "/r/b/x", "/r/m", "/r/z/a"]);
+    }
+
+    #[test]
+    fn path_order_agrees_with_path_cmp() {
+        // Bytes just below and above '/', spaces, prefixes, multi-byte.
+        let paths = [
+            "/", "/a", "/a/b", "/a/b/c", "/a b", "/a!", "/a-b", "/a.b", "/a.b/c", "/a0", "/aB",
+            "/a/x", "/a-b/x", "/ab", "/b", "/b/a", "/é", "/é/x", "/z", "/a/b-c", "/a/b.c/d",
+        ];
+        for a in paths {
+            for b in paths {
+                let (a, b) = (Path::new(a), Path::new(b));
+                assert_eq!(path_order(a, b), a.cmp(b), "{a:?} vs {b:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn keeps_size_and_time_only_when_asked() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let f = dir.path().join("f");
+        std::fs::write(&f, "abc").unwrap();
+        let m = std::fs::symlink_metadata(&f).unwrap();
+        let kept = MatchResult::new(f.clone(), false, Some(&m), true);
+        assert_eq!(kept.size, Some(3));
+        assert_eq!(kept.modified, m.modified().ok());
+        let dropped = MatchResult::new(f, false, Some(&m), false);
+        assert!(dropped.size.is_none() && dropped.modified.is_none());
+    }
+
+    #[test]
+    fn path_sort_and_reverse() {
+        let mut v = vec![bare("/r/b"), bare("/r/a/z"), bare("/r/a")];
+        sort_results(&mut v, SortKey::Path, false);
+        assert_eq!(paths(&v), ["/r/a", "/r/a/z", "/r/b"]);
+        sort_results(&mut v, SortKey::Path, true);
+        assert_eq!(paths(&v), ["/r/b", "/r/a/z", "/r/a"]);
+    }
+
+    #[test]
+    fn missing_metadata_sorts_last_in_both_directions() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let small = dir.path().join("small");
+        let big = dir.path().join("big");
+        std::fs::write(&small, "x").unwrap();
+        std::fs::write(&big, "xxxxxxxx").unwrap();
+        let with_meta = |p: &Path| {
+            let m = std::fs::symlink_metadata(p).unwrap();
+            MatchResult::new(p.to_path_buf(), false, Some(&m), true)
+        };
+        let mut v = vec![bare("/gone"), with_meta(&big), with_meta(&small)];
+        sort_results(&mut v, SortKey::Size, false);
+        assert_eq!(v[0].path, small);
+        assert_eq!(v[1].path, big);
+        assert_eq!(v[2].path, Path::new("/gone"));
+        sort_results(&mut v, SortKey::Size, true);
+        assert_eq!(v[0].path, big);
+        assert_eq!(v[1].path, small);
+        assert_eq!(v[2].path, Path::new("/gone"));
+        sort_results(&mut v, SortKey::Time, true);
+        assert_eq!(v[2].path, Path::new("/gone"));
+    }
 
     // ── -j / --jobs boundary ─────────────────────────────────────────────────
     // `0` workers means the task queue is never drained. arfind additionally

@@ -530,10 +530,10 @@
   <div class="tool-grid">
     <div class="tool-card">
       <div class="tool-card-header">
-        <span class="tool-name"><span class="ar">ar</span>find<span class="tool-ver">v0.2.5</span></span>
+        <span class="tool-name"><span class="ar">ar</span>find<span class="tool-ver">v0.2.6</span></span>
         <span class="tool-alt">replaces find</span>
       </div>
-      <p class="tool-desc">Parallel directory traversal with glob matching, built-in file types, size and age filters, and smart defaults that skip <code style="font-family:var(--mono);font-size:0.78rem">.git</code> and <code style="font-family:var(--mono);font-size:0.78rem">node_modules</code> automatically. Runs commands on results without a shell, and prints NUL-separated paths for <code style="font-family:var(--mono);font-size:0.78rem">xargs -0</code>.</p>
+      <p class="tool-desc">Parallel directory traversal with glob matching, built-in file types, size and age filters, sorting by name, size or time, and smart defaults that skip <code style="font-family:var(--mono);font-size:0.78rem">.git</code> and <code style="font-family:var(--mono);font-size:0.78rem">node_modules</code> automatically. Runs commands on results without a shell, and prints NUL-separated paths for <code style="font-family:var(--mono);font-size:0.78rem">xargs -0</code>.</p>
       <div class="tool-flags">
         <span class="flag">--name</span>
         <span class="flag">-t f/d/l</span>
@@ -541,6 +541,7 @@
         <span class="flag">--extension</span>
         <span class="flag">--size</span>
         <span class="flag">--older-than</span>
+        <span class="flag">--sort</span>
         <span class="flag">--empty</span>
         <span class="flag">--max-depth</span>
         <span class="flag">--exclude</span>
@@ -631,6 +632,9 @@
         <br>
         <br><span class="uc-comment"># Find files larger than 100MB</span>
         <br><span class="uc-cmd">arfind</span> <span class="uc-arg">.</span> <span class="uc-flag">-t</span> <span class="uc-arg">f</span> <span class="uc-flag">--size</span> <span class="uc-arg">100MB</span>
+        <br>
+        <br><span class="uc-comment"># The 20 largest files, biggest first</span>
+        <br><span class="uc-cmd">arfind</span> <span class="uc-arg">.</span> <span class="uc-flag">-t</span> <span class="uc-arg">f</span> <span class="uc-flag">--sort</span> <span class="uc-arg">size</span> <span class="uc-flag">--reverse</span> <span class="uc-pipe">|</span> <span class="uc-cmd">head</span> <span class="uc-flag">-20</span>
         <br>
         <br><span class="uc-comment"># Count empty files in a directory</span>
         <br><span class="uc-cmd">arfind</span> <span class="uc-arg">.</span> <span class="uc-flag">-t</span> <span class="uc-arg">f</span> <span class="uc-flag">--empty</span> <span class="uc-flag">--count</span>

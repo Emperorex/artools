@@ -1,9 +1,9 @@
 use arfind::{
-    Args, DEFAULT_IGNORES, SearchConfig, SearchStats, SizeFilter,
+    Args, DEFAULT_IGNORES, MatchResult, SearchConfig, SearchStats, SizeFilter, SortKey,
     age::{MtimeFilter, check_window},
     build_exclude_matcher,
     exec::{self, ExecTemplate},
-    parallel_find,
+    parallel_find, sort_results,
     types::NameKindFilter,
 };
 use clap::{CommandFactory, Parser};
@@ -116,6 +116,34 @@ fn build_ignore_dirs(
         .map_err(|(entry, e)| format!("Invalid glob pattern for --exclude-dir: '{}': {}", entry, e))
 }
 
+/// Runs the search and returns every result, in traversal order.
+fn collect(
+    root: PathBuf,
+    jobs: usize,
+    config: Arc<SearchConfig>,
+    stats: &SearchStats,
+) -> Vec<MatchResult> {
+    let found: Arc<Mutex<Vec<MatchResult>>> = Arc::new(Mutex::new(Vec::new()));
+    let sink = Arc::clone(&found);
+    parallel_find(root, jobs, config, stats.clone(), move |item| {
+        sink.lock().unwrap().push(item);
+    });
+    std::mem::take(&mut *found.lock().unwrap())
+}
+
+/// Writes one result as the unsorted output does: escaped, directories in
+/// bold blue, one per line; or with `-0` the exact path bytes and a NUL.
+fn write_item(out: &mut impl Write, item: &MatchResult, print0: bool) -> io::Result<()> {
+    if print0 {
+        out.write_all(&arcommon::fs::path_bytes(&item.path))?;
+        out.write_all(b"\0")
+    } else if item.is_dir {
+        writeln!(out, "{}", arcommon::display_path(&item.path).blue().bold())
+    } else {
+        writeln!(out, "{}", arcommon::display_path(&item.path))
+    }
+}
+
 /// Prints `error: ...` in red and exits with status 1.
 fn fail(message: &str) -> ! {
     eprintln!("{}", format!("error: {}", message).red());
@@ -193,6 +221,7 @@ fn main() {
             args.older_than.as_ref().map(|a| a.duration),
             args.newer_than.as_ref().map(|a| a.duration),
         ),
+        collect_metadata: args.sort.is_some_and(SortKey::needs_metadata),
     });
 
     // Parsed before searching, so a bad command fails fast.
@@ -255,14 +284,10 @@ fn main() {
     if let Some(template) = exec {
         // --exec/--exec-batch: collect everything first, so commands that
         // move or delete files cannot affect the search, then run them in
-        // a stable (sorted) order.
-        let found: Arc<Mutex<Vec<PathBuf>>> = Arc::new(Mutex::new(Vec::new()));
-        let sink = Arc::clone(&found);
-        parallel_find(root_path, args.jobs, config, stats.clone(), move |item| {
-            sink.lock().unwrap().push(item.path);
-        });
-        let mut paths = std::mem::take(&mut *found.lock().unwrap());
-        paths.sort();
+        // a stable order: by path, or as --sort says.
+        let mut found = collect(root_path, args.jobs, config, &stats);
+        sort_results(&mut found, args.sort.unwrap_or(SortKey::Path), args.reverse);
+        let paths: Vec<PathBuf> = found.into_iter().map(|m| m.path).collect();
 
         let stdout = io::stdout();
         let mut out = stdout.lock();
@@ -286,6 +311,17 @@ fn main() {
                 exit_code = 1;
             }
         }
+    } else if let Some(key) = args.sort {
+        // --sort: the whole result set is needed before the first line.
+        let mut found = collect(root_path, args.jobs, config, &stats);
+        sort_results(&mut found, key, args.reverse);
+        let mut out = BufWriter::new(io::stdout().lock());
+        for item in &found {
+            if write_item(&mut out, item, args.print0).is_err() {
+                break; // e.g. `| head`: the reader is gone
+            }
+        }
+        let _ = out.flush();
     } else if args.print0 {
         // -0: exact bytes, NUL-terminated. Buffered, since a listing can be
         // millions of paths, and flushed once at the end: stdout's own

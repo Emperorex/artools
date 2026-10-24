@@ -65,8 +65,9 @@ pub struct DirectoryQuery {
     /// (unless a threshold is given).
     #[serde(skip)]
     pub include_active: bool,
-    /// `--summarize`: list nothing, report totals only.
-    #[serde(skip)]
+    /// `--summarize`: list nothing, report totals only. Written to JSON
+    /// so a reader (e.g. `--diff`) knows an empty list means "not listed",
+    /// not "no directories".
     pub summarize: bool,
 }
 
@@ -340,6 +341,7 @@ struct InodeParams {
     top: usize,
     max_depth: Option<usize>,
     threshold_inodes: Option<u64>,
+    summarize: bool,
 }
 
 #[derive(Serialize)]
@@ -399,6 +401,7 @@ pub fn write_inodes<W: Write>(
             top: query.top,
             max_depth: query.max_depth,
             threshold_inodes: query.threshold_bytes,
+            summarize: query.summarize,
         },
         summary,
         entries,

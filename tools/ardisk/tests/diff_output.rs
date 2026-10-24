@@ -386,3 +386,80 @@ fn diff_is_a_mode_of_its_own() {
     }
     refused(&["--diff", b], 2, "BEFORE");
 }
+
+// ── --summarize snapshots (review regression) ───────────────────────────
+
+/// A summary-only snapshot lists no directories. It must never be taken
+/// as a complete listing, or every directory of the other snapshot would
+/// be reported as new or gone.
+#[test]
+fn summary_only_snapshots_report_no_new_or_gone() {
+    let dir = TempDir::new().unwrap();
+    let root = dir.path().join("data");
+    write(root.join("a/f"), 1000);
+    write(root.join("b/g"), 2000);
+    let s1 = dir.path().join("s1.json");
+    snapshot(&root, &s1, &["--summarize"]);
+    let doc: Value = serde_json::from_str(&fs::read_to_string(&s1).unwrap()).unwrap();
+    assert_eq!(doc["params"]["summarize"], true);
+
+    write(root.join("c/h"), 3000);
+    fs::remove_dir_all(root.join("a")).unwrap();
+    let s2 = dir.path().join("s2.json");
+    snapshot(&root, &s2, &["--summarize"]);
+    let full = dir.path().join("full.json");
+    snapshot(&root, &full, &["--top", "0"]);
+
+    for (b, a) in [(&s1, &s2), (&s1, &full), (&full, &s2)] {
+        let out = ardisk(&["--diff", s(b), s(a), "--json"]);
+        let doc: Value = serde_json::from_str(&ok(&out)).unwrap();
+        assert!(changes(&doc).is_empty(), "{b:?} vs {a:?}: {doc}");
+        assert_eq!(doc["summary"]["new"], 0);
+        assert_eq!(doc["summary"]["gone"], 0);
+        // The totals are still compared (s1 is from before the change).
+        if b == &s1 {
+            assert_ne!(doc["summary"]["total_delta"], 0);
+        }
+        let err = stderr(&out);
+        assert!(
+            err.contains("lists no directories (taken with --summarize)"),
+            "{err}"
+        );
+    }
+}
+
+/// With --summarize and nothing matching --include, no directory qualifies
+/// and the list is not even marked truncated; params.summarize still makes
+/// the snapshot partial.
+#[test]
+fn summary_with_nothing_listed_is_still_partial() {
+    let dir = TempDir::new().unwrap();
+    let root = dir.path().join("data");
+    write(root.join("a/f.txt"), 1000);
+    let before = dir.path().join("b.json");
+    snapshot(&root, &before, &["--summarize", "--include", "*.log"]);
+    let doc: Value = serde_json::from_str(&fs::read_to_string(&before).unwrap()).unwrap();
+    assert_eq!(doc["truncated"], false);
+    assert_eq!(doc["entries"].as_array().unwrap().len(), 0);
+
+    write(root.join("a/new.log"), 5000);
+    let after = dir.path().join("a.json");
+    snapshot(&root, &after, &["--top", "0", "--include", "*.log"]);
+    let out = ardisk(&["--diff", s(&before), s(&after), "--json"]);
+    let doc: Value = serde_json::from_str(&ok(&out)).unwrap();
+    assert_eq!(doc["before"]["complete"], false);
+    assert!(changes(&doc).is_empty(), "{doc}");
+    assert_eq!(doc["summary"]["not_comparable"], 1);
+}
+
+#[test]
+fn inode_snapshots_record_summarize_too() {
+    let dir = TempDir::new().unwrap();
+    write(dir.path().join("a/f"), 1);
+    for (extra, want) in [(&["--summarize"][..], true), (&[][..], false)] {
+        let mut args = vec![s(dir.path()), "--inodes", "--json"];
+        args.extend_from_slice(extra);
+        let doc: Value = serde_json::from_str(&ok(&ardisk(&args))).unwrap();
+        assert_eq!(doc["params"]["summarize"], want, "{extra:?}");
+    }
+}

@@ -347,7 +347,7 @@ ardisk /var --inodes -s                  # just the total
 - Cannot be combined with `--by-type`, `--duplicates`, `--largest-files`, `--min-size` or `--apparent-size`.
 - Directories that cannot be read are not counted (use `--debug` to see them).
 
-In JSON the document has `"mode": "inodes"`, no `size_mode`, `params.threshold_inodes`, `summary.total_inodes` and entries of the form `{ "path": "var/lib", "inodes": 398212, "depth": 2, "kind": "directory" }`.
+In JSON the document has `"mode": "inodes"`, no `size_mode`, `params.threshold_inodes` (and `params.summarize`, as for directories), `summary.total_inodes` and entries of the form `{ "path": "var/lib", "inodes": 398212, "depth": 2, "kind": "directory" }`.
 
 ## Comparing snapshots
 
@@ -380,7 +380,7 @@ ardisk --diff before.json after.json --json              # machine-readable delt
 ardisk /data --json --top 0 | ardisk --diff before.json -   # compare with right now
 ```
 
-- **Save snapshots with `--top 0`.** A snapshot lists only what `--top` (default 20), `--max-depth` and `--threshold` let through. A directory missing from a complete snapshot really wasn't there, so it shows as new or gone. A directory missing from a partial snapshot may just have been below its cutoff, so ardisk doesn't guess: it skips it and warns on stderr that the snapshot is partial, saying how to save a complete one.
+- **Save snapshots with `--top 0`.** A snapshot lists only what `--top` (default 20), `--max-depth` and `--threshold` let through, and a `--summarize` snapshot lists no directories at all (only its total is compared). A directory missing from a complete snapshot really wasn't there, so it shows as new or gone. A directory missing from a partial snapshot may just have been below its cutoff, so ardisk doesn't guess: it skips it and warns on stderr that the snapshot is partial, saying how to save a complete one.
 - **Like with like.** Both snapshots must be directory reports of the same root, taken the same way: both disk usage or both `--apparent-size`, with the same `--include`, `--exclude`, `--ignore`, `--no-hidden`, `-x` and age filters. Anything else would compare different measurements, so ardisk refuses with a message saying what differs. Two `--inodes` snapshots can be compared too; then `--threshold` is a number of inodes.
 - **Options.** `--diff` is a mode of its own: it takes no PATH and works only with `--top`, `--threshold` (smallest change shown, in the snapshots' unit), `--si` and `--json`. `-` reads one of the snapshots from stdin.
 - Moves and renames show as one directory gone and another new; file contents are not compared.
@@ -428,7 +428,7 @@ The list obeys the same limits as the text report: `--top` (default 20) for dire
   "root": "/home/me/project",
   "size_mode": "disk",
   "filters": { "include": null, "exclude": ["target/**"], "ignore": [], "no_ignore": false, "no_hidden": false, "one_file_system": false, "older_than": null, "newer_than": null },
-  "params": { "top": 20, "max_depth": null, "threshold_bytes": null },
+  "params": { "top": 20, "max_depth": null, "threshold_bytes": null, "summarize": false },
   "summary": { "total_bytes": 1073741824, "files": 15230, "directories": 842 },
   "entries": [
     { "path": ".",    "bytes": 1073741824, "depth": 0, "kind": "directory" },
@@ -438,7 +438,7 @@ The list obeys the same limits as the text report: `--top` (default 20) for dire
 }
 ```
 
-`summary.total_bytes` is the size of the root (what `--summarize` prints). `files` counts regular files that contributed to the totals (a hard-linked file counts once; symlinks and filtered-out files not at all). `directories` counts directories visited, including the root.
+`params.summarize` is `true` for `--summarize`, whose `entries` is always empty: an empty list then means "not listed", not "no directories". `summary.total_bytes` is the size of the root (what `--summarize` prints). `files` counts regular files that contributed to the totals (a hard-linked file counts once; symlinks and filtered-out files not at all). `directories` counts directories visited, including the root.
 
 **`largest_files`**
 

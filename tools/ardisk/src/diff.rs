@@ -150,16 +150,22 @@ fn parse(name: String, doc: RawDoc) -> Result<Snapshot, String> {
 
     let param = |key: &str| doc.params.get(key).filter(|v| !v.is_null());
     let threshold = param("threshold_bytes").or_else(|| param("threshold_inodes"));
-    let partial_reason = if doc.truncated {
+    // `--summarize` lists no directories at all. Checked first and on its
+    // own, not inferred from `truncated`: an empty list from a summary must
+    // never read as "a complete listing of no directories". Snapshots from
+    // before `params.summarize` existed fall back to `truncated` with an
+    // empty list, which is what `--summarize` produced whenever there was
+    // anything to list.
+    let summarized = param("summarize").and_then(|v| v.as_bool()) == Some(true)
+        || (doc.params.get("summarize").is_none() && doc.truncated && entries.is_empty());
+    let partial_reason = if summarized {
+        Some("lists no directories (taken with --summarize)".to_string())
+    } else if doc.truncated {
         let top = param("top").and_then(|v| v.as_u64()).unwrap_or(0);
-        Some(if top > 0 {
-            if top == 1 {
-                "lists only its biggest directory".to_string()
-            } else {
-                format!("lists only the top {top} directories")
-            }
+        Some(if top == 1 {
+            "lists only its biggest directory".to_string()
         } else {
-            "lists no directories (--summarize)".to_string()
+            format!("lists only the top {top} directories")
         })
     } else if let Some(depth) = param("max_depth") {
         Some(format!("was taken with --max-depth {depth}"))
@@ -731,6 +737,44 @@ mod tests {
         // Both complete: no warning.
         assert!(partial_warning(&d, &a, &a).is_none());
         assert!(w.contains("--top 0"), "{w}");
+    }
+
+    #[test]
+    fn a_summarize_snapshot_is_never_complete() {
+        let summarized = r#"{"top":20,"max_depth":null,"threshold_bytes":null,"summarize":true}"#;
+        // Even when nothing qualified, so `truncated` is false.
+        let s = snap("s", &doc("directories", false, summarized, &[]));
+        assert!(!s.complete);
+        assert_eq!(
+            s.partial_reason.as_deref(),
+            Some("lists no directories (taken with --summarize)")
+        );
+        // Snapshots written before params.summarize existed: truncated with
+        // an empty list.
+        let legacy = r#"{"top":20,"max_depth":null,"threshold_bytes":null}"#;
+        let s = snap("l", &doc("directories", true, legacy, &[]));
+        assert!(s.partial_reason.unwrap().contains("--summarize"));
+        // summarize: false changes nothing.
+        let listed = r#"{"top":0,"max_depth":null,"threshold_bytes":null,"summarize":false}"#;
+        assert!(snap("f", &doc("directories", false, listed, &[(".", 1)])).complete);
+    }
+
+    #[test]
+    fn summary_only_snapshots_produce_no_new_or_gone() {
+        let summarized = r#"{"top":20,"max_depth":null,"threshold_bytes":null,"summarize":true}"#;
+        let full = doc(
+            "directories",
+            false,
+            FULL,
+            &[(".", 300), ("a", 100), ("b", 200)],
+        );
+        let empty = snap("s", &doc("directories", false, summarized, &[]));
+        let full = snap("f", &full);
+        for (b, a) in [(&empty, &full), (&full, &empty), (&empty, &empty)] {
+            let d = compare(b, a);
+            assert!(d.rows.is_empty(), "{:?}", d.rows);
+            assert!(partial_warning(&d, b, a).unwrap().contains("--summarize"));
+        }
     }
 
     #[test]

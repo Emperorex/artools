@@ -583,7 +583,7 @@
 
     <div class="tool-card">
       <div class="tool-card-header">
-        <span class="tool-name"><span class="ar">ar</span>grep<span class="tool-ver">v0.3.1</span></span>
+        <span class="tool-name"><span class="ar">ar</span>grep<span class="tool-ver">v0.3.2</span></span>
         <span class="tool-alt">replaces grep</span>
       </div>
       <p class="tool-desc">Parallel text search across file trees. Full regex by default, with <code style="font-family:var(--mono);font-size:0.78rem">-F</code> for literal strings. Skips binaries and special files, searches gzip archives, filters by built-in file types, and emits JSON Lines or NUL-separated names for scripts. Works as a drop-in for common grep workflows.</p>
@@ -609,6 +609,7 @@
         <span class="flag">--type</span>
         <span class="flag">--type-list</span>
         <span class="flag">--stats</span>
+        <span class="flag">--max-filesize</span>
         <span class="flag">--include</span>
         <span class="flag">--exclude</span>
         <span class="flag">--exclude-dir</span>
@@ -735,6 +736,9 @@
         <br>
         <br><span class="uc-comment"># Which types exist?</span>
         <br><span class="uc-cmd">argrep</span> <span class="uc-flag">--type-list</span>
+        <br>
+        <br><span class="uc-comment"># Don't open huge dumps and bundles</span>
+        <br><span class="uc-cmd">argrep</span> <span class="uc-arg">"TODO"</span> <span class="uc-arg">.</span> <span class="uc-flag">--max-filesize</span> <span class="uc-arg">10M</span>
         <br>
         <br><span class="uc-comment"># Search rotated, gzipped logs</span>
         <br><span class="uc-cmd">argrep</span> <span class="uc-flag">-z</span> <span class="uc-arg">"timeout"</span> <span class="uc-arg">/var/log</span>

@@ -397,6 +397,16 @@ struct Args {
           default_value = "1G")]
     max_decompressed_size: u64,
 
+    /// Skip files larger than SIZE without opening them, e.g. 10M or
+    /// 50MB (K/M/G/T, optional B; 0 = unlimited, the default). The size is
+    /// the file's length on disk, so with -z the compressed size. Saves
+    /// the I/O of reading huge logs, dumps and minified bundles. A skipped
+    /// file is not an error; an explicitly named one gets a warning on
+    /// stderr. No effect with --files, which reads no content.
+    #[arg(long = "max-filesize", value_name = "SIZE", value_parser = parse_size,
+          default_value = "0")]
+    max_filesize: u64,
+
     /// List the files that would be searched, without searching their
     /// content — every filter still runs (.gitignore/.ignore, --hidden,
     /// --no-ignore, --include, --exclude, --type, --type-not,
@@ -805,6 +815,7 @@ fn main() {
         replace: args.replace.clone(),
         max_line_bytes: usize::try_from(args.max_line_size).unwrap_or(usize::MAX),
         max_decompressed_bytes: args.max_decompressed_size,
+        max_filesize: args.max_filesize,
         json: args.json,
     });
 
@@ -892,6 +903,8 @@ fn main() {
             bytes_read: stats.bytes_read.load(Ordering::Relaxed),
             errors: stats.io_errors.load(Ordering::Relaxed),
             elapsed_ms: duration.as_millis(),
+            files_skipped_size: (args.max_filesize > 0)
+                .then(|| stats.files_too_large.load(Ordering::Relaxed)),
         });
     }
 
@@ -922,13 +935,19 @@ fn main() {
                 "Files searched:     {}",
                 stats.total_files.load(Ordering::Relaxed).to_string().cyan()
             );
+            let too_large = stats.files_too_large.load(Ordering::Relaxed);
             eprintln!(
-                "Files skipped:      {}",
+                "Files skipped:      {}{}",
                 stats
                     .files_skipped
                     .load(Ordering::Relaxed)
                     .to_string()
-                    .cyan()
+                    .cyan(),
+                if too_large > 0 {
+                    format!(" ({too_large} over --max-filesize)")
+                } else {
+                    String::new()
+                }
             );
             eprintln!(
                 "Directories:        {}",
@@ -1728,6 +1747,23 @@ mod tests {
         .unwrap();
         assert_eq!(args.max_line_size, 512 * 1024);
         assert_eq!(args.max_decompressed_size, 0);
+    }
+
+    #[test]
+    fn max_filesize_defaults_to_unlimited_and_takes_suffixes() {
+        let args = Args::try_parse_from(["argrep", "foo", "."]).unwrap();
+        assert_eq!(args.max_filesize, 0, "no limit unless asked");
+        for (given, bytes) in [
+            ("10M", 10 << 20),
+            ("50MB", 50 << 20),
+            ("512B", 512),
+            ("0", 0),
+        ] {
+            let args =
+                Args::try_parse_from(["argrep", "foo", ".", "--max-filesize", given]).unwrap();
+            assert_eq!(args.max_filesize, bytes, "{given}");
+        }
+        assert!(Args::try_parse_from(["argrep", "foo", ".", "--max-filesize", "big"]).is_err());
     }
 
     #[test]

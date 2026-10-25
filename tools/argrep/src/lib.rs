@@ -31,24 +31,30 @@ pub const DEFAULT_MAX_LINE_BYTES: usize = 4 * 1024 * 1024;
 /// cap a ~1 MB file can expand to gigabytes (a "gzip bomb").
 pub const DEFAULT_MAX_DECOMPRESSED_BYTES: u64 = 1024 * 1024 * 1024;
 
-/// Parses a human-friendly size such as `4M`, `512K`, `1G` or `1048576`
-/// (binary multiples: K = 1024). `0` is valid and means "unlimited" for the
+/// Parses a human-friendly size such as `4M`, `512K`, `1G`, `10MB`, `512B`
+/// or `1048576` (binary multiples: K = 1024; the trailing `B` is optional
+/// and case does not matter). `0` is valid and means "unlimited" for the
 /// flags that use this. Used as a clap value_parser.
 pub fn parse_size(s: &str) -> Result<u64, String> {
     let t = s.trim();
     if t.is_empty() {
         return Err("size must not be empty".to_string());
     }
+    // An optional trailing B: "10MB" = "10M", "512B" = "512".
+    let t = t
+        .strip_suffix(['B', 'b'])
+        .filter(|rest| !rest.is_empty())
+        .unwrap_or(t);
     let (digits, mult) = match t.chars().last().unwrap().to_ascii_uppercase() {
         'K' => (&t[..t.len() - 1], 1024u64),
         'M' => (&t[..t.len() - 1], 1024 * 1024),
         'G' => (&t[..t.len() - 1], 1024 * 1024 * 1024),
+        'T' => (&t[..t.len() - 1], 1024 * 1024 * 1024 * 1024),
         _ => (t, 1),
     };
-    let n: u64 = digits
-        .trim()
-        .parse()
-        .map_err(|_| format!("invalid size '{s}' (expected e.g. 4M, 512K, 1G, or a byte count)"))?;
+    let n: u64 = digits.trim().parse().map_err(|_| {
+        format!("invalid size '{s}' (expected e.g. 4M, 512K, 10MB, 1G, or a byte count)")
+    })?;
     n.checked_mul(mult)
         .ok_or_else(|| format!("size '{s}' is too large"))
 }
@@ -433,6 +439,11 @@ pub struct SearchConfig {
     /// the same incomplete-search treatment as above. 0 = unlimited. Has
     /// no effect on uncompressed files.
     pub max_decompressed_bytes: u64,
+    /// --max-filesize: files larger than this many bytes (as stat reports
+    /// them; under -z the compressed size on disk) are skipped without
+    /// being opened. 0 = unlimited. Not applied with --files, which never
+    /// reads content. A file of exactly this size is still searched.
+    pub max_filesize: u64,
     /// --json: results are printed as JSON events. Each file's results
     /// are then delivered as one contiguous block (see `ResultSink`), so a
     /// file's begin/match/end events never interleave with another file's,
@@ -477,6 +488,8 @@ pub struct SearchStats {
     /// (that's `io_errors`, a different failure category from "skipped by
     /// our own filtering rules"). Displayed as "Files skipped".
     pub files_skipped: Arc<AtomicUsize>,
+    /// The part of `files_skipped` that was over --max-filesize.
+    pub files_too_large: Arc<AtomicUsize>,
     /// Total bytes read from file contents during scanning. Counted
     /// entirely via each read_until call in grep_file's main loop — the
     /// binary-sniff's own initial read is deliberately NOT counted
@@ -499,6 +512,7 @@ impl SearchStats {
             io_errors: Arc::new(AtomicUsize::new(0)),
             files_discovered: Arc::new(AtomicUsize::new(0)),
             files_skipped: Arc::new(AtomicUsize::new(0)),
+            files_too_large: Arc::new(AtomicUsize::new(0)),
             bytes_read: Arc::new(AtomicUsize::new(0)),
         }
     }
@@ -738,12 +752,30 @@ pub fn scan_and_grep(
     // follows symlinks, like the old is_file() did. A path that can't be
     // stat'ed falls through to read_dir below and is reported as an I/O
     // error there.
-    let root_is_non_dir = matches!(fs::metadata(dir_path), Ok(m) if !m.is_dir());
-    if root_is_non_dir {
+    let root_meta = fs::metadata(dir_path).ok().filter(|m| !m.is_dir());
+    if let Some(meta) = root_meta {
         // An explicitly-named single-file root always counts as one
-        // discovered (and searched) file — see files_discovered's field
-        // doc for why this must stay in sync with the entries-loop below.
+        // discovered file, and as searched unless --max-filesize skips it
+        // — see files_discovered's field doc for why this must stay in
+        // sync with the entries-loop below.
         stats.files_discovered.fetch_add(1, Ordering::Relaxed);
+        // --max-filesize applies to a named file too (that is how
+        // `xargs argrep` passes files), but only to a regular file: a FIFO
+        // or device has no meaningful length. The user named this path, so
+        // the skip is always reported, not just under --debug: a silent
+        // skip would look like "no match".
+        if too_large(&meta, config) {
+            stats.files_skipped.fetch_add(1, Ordering::Relaxed);
+            stats.files_too_large.fetch_add(1, Ordering::Relaxed);
+            eprintln!(
+                "{}: {}: {} bytes, over --max-filesize {} bytes; not searched",
+                "argrep".yellow(),
+                display_path(dir_path),
+                meta.len(),
+                config.max_filesize
+            );
+            return;
+        }
         stats.total_files.fetch_add(1, Ordering::Relaxed);
         if config.files_only {
             emit_file_listing(dir_path, output_tx);
@@ -902,6 +934,28 @@ pub fn scan_and_grep(
                 continue;
             }
 
+            // --max-filesize: one stat, only when the flag is set, after
+            // the name filters so excluded files cost nothing. Symlinks
+            // were skipped above, so this is the file itself. If the stat
+            // fails, grep_file's open reports the error as usual.
+            if config.max_filesize > 0
+                && !config.files_only
+                && let Ok(meta) = entry.metadata()
+                && too_large(&meta, config)
+            {
+                stats.files_skipped.fetch_add(1, Ordering::Relaxed);
+                stats.files_too_large.fetch_add(1, Ordering::Relaxed);
+                if config.debug {
+                    eprintln!(
+                        "{}: {}: {} bytes, over --max-filesize, skipped",
+                        "argrep".red(),
+                        display_path(&entry_path),
+                        meta.len()
+                    );
+                }
+                continue;
+            }
+
             stats.total_files.fetch_add(1, Ordering::Relaxed);
             if config.files_only {
                 emit_file_listing(&entry_path, output_tx);
@@ -910,6 +964,15 @@ pub fn scan_and_grep(
             }
         }
     }
+}
+
+/// --max-filesize: whether a regular file is too large to search. Never
+/// true with --files (no content is read) or for special files.
+fn too_large(meta: &fs::Metadata, config: &SearchConfig) -> bool {
+    config.max_filesize > 0
+        && !config.files_only
+        && meta.is_file()
+        && meta.len() > config.max_filesize
 }
 
 /// --files: emits a bare-filename result for `file_path` without ever
@@ -1868,6 +1931,21 @@ mod size_limit_tests {
         assert!(parse_size("M").is_err());
         assert!(parse_size("1.5M").is_err());
         assert!(parse_size("99999999999999999999G").is_err());
+    }
+
+    #[test]
+    fn parse_size_accepts_an_optional_b_and_t() {
+        assert_eq!(parse_size("512B"), Ok(512));
+        assert_eq!(parse_size("512b"), Ok(512));
+        assert_eq!(parse_size("10KB"), Ok(10 * 1024));
+        assert_eq!(parse_size("10mb"), Ok(10 * 1024 * 1024));
+        assert_eq!(parse_size("1GB"), Ok(1024 * 1024 * 1024));
+        assert_eq!(parse_size("2T"), Ok(2 * 1024u64.pow(4)));
+        assert_eq!(parse_size("2TB"), Ok(2 * 1024u64.pow(4)));
+        assert!(parse_size("B").is_err());
+        assert!(parse_size("MBB").is_err());
+        assert!(parse_size("10BB").is_err());
+        assert!(parse_size("99999999T").is_err());
     }
 
     #[test]

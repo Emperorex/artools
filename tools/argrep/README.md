@@ -376,7 +376,7 @@ Event and field names follow `rg --json` where they overlap, so filters carry ov
 | `context` | A `-A`/`-B`/`-C` line | same as `match` |
 | `end`     | After a file's last event | `path`, `matched_lines` |
 | `file`    | `-l`, `-L`, `--files`: one per listed file | `path` |
-| `summary` | Always the last line | `schema_version`, `mode`, `matched_lines`, `files_with_matches`, `files_searched`, `bytes_read`, `errors`, `elapsed_ms` |
+| `summary` | Always the last line | `schema_version`, `mode`, `matched_lines`, `files_with_matches`, `files_searched`, `bytes_read`, `errors`, `elapsed_ms`; with `--max-filesize` also `files_skipped_size` |
 
 - `submatches` lists every match on the line: `start` and `end` are byte offsets into `lines.text`, `match.text` is the matched text. With `-r`, each submatch also has `replacement.text`, and `lines.text` stays the original line, so nothing is lost.
 - `mode` is `content` (default), `count` (`-c`: a `begin`/`end` pair per file with its count in `matched_lines`, no `match` events), `files_with_matches` (`-l`), `files_without_match` (`-L`) or `files` (`--files`).
@@ -426,6 +426,7 @@ Combinations: `-o` adds nothing (every match is already under `submatches`) and 
 | `--search-compressed`   | `-z`  | —                 | Decompress gzip (`.gz`/`.tgz`) files before searching; no effect combined with `--files`                                                                 |
 | `--max-line-size`       | —     | `4M`              | Skip lines longer than SIZE (K/M/G suffixes; `0` = unlimited) with a warning instead of buffering them whole                                       |
 | `--max-decompressed-size` | —   | `1G`              | With `-z`, stop after SIZE decompressed bytes per file (gzip-bomb protection; `0` = unlimited)                                                     |
+| `--max-filesize`        | —     | unlimited         | Skip files larger than SIZE (e.g. `10M`, `50MB`) without opening them; with `-z` the compressed size on disk counts (see Resource limits)           |
 | `--quiet`               | `-q`  | —                 | No output; exit code alone reports match/no-match/error (see Exit codes below). Overrides -l/-c/-n if also set — nothing is printed either way.          |
 
 `-l`, `-L`, and `-c` cannot be combined with each other — they imply mutually incompatible output contracts (`filename` matched vs `filename` unmatched vs `filename: count`), so combining any two of them (`argrep foo . -c -l`, `argrep foo . -l -L`, etc.) is a CLI error rather than one silently overriding the other.
@@ -455,12 +456,24 @@ Text files with invalid UTF-8 (a stray byte from a legacy encoding, a corrupted 
 
 ### Resource limits
 
+`--max-filesize SIZE` (no limit by default) skips any file larger than SIZE **before it is opened**, so huge logs, SQL dumps and minified bundles cost one `stat` instead of a full read:
+
+```bash
+argrep 'TODO' . --max-filesize 10M
+argrep 'error' /var/log --max-filesize 50M --max-line-size 4M
+```
+
+- The size is the file's length as the filesystem reports it; a file of exactly SIZE is still searched. Under `-z` that is the **compressed** size on disk; `--max-decompressed-size` then still limits how much one file may expand to.
+- It applies to every mode that reads content (`-l`, `-L`, `-c`, `-q`, `--json`, ...). `-L` does not list a skipped file, since it was never searched. Plain `--files` lists files without reading them, so the limit does not apply there.
+- Skipping is not an error: files found while walking are skipped quietly (with `--debug`, each is reported), counted under "Files skipped" in `--stats` (`Files skipped: 3 (2 over --max-filesize)`) and as `files_skipped_size` in the `--json` summary. A file you name explicitly (`argrep TODO big.log --max-filesize 1M`) is skipped with a one-line warning on stderr, so it can't be mistaken for "no match". A named symlink is measured by its target, as it is searched.
+- Only regular files are measured; an explicitly named FIFO or device is read as before. `0` means no limit, as for the other size flags.
+
 argrep never holds more than one line per worker thread in memory, and that line is capped:
 
 - `--max-line-size SIZE` (default `4M`): a line longer than this is skipped (its bytes are read and discarded, never stored) and a warning is printed once per file. Without this cap, a single newline-free file would be buffered entirely in memory.
 - `--max-decompressed-size SIZE` (default `1G`): under `-z`, reading stops once a file has produced this many decompressed bytes. gzip compresses repetitive data roughly 1000:1, so a ~2 MB `.gz` can otherwise expand to gigabytes. Applies only to compressed files.
 
-Both accept `K`/`M`/`G` suffixes (binary multiples) and `0` for unlimited. A file that hit either limit was **not fully searched**: it counts toward the "could not be read" total (so the exit status reflects it), and `-L` will not list it as "no match". Raise the limit, or pass `0`, if you need to search such files, e.g. `argrep --max-line-size 64M 'token' dist/`.
+All three size flags accept `K`/`M`/`G`/`T` suffixes (binary multiples) with an optional `B` (`512K` = `512KB`, `100B` = `100`), and `0` for unlimited. A file that hit either limit was **not fully searched**: it counts toward the "could not be read" total (so the exit status reflects it), and `-L` will not list it as "no match". Raise the limit, or pass `0`, if you need to search such files, e.g. `argrep --max-line-size 64M 'token' dist/`.
 
 With `-z`/`--search-compressed` (see Usage above), the binary sniff runs on the *decompressed* content, not the raw compressed bytes on disk — a gzip-compressed binary file is still correctly skipped, the same as an uncompressed one would be. Sniffing a decompressed (or otherwise non-seekable) stream works a little differently under the hood than sniffing a plain file: since it generally can't be rewound, the sniffed bytes are held onto and replayed ahead of the rest of the stream instead of seeking back to the start. This has one small side benefit worth calling out: it also means a FIFO/named pipe can now be searched at all, where it previously failed outright (rewinding after the sniff read isn't possible on a pipe either).
 

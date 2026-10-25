@@ -112,6 +112,9 @@ enum Event<'a> {
         bytes_read: usize,
         errors: usize,
         elapsed_ms: u128,
+        /// Files skipped by --max-filesize; only present with that flag.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        files_skipped_size: Option<usize>,
     },
 }
 
@@ -122,6 +125,8 @@ pub struct Totals {
     pub bytes_read: usize,
     pub errors: usize,
     pub elapsed_ms: u128,
+    /// Files skipped by --max-filesize, or `None` without that flag.
+    pub files_skipped_size: Option<usize>,
 }
 
 /// Turns search results into JSON events.
@@ -281,6 +286,7 @@ impl<W: Write> JsonPrinter<W> {
             bytes_read: totals.bytes_read,
             errors: totals.errors,
             elapsed_ms: totals.elapsed_ms,
+            files_skipped_size: totals.files_skipped_size,
         });
         let _ = self.out.flush();
     }
@@ -327,6 +333,7 @@ mod tests {
                 bytes_read: 100,
                 errors: 0,
                 elapsed_ms: 5,
+                files_skipped_size: None,
             });
         }
         String::from_utf8(buf)

@@ -16,12 +16,14 @@
 //! | [`age`]       | `--older-than` / `--newer-than` parsing and mtime filtering    |
 //! | [`filetypes`] | The built-in `--type` table (`rust`, `python`, ...)            |
 //! | [`fs`]        | Platform helpers such as the device id for `--one-file-system` |
+//! | [`out`]       | `out!`/`outln!`: stdout writes that exit quietly on a closed pipe (the one module that ends the process) |
 
 pub mod age;
 pub mod filetypes;
 pub mod fs;
 pub mod ignore;
 pub mod jobs;
+pub mod out;
 pub mod term;
 pub mod walk;
 

@@ -152,7 +152,7 @@ fn main() {
     let args = Args::parse();
 
     if args.type_list {
-        print!("{}", arcommon::filetypes::type_list());
+        arcommon::out!("{}", arcommon::filetypes::type_list());
         return;
     }
 
@@ -324,11 +324,10 @@ fn main() {
         sort_results(&mut found, key, args.reverse);
         let mut out = BufWriter::new(io::stdout().lock());
         for item in &found {
-            if write_item(&mut out, item, args.print0).is_err() {
-                break; // e.g. `| head`: the reader is gone
-            }
+            // e.g. `| head`: the reader is gone, exit quietly.
+            arcommon::out::check(write_item(&mut out, item, args.print0));
         }
-        let _ = out.flush();
+        arcommon::out::check(out.flush());
     } else if args.print0 {
         // -0: exact bytes, NUL-terminated. Buffered, since a listing can be
         // millions of paths, and flushed once at the end: stdout's own
@@ -337,15 +336,17 @@ fn main() {
         let sink = Arc::clone(&out);
         parallel_find(root_path, args.jobs, config, stats.clone(), move |item| {
             let mut w = sink.lock().unwrap();
-            let _ = w.write_all(&arcommon::fs::path_bytes(&item.path));
-            let _ = w.write_all(b"\0");
+            arcommon::out::check(
+                w.write_all(&arcommon::fs::path_bytes(&item.path))
+                    .and_then(|()| w.write_all(b"\0")),
+            );
         });
         // Flushed before the statistics and the exit status below.
-        let _ = out.lock().unwrap().flush();
+        arcommon::out::check(out.lock().unwrap().flush());
     } else {
         parallel_find(root_path, args.jobs, config, stats.clone(), move |item| {
             if !count_only {
-                println!("{}", item.display());
+                arcommon::outln!("{}", item.display());
             }
         });
     }
@@ -354,7 +355,7 @@ fn main() {
 
     // --count: print total matches after all workers finish
     if count_only {
-        println!("{}", stats.matched_count.load(Ordering::Relaxed));
+        arcommon::outln!("{}", stats.matched_count.load(Ordering::Relaxed));
     }
 
     if args.debug {

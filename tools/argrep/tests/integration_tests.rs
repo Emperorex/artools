@@ -1180,13 +1180,16 @@ fn empty_type_patterns_means_no_type_filter() {
 // ── Ignore dirs ───────────────────────────────────────────────────────────────
 
 #[test]
-fn target_dir_is_ignored_by_default() {
+fn target_dir_is_searched_by_default() {
+    // `target` is not a built-in ignore: it is real source in some trees
+    // (Linux's drivers/target). Cargo's build output is excluded by the
+    // project's .gitignore instead (see tests/default_ignores.rs).
     let (_dir, root) = make_tree(&[
         ("target/release/binary.txt", "needle in target\n"),
         ("src/main.rs", "clean source\n"),
     ]);
     let (names, _) = collect_matches(root, "needle", false);
-    assert!(names.is_empty(), "target/ should be ignored");
+    assert_eq!(names, vec!["binary.txt"], "target/ must be searched");
 }
 
 #[test]

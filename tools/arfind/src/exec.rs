@@ -579,7 +579,11 @@ pub fn run(
     for args in invocations {
         summary.runs += 1;
         if dry_run {
-            let _ = writeln!(out, "{}", display_command(&template.program, &args));
+            arcommon::out::check(writeln!(
+                out,
+                "{}",
+                display_command(&template.program, &args)
+            ));
             continue;
         }
         match Command::new(&template.program).args(&args).status() {
@@ -614,12 +618,12 @@ fn run_in_dirs(
         let args = template.args_for(path);
         summary.runs += 1;
         if dry_run {
-            let _ = writeln!(
+            arcommon::out::check(writeln!(
                 out,
                 "cd {} && {}",
                 shell_quote(dir.as_os_str()),
                 display_command(&template.program, &args)
-            );
+            ));
             continue;
         }
         #[cfg(unix)]

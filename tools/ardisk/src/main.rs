@@ -629,7 +629,7 @@ fn main() {
             } else {
                 "=== Top Directories ==="
             };
-            println!("{}", title.yellow().bold());
+            arcommon::outln!("{}", title.yellow().bold());
         }
 
         let show_bars = args.bar.enabled(io::stdout().is_terminal());
@@ -638,12 +638,12 @@ fn main() {
             print_duplicates(report, args.top, args.summarize);
             warn_unreadable(report, args.debug);
         } else if args.by_type {
-            print!("{}", render_by_type_text(&types, args.top, args.summarize));
+            arcommon::out!("{}", render_by_type_text(&types, args.top, args.summarize));
         } else if args.largest_files.is_some() {
             // --largest-files: individual files, largest first, instead of
             // the per-directory report.
             for file in &largest_files {
-                println!(
+                arcommon::outln!(
                     "{:>10}  {}",
                     format_size(file.size),
                     arcommon::display_path(&file.path)
@@ -670,10 +670,10 @@ fn main() {
                     paint_size,
                 )
             };
-            print!("{text}");
+            arcommon::out!("{text}");
         } else if args.inodes {
             if args.summarize {
-                println!(
+                arcommon::outln!(
                     "{:>10}  {}",
                     root_total,
                     arcommon::display_path(&target_path)
@@ -686,7 +686,7 @@ fn main() {
                     &query,
                 );
                 if show_bars {
-                    print!(
+                    arcommon::out!(
                         "{}",
                         render_list_with_bars(
                             &selection.entries,
@@ -697,13 +697,13 @@ fn main() {
                     );
                 } else {
                     for (path, count) in &selection.entries {
-                        println!("{:>10}  {}", count, arcommon::display_path(path));
+                        arcommon::outln!("{:>10}  {}", count, arcommon::display_path(path));
                     }
                 }
             }
         } else if args.summarize {
             // --summarize: print only the root total and exit
-            println!(
+            arcommon::outln!(
                 "{:>10}  {}",
                 format_size(root_total),
                 arcommon::display_path(&target_path)
@@ -712,7 +712,7 @@ fn main() {
             let selection =
                 select_directories(&aggregated_sizes, &aggregated_content, &target_path, &query);
             if show_bars {
-                print!(
+                arcommon::out!(
                     "{}",
                     render_list_with_bars(
                         &selection.entries,
@@ -723,7 +723,7 @@ fn main() {
                 );
             } else {
                 for (path, size) in &selection.entries {
-                    println!(
+                    arcommon::outln!(
                         "{:>10}  {}",
                         format_size(*size),
                         arcommon::display_path(path)
@@ -802,7 +802,7 @@ fn run_diff(args: &Args, before: &std::path::Path, after: &std::path::Path, unit
             Err(e) => fail(&format!("cannot write JSON: {e}")),
         }
     } else {
-        print!("{}", render_text(&diff, &selection));
+        arcommon::out!("{}", render_text(&diff, &selection));
     }
     if let Some(warning) = partial_warning(&diff, &before, &after) {
         eprintln!("{}", warning.yellow());
@@ -819,16 +819,16 @@ fn plural(n: usize) -> &'static str {
 fn print_duplicates(report: &DuplicateReport, top: usize, summarize: bool) {
     if !summarize {
         for group in report.groups.iter().take(top_limit(top)) {
-            println!(
+            arcommon::outln!(
                 "{} identical files, {} each, {} reclaimable",
                 group.paths.len(),
                 format_size(group.len),
                 format_size(group.reclaimable())
             );
             for path in &group.paths {
-                println!("  {}", arcommon::display_path(path));
+                arcommon::outln!("  {}", arcommon::display_path(path));
             }
-            println!();
+            arcommon::outln!();
         }
     }
 
@@ -843,7 +843,7 @@ fn print_duplicates(report: &DuplicateReport, top: usize, summarize: bool) {
         format!(" (showing the top {} group{})", shown, plural(shown))
     };
     let (groups, redundant) = (report.groups.len(), report.redundant_files());
-    println!(
+    arcommon::outln!(
         "{} duplicate group{}, {} redundant file{}, {} reclaimable{}",
         groups,
         plural(groups),

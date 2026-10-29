@@ -517,7 +517,7 @@ fn main() {
     let mut args = Args::parse();
 
     if args.type_list {
-        print!("{}", type_list());
+        arcommon::out!("{}", type_list());
         return;
     }
 
@@ -1072,7 +1072,7 @@ impl StdinOut<'_> {
     /// The "--" between context groups (text output only).
     fn separator(&mut self) {
         if self.json.is_none() {
-            println!("{}", "--".cyan());
+            arcommon::outln!("{}", "--".cyan());
         }
     }
 
@@ -1080,7 +1080,7 @@ impl StdinOut<'_> {
     fn count(&mut self, n: usize) {
         match &mut self.json {
             Some(j) => j.result(&Self::record(0, "", false, Some(n))),
-            None => println!("{}: {}", Self::NAME.magenta(), n.to_string().green()),
+            None => arcommon::outln!("{}: {}", Self::NAME.magenta(), n.to_string().green()),
         }
     }
 }
@@ -1290,9 +1290,9 @@ fn print_stdin_highlighted(
     // may end in, or leave behind, trailing spaces).
     let shown = highlight_spans(text, spans);
     if config.line_number {
-        println!("{}:{}", line_num.to_string().green(), shown);
+        arcommon::outln!("{}:{}", line_num.to_string().green(), shown);
     } else {
-        println!("{}", shown);
+        arcommon::outln!("{}", shown);
     }
 }
 
@@ -1308,20 +1308,20 @@ fn print_stdin_line(line: &str, line_num: usize, is_context: bool, config: &argr
 
     if is_context {
         if config.line_number {
-            println!("{}-{}", line_num.to_string().green(), line.trim_end());
+            arcommon::outln!("{}-{}", line_num.to_string().green(), line.trim_end());
         } else {
-            println!("{}", line.trim_end());
+            arcommon::outln!("{}", line.trim_end());
         }
     } else {
         let highlighted = highlight_matches(&line, &config.regex);
         if config.line_number {
-            println!(
+            arcommon::outln!(
                 "{}:{}",
                 line_num.to_string().green(),
                 highlighted.trim_end()
             );
         } else {
-            println!("{}", highlighted.trim_end());
+            arcommon::outln!("{}", highlighted.trim_end());
         }
     }
 }
@@ -1337,11 +1337,13 @@ fn print_stdin_line(line: &str, line_num: usize, is_context: bool, config: &argr
 fn print_file_name(path: &Path, null: bool) {
     if null {
         let mut out = io::stdout().lock();
-        let _ = out.write_all(&arcommon::fs::path_bytes(path));
-        let _ = out.write_all(b"\0");
-        let _ = out.flush();
+        arcommon::out::check(
+            out.write_all(&arcommon::fs::path_bytes(path))
+                .and_then(|()| out.write_all(b"\0"))
+                .and_then(|()| out.flush()),
+        );
     } else {
-        println!("{}", display_path(path).magenta());
+        arcommon::outln!("{}", display_path(path).magenta());
     }
 }
 
@@ -1368,7 +1370,7 @@ fn print_result(result: &argrep::MatchResult, mode: OutputMode, regex: &Regex) {
         null,
     } = mode;
     if result.is_separator {
-        println!("{}", "--".cyan());
+        arcommon::outln!("{}", "--".cyan());
         return;
     }
 
@@ -1379,7 +1381,7 @@ fn print_result(result: &argrep::MatchResult, mode: OutputMode, regex: &Regex) {
         // emit_file_listing/grep_stdin), not how that result prints.
         print_file_name(&result.file_path, null);
     } else if count_per_file {
-        println!(
+        arcommon::outln!(
             "{}: {}",
             display_path(&result.file_path).magenta(),
             result.count.unwrap_or(0).to_string().green()
@@ -1411,7 +1413,7 @@ fn print_result(result: &argrep::MatchResult, mode: OutputMode, regex: &Regex) {
                 .to_string()
         };
 
-        println!("{}{}{}", prefix, sep, content);
+        arcommon::outln!("{}{}{}", prefix, sep, content);
     }
 }
 

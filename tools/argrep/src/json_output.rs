@@ -160,9 +160,13 @@ impl<W: Write> JsonPrinter<W> {
     }
 
     fn write(&mut self, event: &Event<'_>) {
-        // A closed pipe (e.g. `| head`) is not worth a panic.
-        let _ = serde_json::to_writer(&mut self.out, event);
-        let _ = self.out.write_all(b"\n");
+        // A closed pipe (e.g. `| head`) ends the search quietly, as for
+        // text output; see arcommon::out.
+        arcommon::out::check(
+            serde_json::to_writer(&mut self.out, event)
+                .map_err(io::Error::from)
+                .and_then(|()| self.out.write_all(b"\n")),
+        );
     }
 
     /// Closes the open file, if any, with its `end` event.
@@ -288,7 +292,7 @@ impl<W: Write> JsonPrinter<W> {
             elapsed_ms: totals.elapsed_ms,
             files_skipped_size: totals.files_skipped_size,
         });
-        let _ = self.out.flush();
+        arcommon::out::check(self.out.flush());
     }
 }
 

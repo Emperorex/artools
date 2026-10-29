@@ -706,3 +706,5 @@ ardisk / -j 8 --top 20
 | `0`  | Success                                                 |
 | `1`  | Invalid `--threshold`/`--include`/`--exclude` value or config error; `--diff` snapshots that can't be read or compared |
 | `2`  | Invalid CLI usage — bad or missing flag (e.g. `-j 0`, `--largest-files 0`) |
+
+**Closed output.** When the reader of stdout goes away (`ardisk ... | head`), ardisk stops at once and exits with `0`, quietly: that is a normal way to cut output short. If writing fails for another reason (disk full, an I/O error on a redirected file), ardisk prints `error: cannot write output: ...` and exits with `1`.

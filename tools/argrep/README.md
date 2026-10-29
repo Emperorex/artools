@@ -650,6 +650,8 @@ argrep -z 'OutOfMemoryError' /var/log/app/*.log.gz
 | `1`  | A file or directory could not be read (permission denied, I/O error), an invalid regex `QUERY`, or another config error (e.g. invalid `--include` glob) |
 | `2`  | Invalid CLI usage — bad or missing flag (e.g. `-j 0`, missing `QUERY`)                                                                                  |
 
+**Closed output.** When the reader of stdout goes away (`argrep ... | head`), argrep stops at once and exits with `0`, quietly: that is a normal way to cut output short. If writing fails for another reason (disk full, an I/O error on a redirected file), argrep prints `error: cannot write output: ...` and exits with `1`.
+
 A nonzero exit from an unreadable file doesn't mean the search stopped: every file that *could* be read is still searched and its matches printed. Run with `--debug` to see which paths failed and why; without it you still get a one-line summary and the nonzero exit code, so it can't be mistaken for "no matches found".
 
 **With `-q`/`--quiet`, the exit-code meaning changes** to match grep's own convention instead of the table above:

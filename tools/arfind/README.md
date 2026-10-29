@@ -426,3 +426,5 @@ arfind /home -j 8 --name "*.txt"
 | `0`  | Success (even if no matches found)                       |
 | `1`  | Invalid `--size`, `--exclude`, `--exclude-dir` or `-t` value, an empty `--older-than`/`--newer-than` window, a rejected `--exec` command, or a command that failed or could not be started |
 | `2`  | Invalid CLI usage — bad or missing flag (e.g. `-j 0`, an unknown `--type`, an empty `--extension`, an unknown `--owner`/`--group` name) |
+
+**Closed output.** When the reader of stdout goes away (`arfind ... | head`), arfind stops at once and exits with `0`, quietly: that is a normal way to cut output short. If writing fails for another reason (disk full, an I/O error on a redirected file), arfind prints `error: cannot write output: ...` and exits with `1`.

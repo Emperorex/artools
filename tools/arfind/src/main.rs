@@ -225,6 +225,10 @@ fn main() {
             args.newer_than.as_ref().map(|a| a.duration),
         ),
         collect_metadata: args.sort.is_some_and(SortKey::needs_metadata),
+        #[cfg(unix)]
+        ownership: arfind::owner::Ownership::new(&args.owner, &args.group),
+        #[cfg(not(unix))]
+        ownership: arfind::owner::Ownership::default(),
     });
 
     // Parsed before searching, so a bad command fails fast.

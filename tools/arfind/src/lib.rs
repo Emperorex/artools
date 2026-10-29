@@ -1,4 +1,5 @@
 pub mod exec;
+pub mod owner;
 pub mod types;
 
 // Shared with ardisk/argrep; re-exported so `arfind::age::...` and these
@@ -153,6 +154,22 @@ pub struct Args {
     /// (case-insensitive). Repeatable; OR'ed with --type.
     #[arg(long, value_name = "EXT", value_parser = types::extension_parser)]
     pub extension: Vec<String>,
+
+    /// Only match entries owned by this user: a name or a numeric uid, like
+    /// find -user. Repeatable (any of them); prefix with ! to exclude, e.g.
+    /// --owner '!root' (quote the ! from the shell). AND'ed with --group.
+    /// Names are resolved once, at start; an unknown name is an error.
+    /// Unix only.
+    #[cfg(unix)]
+    #[arg(long, visible_alias = "user", value_name = "USER", value_parser = owner::owner_parser)]
+    pub owner: Vec<owner::IdSpec>,
+
+    /// Only match entries whose group is this group: a name or a numeric
+    /// gid, like find -group. Repeatable (any of them); prefix with ! to
+    /// exclude. AND'ed with --owner. Unix only.
+    #[cfg(unix)]
+    #[arg(long, value_name = "GROUP", value_parser = owner::group_parser)]
+    pub group: Vec<owner::IdSpec>,
 
     #[arg(short = 'H', long)]
     pub hidden: bool,
@@ -309,6 +326,9 @@ pub struct SearchConfig {
     /// for `--sort size`/`--sort time`. Fetched by the workers, reusing the
     /// metadata the filters already read.
     pub collect_metadata: bool,
+    /// `--owner` / `--group`: the entry's own uid/gid (a symlink's, not its
+    /// target's, as with --size). Never stops traversal.
+    pub ownership: owner::Ownership,
 }
 
 impl SearchConfig {
@@ -333,6 +353,7 @@ impl SearchConfig {
             mtime: age::MtimeFilter::default(),
             name_kind: types::NameKindFilter::default(),
             collect_metadata: false,
+            ownership: owner::Ownership::default(),
         }
     }
 }
@@ -663,6 +684,10 @@ fn check_root(
         return None;
     }
 
+    if !config.ownership.matches(Some(&metadata)) {
+        return None;
+    }
+
     // The root is normally canonical, so not a symlink; if it still is
     // one to a directory, it is listed as the directory it was searched as.
     let kind = if is_dir {
@@ -904,7 +929,18 @@ pub fn scan_directory(
                         .matches(metadata_cache.as_ref().and_then(|m| m.modified().ok()))
                 };
 
-                if size_ok && age_ok {
+                // --owner / --group: the entry's own uid/gid, from the same
+                // lstat as the filters above (fetched only if none of them
+                // needed it).
+                let owner_ok = !config.ownership.is_active()
+                    || (size_ok && age_ok && {
+                        if metadata_cache.is_none() {
+                            metadata_cache = entry.metadata().ok();
+                        }
+                        config.ownership.matches(metadata_cache.as_ref())
+                    });
+
+                if size_ok && age_ok && owner_ok {
                     stats.matched_count.fetch_add(1, Ordering::Relaxed);
                     // --sort size/time: read here, in the workers, and
                     // reuse what the filters above already fetched.

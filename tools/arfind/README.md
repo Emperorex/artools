@@ -33,6 +33,8 @@ arfind [OPTIONS] [PATH]
 | `--type-not NAME`    | —     | —         | Skip files of a built-in type; repeatable; wins over `--type`/`--extension`     |
 | `--type-list`        | —     | —         | Print the built-in types and their globs (`rust: *.rs`), one per line, and exit |
 | `--extension EXT`    | —     | —         | Only files with this extension, e.g. `rs`, `.md`, `tar.gz` (case-insensitive); repeatable |
+| `--owner USER`       | —     | —         | Only entries owned by this user (name or uid; `!` to exclude); repeatable; alias `--user`; Unix (see [Ownership](#ownership-unix)) |
+| `--group GROUP`      | —     | —         | Only entries in this group (name or gid; `!` to exclude); repeatable; Unix |
 | `--size SIZE`        | —     | —         | Filter by file size: `100MB` or `+100MB` (larger than), `-1KB` (smaller than)   |
 | `--empty`            | `-e`  | —         | Match only empty files (0 bytes) or empty directories (no children)             |
 | `--count`            | `-c`  | —         | Print total match count instead of paths                                        |
@@ -188,6 +190,25 @@ arfind /var/log --name "*.log" --newer-than 1y --older-than 30d   # a window
 - Ages count back from the moment arfind starts. `--older-than 30d` matches entries modified **at or before** that point, and `--newer-than 30d` those modified **after** it, so for the same age the two split all entries exactly in two.
 - Together they select a window, which needs `--older-than` shorter than `--newer-than`; anything else is an error.
 - The test applies to every listed entry: files, directories and symlinks (the link's own mtime, like `find` without `-L`). Combine with `-t f` for files only. Directories are always searched, whatever their own age.
+
+## Ownership (Unix)
+
+`--owner` and `--group` match entries by their owning user and group, like `find -user` and `find -group`. Handy on shared hosts and for audits: root-owned leftovers in a home directory, CI artifacts written by another uid, cleanup after a container ran as root.
+
+```bash
+arfind /var/shared -t f --owner root                 # files root left in a shared dir
+arfind ~ --owner '!'"$(id -un)"                      # everything in my home I don't own
+arfind /srv -t f --group www-data                    # files in the www-data group
+arfind . --owner 0 --group 0                         # root:root, by id
+arfind /var --group staff --older-than 30d           # with any other filter
+sudo arfind /home -t f --owner root --execdir chown "$SUDO_USER" ';'   # give them back
+```
+
+- **Name or id.** `alice` is looked up in the user database (so LDAP and other NSS sources count), `1000` is used as a uid. As in GNU find, a value made of digits is a name if such a user exists, otherwise an id; an id that no account has is fine (`--owner 4000000` matches files of a deleted user). An unknown name is an error, exit code 2. Names are resolved once at start, so the search only compares numbers.
+- **Several values.** Repeating a flag means *any of them*: `--owner alice --owner bob`. A value starting with `!` excludes: `--owner '!root'` is everything not owned by root. Quote the `!`, or the shell may treat it as history expansion. `--owner` and `--group` together must both match, and they combine with every other filter (`-t`, `--name`, `--size`, `--older-than`, ...).
+- **The entry's own owner.** A symlink is matched by the owner of the link itself, not of its target, like `--size` and the age filters and like `find` without `-L`. Directories are matched too, and a directory that doesn't match is still searched: only listing is filtered, not descent.
+- **Cost.** One `lstat` per candidate entry, shared with `--size`/`--older-than` when they are also given.
+- **Unix only.** The flags don't exist on other platforms. `--user` is an alias for `--owner`.
 
 ## Staying on one filesystem
 
@@ -386,6 +407,9 @@ arfind /home -j 8 --name "*.txt"
 | Find large files     | `find . -size +100M`                   | `arfind . --size +100MB`             |
 | Modified > 30 days   | `find . -mtime +30`                    | `arfind . --older-than 30d`          |
 | Modified < 1 day     | `find . -mtime -1`                     | `arfind . --newer-than 1d`           |
+| By owner             | `find . -user root`                    | `arfind . --owner root`              |
+| By group             | `find . -group staff`                  | `arfind . --group staff`             |
+| Not owned by me      | `find . ! -user "$USER"`               | `arfind . --owner '!'"$USER"`        |
 | Stay on one fs       | `find . -xdev`                         | `arfind . -x`                        |
 | Largest files first  | `find . -type f -printf '%s %p\n' \| sort -rn` | `arfind . -t f --sort size --reverse` |
 | Newest first         | `find . -printf '%T@ %p\n' \| sort -rn` | `arfind . --sort time --reverse`  |
@@ -401,4 +425,4 @@ arfind /home -j 8 --name "*.txt"
 |------|----------------------------------------------------------|
 | `0`  | Success (even if no matches found)                       |
 | `1`  | Invalid `--size`, `--exclude`, `--exclude-dir` or `-t` value, an empty `--older-than`/`--newer-than` window, a rejected `--exec` command, or a command that failed or could not be started |
-| `2`  | Invalid CLI usage — bad or missing flag (e.g. `-j 0`, an unknown `--type`, an empty `--extension`) |
+| `2`  | Invalid CLI usage — bad or missing flag (e.g. `-j 0`, an unknown `--type`, an empty `--extension`, an unknown `--owner`/`--group` name) |

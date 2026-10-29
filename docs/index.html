@@ -530,7 +530,7 @@
   <div class="tool-grid">
     <div class="tool-card">
       <div class="tool-card-header">
-        <span class="tool-name"><span class="ar">ar</span>find<span class="tool-ver">v0.2.7</span></span>
+        <span class="tool-name"><span class="ar">ar</span>find<span class="tool-ver">v0.2.8</span></span>
         <span class="tool-alt">replaces find</span>
       </div>
       <p class="tool-desc">Parallel directory traversal with glob matching, built-in file types, size and age filters, sorting by name, size or time, and smart defaults that skip <code style="font-family:var(--mono);font-size:0.78rem">.git</code> and <code style="font-family:var(--mono);font-size:0.78rem">node_modules</code> automatically. Runs commands on results without a shell, and prints NUL-separated paths for <code style="font-family:var(--mono);font-size:0.78rem">xargs -0</code>.</p>
@@ -543,6 +543,8 @@
         <span class="flag">--size</span>
         <span class="flag">--older-than</span>
         <span class="flag">--sort</span>
+        <span class="flag">--owner</span>
+        <span class="flag">--group</span>
         <span class="flag">--empty</span>
         <span class="flag">--max-depth</span>
         <span class="flag">--exclude</span>
@@ -644,6 +646,9 @@
         <br>
         <br><span class="uc-comment"># Python files untouched for six months</span>
         <br><span class="uc-cmd">arfind</span> <span class="uc-arg">.</span> <span class="uc-flag">--type</span> <span class="uc-arg">python</span> <span class="uc-flag">--older-than</span> <span class="uc-arg">6mo</span>
+        <br>
+        <br><span class="uc-comment"># Root-owned leftovers in a shared directory</span>
+        <br><span class="uc-cmd">arfind</span> <span class="uc-arg">/var/shared</span> <span class="uc-flag">-t</span> <span class="uc-arg">f</span> <span class="uc-flag">--owner</span> <span class="uc-arg">root</span>
         <br>
         <br><span class="uc-comment"># Run a command per result, no shell involved (preview first)</span>
         <br><span class="uc-cmd">arfind</span> <span class="uc-arg">/var/log</span> <span class="uc-flag">--name</span> <span class="uc-arg">"*.log"</span> <span class="uc-flag">--older-than</span> <span class="uc-arg">90d</span> <span class="uc-flag">--dry-run</span> <span class="uc-flag">--exec</span> <span class="uc-arg">rm</span>

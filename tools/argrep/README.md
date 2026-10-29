@@ -259,7 +259,7 @@ argrep 'TODO' . --exclude-dir target
 argrep 'TODO' . --exclude-dir 'build*'
 ```
 
-Repeatable, and accepts both plain names (`node_modules`) and glob patterns (`build*`) — plain names are matched directly, patterns are compiled as globs, and a directory is skipped if it matches *any* given `--exclude-dir`. `--exclude-dir` is the same mechanism as the older `--ignore` flag (kept as an alias for compatibility) merged with the built-in defaults (`.git`, `node_modules`, `__pycache__`, `target`, disabled via `--no-ignore`).
+Repeatable, and accepts both plain names (`node_modules`) and glob patterns (`build*`) — plain names are matched directly, patterns are compiled as globs, and a directory is skipped if it matches *any* given `--exclude-dir`. `--exclude-dir` is the same mechanism as the older `--ignore` flag (kept as an alias for compatibility) merged with the built-in defaults (`.git`, `node_modules`, `__pycache__`, disabled via `--no-ignore`).
 
 `PATH` defaults to `.` (current directory) if not specified.
 
@@ -417,7 +417,7 @@ Combinations: `-o` adds nothing (every match is already under `submatches`) and 
 | `--type-not NAME`       | —     | —                 | Skip files of this built-in type; repeatable; wins over `--type`/`--include` on overlap                                                                  |
 | `--type-list`           | —     | —                 | Print the built-in types and their globs (`rust: *.rs`), one per line, and exit; no QUERY needed                                                         |
 | `--exclude-dir PATTERN` | —     | built-in defaults | Skip directories matching this name or glob (e.g. `"node_modules"`, `"build*"`), matched by basename; repeatable; alias: `--ignore`                      |
-| `--no-ignore`           | —     | —                 | Disable the built-in directory defaults (`.git`, `node_modules`, `__pycache__`, `target`) — explicit `--exclude-dir`/`--ignore` still applies            |
+| `--no-ignore`           | —     | —                 | Disable the built-in directory defaults (`.git`, `node_modules`, `__pycache__`) — explicit `--exclude-dir`/`--ignore` still applies                      |
 | `--hidden`              | —     | —                 | Search hidden files/directories (dot-prefixed names), independent of `--no-ignore` (see Usage above)                                                     |
 | `--jobs N`              | `-j`  | CPU-aware         | Number of parallel worker threads (1–128; default is half the available cores, clamped to 1–16)                                                          |
 | `--debug`               | `-d`  | —                 | Print the --stats summary plus a line for every file/dir that failed to read, as it happens                                                              |
@@ -433,12 +433,13 @@ Combinations: `-o` adds nothing (every match is already under `submatches`) and 
 
 ## Default ignores
 
-The following directories are always skipped:
+The following directories are skipped unless `--no-ignore` is given, the same defaults as arfind and ardisk:
 
 - `.git`
 - `node_modules`
 - `__pycache__`
-- `target`
+
+Build output such as Cargo's `target/` is **not** skipped by name: a directory called `target` is real source in some trees (the Linux kernel's `drivers/target` and `include/target`). Projects already list their build directories in `.gitignore` (`cargo new` writes `/target`), and argrep honours that. To skip such a directory where no `.gitignore` covers it, use `--exclude-dir target`.
 
 Hidden files and directories (names starting with `.`) are also skipped by default — pass `--hidden` to include them (see Usage above for how this interacts with `--no-ignore`).
 
@@ -638,7 +639,7 @@ argrep -z 'OutOfMemoryError' /var/log/app/*.log.gz
 
 - **Parallel traversal** — scales with CPU cores, significantly faster on large codebases
 - **Binary skipping** — no `-I` flag needed, binaries are automatically detected and skipped
-- **Smart ignores** — `target/`, `node_modules/`, `.git/`, and dotfiles skipped automatically (opt back in with `--no-ignore` and/or `--hidden`)
+- **Smart ignores** — `.git/`, `node_modules/`, `.gitignore`d build output (such as Cargo's `target/`) and dotfiles skipped automatically (opt back in with `--no-ignore` and/or `--hidden`)
 - **stdin support** — works as a drop-in in pipes without any special flags
 - **Colored output** — matched filenames in magenta, line numbers in green, query highlighted in red
 

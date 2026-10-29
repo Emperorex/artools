@@ -1,5 +1,5 @@
 use arcommon::{
-    ignore::{DEFAULT_IGNORED_DIRS, IgnoreStack, is_ignored},
+    ignore::{IgnoreStack, is_ignored},
     walk::{self, Queue},
 };
 use colored::Colorize;
@@ -110,34 +110,13 @@ fn read_line_capped<R: BufRead>(
     }
 }
 
-/// Default directories to ignore during text search: the shared defaults
-/// (`arcommon::ignore::DEFAULT_IGNORED_DIRS`) plus `target`, since build
-/// output is rarely worth grepping.
-pub const DEFAULT_IGNORES: &[&str] = &[".git", "node_modules", "__pycache__", "target"];
-
-// DEFAULT_IGNORES must stay a superset of the shared list.
-const _: () = {
-    let mut i = 0;
-    while i < DEFAULT_IGNORED_DIRS.len() {
-        let (a, b) = (
-            DEFAULT_IGNORED_DIRS[i].as_bytes(),
-            DEFAULT_IGNORES[i].as_bytes(),
-        );
-        assert!(
-            a.len() == b.len(),
-            "DEFAULT_IGNORES must start with the shared defaults"
-        );
-        let mut j = 0;
-        while j < a.len() {
-            assert!(
-                a[j] == b[j],
-                "DEFAULT_IGNORES must start with the shared defaults"
-            );
-            j += 1;
-        }
-        i += 1;
-    }
-};
+/// Directories skipped during text search unless --no-ignore is given: the
+/// defaults every artools tool shares (`.git`, `node_modules`,
+/// `__pycache__`). Build output such as Cargo's `target/` is deliberately
+/// not on the list: a name alone can't tell build output from source
+/// (Linux has `drivers/target` and `include/target`), and projects already
+/// list their build directories in `.gitignore`, which argrep honours.
+pub use arcommon::ignore::DEFAULT_IGNORED_DIRS as DEFAULT_IGNORES;
 
 /// Escapes control characters (C0 except tab, DEL, and C1) so file
 /// content can be printed to a terminal without the terminal executing

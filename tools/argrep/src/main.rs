@@ -1638,7 +1638,9 @@ mod tests {
         assert!(names.contains(".git"));
         assert!(names.contains("node_modules"));
         assert!(names.contains("__pycache__"));
-        assert!(names.contains("target"));
+        // Not a default: it is real source in some trees (Linux's
+        // drivers/target); build output is left to .gitignore.
+        assert!(!names.contains("target"));
     }
 
     #[test]

@@ -13,7 +13,7 @@ use std::{
     io::{BufRead, BufReader, Cursor, Read},
     path::{Path, PathBuf},
     sync::{
-        Arc, Mutex,
+        Arc, Mutex, OnceLock,
         atomic::{AtomicUsize, Ordering},
     },
     thread,
@@ -423,6 +423,9 @@ pub struct SearchConfig {
     /// being opened. 0 = unlimited. Not applied with --files, which never
     /// reads content. A file of exactly this size is still searched.
     pub max_filesize: u64,
+    /// The block search behind grep_file's fast path, built from `regex`
+    /// on first use and shared by every worker. See [`LinePrefilter`].
+    pub line_prefilter: LinePrefilter,
     /// --json: results are printed as JSON events. Each file's results
     /// are then delivered as one contiguous block (see `ResultSink`), so a
     /// file's begin/match/end events never interleave with another file's,
@@ -587,8 +590,13 @@ pub fn build_matcher(query: &str, opts: MatchOptions) -> Result<Regex, String> {
         pattern = format!(r"^(?:{})$", pattern);
     }
 
+    // -i goes into the pattern itself, not the builder, so the pattern
+    // text alone describes the matcher: the block search (LinePrefilter)
+    // recompiles it in multi-line mode and must match the same things.
+    if opts.ignore_case {
+        pattern = format!("(?i){pattern}");
+    }
     RegexBuilder::new(&pattern)
-        .case_insensitive(opts.ignore_case)
         .build()
         .map_err(|err| format!("Invalid pattern '{}': {}", query, err))
 }
@@ -674,8 +682,11 @@ pub fn build_matcher_multi(patterns: &[String], opts: MatchOptions) -> Result<Re
         pattern = format!(r"^(?:{})$", pattern);
     }
 
+    // Inline, as in build_matcher.
+    if opts.ignore_case {
+        pattern = format!("(?i){pattern}");
+    }
     RegexBuilder::new(&pattern)
-        .case_insensitive(opts.ignore_case)
         .build()
         .map_err(|err| format!("Invalid pattern(s) '{}': {}", patterns.join("', '"), err))
 }
@@ -1019,6 +1030,132 @@ impl Drop for ResultSink<'_> {
     }
 }
 
+/// How much of a file is searched in one block on the fast path. Larger
+/// blocks mean fewer regex calls; this is also the reader's buffer size.
+const BLOCK_SIZE: usize = 256 * 1024;
+
+/// The fast path of [`grep_file`]: instead of running the regex once per
+/// line, run it once over a whole block of complete lines and skip every
+/// line before the first hit, only counting newlines for line numbers.
+/// Lines at and after a hit go through the normal per-line code, so every
+/// output mode keeps its exact behavior; the block search only decides
+/// which lines can be skipped.
+///
+/// For that to be safe, a line that matches on its own must also produce a
+/// hit when searched as part of a block (false hits are harmless: that
+/// line is just checked the normal way). The block regex is the line regex
+/// recompiled in multi-line mode, so `^` and `$` match at every line inside
+/// the block, and `\b` sees the same non-word character at a line edge
+/// either way. The remaining differences are handled by not skipping:
+///
+/// - patterns with `\A`, `\z` or an inline flag group that turns
+///   multi-line mode off (`(?-m)`) never use the fast path;
+/// - skipping stops before a line with invalid UTF-8 (lines are decoded
+///   lossily, so invalid bytes become U+FFFD, which `.` matches);
+/// - with `$` in the pattern, skipping stops before a line with `\r`
+///   (lines are matched without their `\r\n`, the block still has it).
+#[derive(Debug, Default)]
+pub struct LinePrefilter {
+    block_regex: OnceLock<Option<regex::bytes::Regex>>,
+}
+
+impl LinePrefilter {
+    /// The block regex for `line_regex`, or `None` if its pattern can't be
+    /// searched block-wise safely. Built once, on first use.
+    fn get(&self, line_regex: &Regex) -> Option<&regex::bytes::Regex> {
+        self.block_regex
+            .get_or_init(|| {
+                let pattern = line_regex.as_str();
+                if !block_search_is_safe(pattern) {
+                    return None;
+                }
+                regex::bytes::RegexBuilder::new(pattern)
+                    .multi_line(true)
+                    .build()
+                    .ok()
+            })
+            .as_ref()
+    }
+}
+
+/// Whether a line pattern means the same inside a multi-line block: no
+/// absolute text anchors, and no inline flag group that turns multi-line
+/// mode off. Conservative: anything that looks like one counts.
+fn block_search_is_safe(pattern: &str) -> bool {
+    if pattern.contains(r"\A") || pattern.contains(r"\z") {
+        return false;
+    }
+    // Inline flag groups: `(?flags)` or `(?flags:...)`; unsafe if an `m`
+    // follows a `-` within the flags.
+    let bytes = pattern.as_bytes();
+    let mut i = 0;
+    while let Some(off) = pattern[i..].find("(?") {
+        let start = i + off + 2;
+        let flags_end = bytes[start..]
+            .iter()
+            .position(|b| !(b.is_ascii_alphabetic() || *b == b'-'))
+            .map_or(bytes.len(), |p| start + p);
+        let flags = &pattern[start..flags_end];
+        if let Some(dash) = flags.find('-')
+            && flags[dash..].contains('m')
+        {
+            return false;
+        }
+        i = start;
+    }
+    true
+}
+
+/// One fast-path step: how many bytes at the front of `buf` are whole lines
+/// that cannot match, and how many lines that is. `(0, 0)` means "nothing
+/// to skip here, read the next line the normal way".
+///
+/// The work is proportional to what is skipped: when hits are dense, each
+/// step finds the next hit right away and costs little, instead of
+/// re-examining the whole buffer for every matching line.
+fn skippable_prefix(
+    buf: &[u8],
+    block_regex: &regex::bytes::Regex,
+    pattern_has_dollar: bool,
+) -> (usize, usize) {
+    // Whole lines only.
+    let Some(last_nl) = buf.iter().rposition(|&b| b == b'\n') else {
+        return (0, 0);
+    };
+    let lines = &buf[..=last_nl];
+    // Skip up to the start of the line holding the first hit, or the whole
+    // block if there is none. On valid UTF-8 the bytes regex matches
+    // exactly like the str one; invalid bytes are dealt with below.
+    let mut skip = match block_regex.find(lines) {
+        None => lines.len(),
+        Some(m) => line_start(lines, m.start()),
+    };
+    if skip == 0 {
+        return (0, 0);
+    }
+    // Lines are decoded lossily, so an invalid byte becomes U+FFFD, which
+    // e.g. `.` matches but the bytes regex does not: stop before the line
+    // with the first invalid byte.
+    if let Err(e) = std::str::from_utf8(&lines[..skip]) {
+        skip = line_start(lines, e.valid_up_to());
+    }
+    // Lines are matched without their `\r\n`, so `$` behaves differently
+    // on a CRLF line in the block: stop before the first `\r`.
+    if pattern_has_dollar && let Some(cr) = lines[..skip].iter().position(|&b| b == b'\r') {
+        skip = line_start(lines, cr);
+    }
+    let skipped_lines = lines[..skip].iter().filter(|&&b| b == b'\n').count();
+    (skip, skipped_lines)
+}
+
+/// The offset where the line containing byte `pos` starts.
+fn line_start(text: &[u8], pos: usize) -> usize {
+    text[..pos]
+        .iter()
+        .rposition(|&b| b == b'\n')
+        .map_or(0, |i| i + 1)
+}
+
 pub fn grep_file(
     file_path: &Path,
     config: &SearchConfig,
@@ -1058,7 +1195,7 @@ pub fn grep_file(
         Box::new(file)
     };
     let mut decompressed_total: u64 = 0;
-    let mut buffered = BufReader::new(content);
+    let mut buffered = BufReader::with_capacity(BLOCK_SIZE, content);
 
     // Fast binary file sniffing: check the first 1024 bytes for a null
     // byte. A decompressed stream generally isn't seekable (GzDecoder
@@ -1134,6 +1271,23 @@ pub fn grep_file(
     // from the File::open failure case above (which returns before ever
     // reaching this point, so it's excluded from -L output automatically).
     let mut had_io_error = false;
+    // Summed here and added to the shared counter once per file, not once
+    // per line.
+    let mut bytes_read = 0usize;
+
+    // The block fast path (see LinePrefilter). Not with -v (every line not
+    // matching is output) or context (lines around a hit are needed), and
+    // only if no line in a block can exceed --max-line-size, which must
+    // still be reported by the line reader.
+    let fast_path = if !config.invert
+        && !has_context
+        && (config.max_line_bytes == 0 || config.max_line_bytes >= BLOCK_SIZE)
+    {
+        config.line_prefilter.get(&config.regex)
+    } else {
+        None
+    };
+    let pattern_has_dollar = config.regex.as_str().contains('$');
 
     loop {
         if reached_max_count && after_remaining == 0 {
@@ -1148,6 +1302,34 @@ pub fn grep_file(
             break;
         }
 
+        if let Some(block_regex) = fast_path {
+            let step = match reader.fill_buf() {
+                Ok(buf) => skippable_prefix(buf, block_regex, pattern_has_dollar),
+                // Leave errors (and retries) to the line reader below.
+                Err(_) => (0, 0),
+            };
+            if let (skip @ 1.., skipped_lines) = step {
+                reader.consume(skip);
+                bytes_read += skip;
+                line_num += skipped_lines;
+                if decompress && decompressed_cap > 0 {
+                    decompressed_total += skip as u64;
+                    if decompressed_total > decompressed_cap {
+                        stats.io_errors.fetch_add(1, Ordering::Relaxed);
+                        had_io_error = true;
+                        eprintln!(
+                            "{}: {}: decompressed size exceeds --max-decompressed-size ({} bytes); rest of file not searched",
+                            "argrep".red(),
+                            display_path(file_path),
+                            decompressed_cap
+                        );
+                        break;
+                    }
+                }
+                continue;
+            }
+        }
+
         line_bytes.clear();
         let line_overflowed = match read_line_capped(
             &mut reader,
@@ -1156,7 +1338,7 @@ pub fn grep_file(
         ) {
             Ok((0, _)) => break, // EOF
             Ok((n, overflowed)) => {
-                stats.bytes_read.fetch_add(n, Ordering::Relaxed);
+                bytes_read += n;
                 if decompress && decompressed_cap > 0 {
                     decompressed_total += n as u64;
                     if decompressed_total > decompressed_cap {
@@ -1223,15 +1405,17 @@ pub fn grep_file(
 
         let line_matches = config.regex.is_match(line);
 
-        // Sanitized once per line, reused everywhere this line's content
-        // gets packaged into a MatchResult below — matching itself always
-        // uses the original `line`/`m.as_str()`, never this. See
+        // The line as it is printed: only computed for lines that are
+        // printed or kept as context, not for every line read. Matching
+        // always uses the original `line`/`m.as_str()`, never this. See
         // sanitize_for_display's doc comment for why.
-        let clean_line = if config.json {
-            // JSON escapes control characters itself; keep the exact text.
-            std::borrow::Cow::Borrowed(line)
-        } else {
-            sanitize_for_display(line)
+        let clean_line = || {
+            if config.json {
+                // JSON escapes control characters itself; keep the exact text.
+                std::borrow::Cow::Borrowed(line)
+            } else {
+                sanitize_for_display(line)
+            }
         };
 
         // Apply -v inversion
@@ -1354,7 +1538,7 @@ pub fn grep_file(
                             let r = replace_matches(&config.regex, line, replacement);
                             (r.text, Some(r.spans))
                         }
-                        None => (clean_line.to_string(), None),
+                        None => (clean_line().into_owned(), None),
                     };
                     sink.send(MatchResult {
                         file_path: file_path.to_path_buf(),
@@ -1370,7 +1554,7 @@ pub fn grep_file(
                     after_remaining = after_ctx;
 
                     if before_ctx > 0 {
-                        before_buffer.push_back((line_num, clean_line.to_string()));
+                        before_buffer.push_back((line_num, clean_line().into_owned()));
                     }
                 }
             }
@@ -1390,7 +1574,7 @@ pub fn grep_file(
                 sink.send(MatchResult {
                     file_path: file_path.to_path_buf(),
                     line_num,
-                    line_content: clean_line.to_string(),
+                    line_content: clean_line().into_owned(),
                     count: None,
                     is_context: true,
                     is_separator: false,
@@ -1404,10 +1588,12 @@ pub fn grep_file(
                 if before_buffer.len() == before_ctx {
                     before_buffer.pop_front();
                 }
-                before_buffer.push_back((line_num, clean_line.to_string()));
+                before_buffer.push_back((line_num, clean_line().into_owned()));
             }
         }
     }
+
+    stats.bytes_read.fetch_add(bytes_read, Ordering::Relaxed);
 
     // -c: emit one result per file with the total count
     if config.count_per_file {
@@ -1967,5 +2153,80 @@ mod size_limit_tests {
         let mut buf = Vec::new();
         let (n, overflow) = read_line_capped(&mut r, &mut buf, 0).unwrap();
         assert_eq!((n, overflow, buf.len()), (50_000, false, 50_000));
+    }
+}
+
+#[cfg(test)]
+mod fast_path_tests {
+    use super::{block_search_is_safe, skippable_prefix};
+    use regex::bytes::{Regex, RegexBuilder};
+
+    fn block(pattern: &str) -> Regex {
+        RegexBuilder::new(pattern).multi_line(true).build().unwrap()
+    }
+
+    #[test]
+    fn skips_whole_lines_up_to_the_first_hit() {
+        let r = block("needle");
+        assert_eq!(skippable_prefix(b"a\nb\nc\n", &r, false), (6, 3));
+        // The hit is on line 3: lines 1 and 2 are skipped.
+        assert_eq!(skippable_prefix(b"a\nb\nx needle\nd\n", &r, false), (4, 2));
+        // A hit on the first line: nothing to skip.
+        assert_eq!(skippable_prefix(b"needle\nb\n", &r, false), (0, 0));
+        // An unfinished last line is never skipped.
+        assert_eq!(skippable_prefix(b"a\nb\nnee", &r, false), (4, 2));
+        assert_eq!(skippable_prefix(b"no newline", &r, false), (0, 0));
+    }
+
+    #[test]
+    fn anchors_see_every_line_of_the_block() {
+        let r = block("^b$");
+        assert_eq!(skippable_prefix(b"a\nb\nc\n", &r, false), (2, 1));
+        // A hit spanning lines is a false hit: harmless, it only stops the
+        // skip early.
+        let r = block(r"a\sb");
+        assert_eq!(skippable_prefix(b"x\na\nb\n", &r, false), (2, 1));
+    }
+
+    #[test]
+    fn stops_before_invalid_utf8() {
+        // `.` matches U+FFFD in the lossily decoded line, not the raw byte.
+        let r = block("a.b");
+        assert_eq!(skippable_prefix(b"x\ny\na\xffb\nz\n", &r, false), (4, 2));
+    }
+
+    #[test]
+    fn stops_before_a_crlf_line_only_when_the_pattern_has_a_dollar() {
+        let r = block("foo$");
+        // Line 2 is "foo\r\n": matched as "foo" per line, so it must not be
+        // skipped even though `foo$` does not match "foo\r" in the block.
+        assert_eq!(skippable_prefix(b"x\nfoo\r\ny\n", &r, true), (2, 1));
+        let r = block("foo");
+        assert_eq!(skippable_prefix(b"x\r\ny\r\n", &r, false), (6, 2));
+    }
+
+    #[test]
+    fn unsafe_patterns_have_no_block_search() {
+        for safe in [
+            "foo",
+            "(?i)foo",
+            "^(?:a|b)$",
+            r"\bword\b",
+            "(?m)^x",
+            "(?-i:X)",
+            "(?s:.)",
+        ] {
+            assert!(block_search_is_safe(safe), "{safe}");
+        }
+        for unsafe_ in [
+            r"\Afoo",
+            r"foo\z",
+            "(?-m)^x",
+            "(?i-m)^x",
+            "(?-sm:^x)",
+            r"(?i)\Ax",
+        ] {
+            assert!(!block_search_is_safe(unsafe_), "{unsafe_}");
+        }
     }
 }

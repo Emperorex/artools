@@ -816,6 +816,7 @@ fn main() {
         max_line_bytes: usize::try_from(args.max_line_size).unwrap_or(usize::MAX),
         max_decompressed_bytes: args.max_decompressed_size,
         max_filesize: args.max_filesize,
+        line_prefilter: Default::default(),
         json: args.json,
     });
 

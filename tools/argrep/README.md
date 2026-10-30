@@ -643,6 +643,12 @@ argrep -z 'OutOfMemoryError' /var/log/app/*.log.gz
 - **stdin support** — works as a drop-in in pipes without any special flags
 - **Colored output** — matched filenames in magenta, line numbers in green, query highlighted in red
 
+## How searching works
+
+Each worker reads a file in 256 KiB blocks and runs the regex over a whole block of complete lines at once, which lets the regex engine use its fast literal scanning (SIMD where the CPU has it). Lines before the first hit in a block are skipped after only counting their newlines (for line numbers); the line with a hit, and the ones after it, go through the per-line search, so every output mode behaves exactly as before. Searches with few matches are several times faster than line by line (on an 850 MB tree, 2.9 s became 0.6 s).
+
+The per-line search is still used for the whole file with `-v` and with context (`-A`/`-B`/`-C`), with `--max-line-size` set below 256K, and for patterns using `\A`, `\z` or `(?-m)`. Within a block, skipping also stops before a line with invalid UTF-8, and, if the pattern has `$`, before a line ending in `\r\n`, since those lines are matched slightly differently on their own.
+
 ## Exit codes
 
 | Code | Meaning                                                                                                                                                 |

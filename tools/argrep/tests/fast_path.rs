@@ -90,6 +90,10 @@ const SMALL_CASES: &[(&str, &[&str])] = &[
     ("x*", &[]),
     ("^$", &[]),
     ("needle.*", &["-F"]),
+    // Matches that can run across lines in a block.
+    ("e[^z]*e", &[]),
+    (r"h\s+a", &[]),
+    ("a.*z|ne", &[]),
 ];
 
 #[test]

@@ -303,6 +303,13 @@ pub struct SearchConfig {
     /// Compiled matcher used for every line. Case-insensitivity (-i) and
     /// fixed-string mode (-F) are both baked in at construction time via
     /// `build_matcher`, rather than handled ad hoc at match time.
+    ///
+    /// Its pattern text (`as_str()`) must describe it completely, with
+    /// every flag inline (`(?i)`, not `RegexBuilder::case_insensitive`):
+    /// the block search ([`LinePrefilter`]) recompiles that text, and a
+    /// flag set only on a builder would be lost there, so matching lines
+    /// could be skipped. `build_matcher`/`build_matcher_multi` guarantee
+    /// this.
     pub regex: Regex,
     pub ignore_case: bool,
     pub line_number: bool,
@@ -1123,12 +1130,20 @@ fn skippable_prefix(
         return (0, 0);
     };
     let lines = &buf[..=last_nl];
-    // Skip up to the start of the line holding the first hit, or the whole
-    // block if there is none. On valid UTF-8 the bytes regex matches
+    // Skip up to the start of the line where the earliest match ends, or
+    // the whole block if there is none. A line that matches on its own
+    // holds a match ending inside it, so the earliest end in the block is
+    // at or before that line: it is never skipped.
+    //
+    // `shortest_match` stops at that earliest end. `find` would have to
+    // locate the end of the leftmost match, and a pattern such as
+    // `a[^z]*b` can run across newlines (`[^z]` matches `\n`), so every
+    // step could scan the rest of the block: quadratic, minutes instead of
+    // a fraction of a second. On valid UTF-8 the bytes regex matches
     // exactly like the str one; invalid bytes are dealt with below.
-    let mut skip = match block_regex.find(lines) {
+    let mut skip = match block_regex.shortest_match(lines) {
         None => lines.len(),
-        Some(m) => line_start(lines, m.start()),
+        Some(end) => line_start(lines, end),
     };
     if skip == 0 {
         return (0, 0);
@@ -2182,10 +2197,11 @@ mod fast_path_tests {
     fn anchors_see_every_line_of_the_block() {
         let r = block("^b$");
         assert_eq!(skippable_prefix(b"a\nb\nc\n", &r, false), (2, 1));
-        // A hit spanning lines is a false hit: harmless, it only stops the
-        // skip early.
+        // A hit spanning lines ("a\nb") is a false hit. Skipping stops
+        // at the line where it ends ("b"), which is then checked on its
+        // own; "a" before it cannot match alone, so it is skipped.
         let r = block(r"a\sb");
-        assert_eq!(skippable_prefix(b"x\na\nb\n", &r, false), (2, 1));
+        assert_eq!(skippable_prefix(b"x\na\nb\n", &r, false), (4, 2));
     }
 
     #[test]

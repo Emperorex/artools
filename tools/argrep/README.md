@@ -427,6 +427,7 @@ Combinations: `-o` adds nothing (every match is already under `submatches`) and 
 | `--max-line-size`       | —     | `4M`              | Skip lines longer than SIZE (K/M/G suffixes; `0` = unlimited) with a warning instead of buffering them whole                                       |
 | `--max-decompressed-size` | —   | `1G`              | With `-z`, stop after SIZE decompressed bytes per file (gzip-bomb protection; `0` = unlimited)                                                     |
 | `--max-filesize`        | —     | unlimited         | Skip files larger than SIZE (e.g. `10M`, `50MB`) without opening them; with `-z` the compressed size on disk counts (see Resource limits)           |
+| `--line-buffered`       | —     | —                 | Write each output line at once even to a pipe or file (default there: buffered), for readers that want each match as soon as it is found |
 | `--quiet`               | `-q`  | —                 | No output; exit code alone reports match/no-match/error (see Exit codes below). Overrides -l/-c/-n if also set — nothing is printed either way.          |
 
 `-l`, `-L`, and `-c` cannot be combined with each other — they imply mutually incompatible output contracts (`filename` matched vs `filename` unmatched vs `filename: count`), so combining any two of them (`argrep foo . -c -l`, `argrep foo . -l -L`, etc.) is a CLI error rather than one silently overriding the other.
@@ -648,6 +649,12 @@ argrep -z 'OutOfMemoryError' /var/log/app/*.log.gz
 Each worker reads a file in 256 KiB blocks and runs the regex over a whole block of complete lines at once, which lets the regex engine use its fast literal scanning (SIMD where the CPU has it). Lines before the first hit in a block are skipped after only counting their newlines (for line numbers); the line with a hit, and the ones after it, go through the per-line search, so every output mode behaves exactly as before. Searches with few matches are several times faster than line by line (on an 850 MB tree, 2.9 s became 0.6 s).
 
 The per-line search is still used for the whole file with `-v` and with context (`-A`/`-B`/`-C`), with `--max-line-size` set below 256K, and for patterns using `\A`, `\z` or `(?-m)`. Within a block, skipping also stops before a line with invalid UTF-8, and, if the pattern has `$`, before a line ending in `\r\n`, since those lines are matched slightly differently on their own.
+
+### Output buffering
+
+When stdout is a pipe or a file, argrep collects its output in a 64 KiB buffer instead of writing every line on its own: a search printing 383,273 lines used to make one `write` call per line, and now makes about 400, which more than halved its time (1.21 s → 0.53 s on a 258 MB file). Everything is written out before `--stats`/`--debug` output and before argrep exits, so nothing is lost or reordered.
+
+Output is still written line by line to a terminal, and when argrep reads stdin, which is often a live stream (`tail -f app.log | argrep ERROR | ...`). To get the same when searching files into a pipe whose reader wants each line as soon as it is found, pass `--line-buffered`, as with grep and ripgrep.
 
 ## Exit codes
 

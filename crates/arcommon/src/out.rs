@@ -17,8 +17,85 @@
 //! policy is the same for every tool and every output path, including
 //! writes from worker or printer threads, where returning an error would
 //! not stop the search.
+//!
+//! # Buffering
+//!
+//! Rust's stdout flushes at every newline, even into a pipe or a file, so
+//! printing many lines costs one `write` syscall each (argrep: 383,273 of
+//! them for one dense search, against 1,066 for ripgrep). A tool can call
+//! [`enable_buffering`] when line-by-line output is not needed, typically
+//! when stdout is not a terminal: [`Out`] (and so `out!`/`outln!`) then
+//! collects output in a 64 KiB buffer. The tool must then call [`flush`]
+//! before it exits, since a buffer in a static is never dropped and
+//! `process::exit` does not flush. Tools that never enable it write
+//! exactly as before.
 
-use std::io;
+use std::{
+    io::{self, BufWriter, Write},
+    sync::{Mutex, PoisonError},
+};
+
+/// The block buffer, once [`enable_buffering`] was called.
+static BUFFER: Mutex<Option<BufWriter<io::Stdout>>> = Mutex::new(None);
+
+/// Size of the block buffer.
+const BUFFER_SIZE: usize = 64 * 1024;
+
+/// Collect stdout output in a buffer instead of writing every line at once.
+/// The caller must [`flush`] before exiting.
+pub fn enable_buffering() {
+    let mut buffer = BUFFER.lock().unwrap_or_else(PoisonError::into_inner);
+    if buffer.is_none() {
+        *buffer = Some(BufWriter::with_capacity(BUFFER_SIZE, io::stdout()));
+    }
+}
+
+/// Whether [`enable_buffering`] is in effect.
+pub fn is_buffered() -> bool {
+    BUFFER
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .is_some()
+}
+
+/// Writes out anything buffered, with the policy above for errors.
+pub fn flush() {
+    check(Out.flush());
+}
+
+/// Stdout as the tools write it: through the block buffer when it is
+/// enabled, otherwise straight to the (line-buffered) standard stdout.
+/// Each `write_fmt` call (one `out!`/`outln!`) holds the lock once, so a
+/// line is never interleaved with another thread's.
+pub struct Out;
+
+impl Out {
+    fn with<R>(f: impl FnOnce(&mut dyn Write) -> io::Result<R>) -> io::Result<R> {
+        let mut buffer = BUFFER.lock().unwrap_or_else(PoisonError::into_inner);
+        match buffer.as_mut() {
+            Some(w) => f(w),
+            None => f(&mut io::stdout().lock()),
+        }
+    }
+}
+
+impl Write for Out {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        Out::with(|w| w.write(buf))
+    }
+
+    fn write_all(&mut self, buf: &[u8]) -> io::Result<()> {
+        Out::with(|w| w.write_all(buf))
+    }
+
+    fn write_fmt(&mut self, args: std::fmt::Arguments<'_>) -> io::Result<()> {
+        Out::with(|w| w.write_fmt(args))
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Out::with(|w| w.flush())
+    }
+}
 
 /// Applies the policy above to the result of a write to stdout.
 pub fn check(result: io::Result<()>) {
@@ -44,7 +121,7 @@ macro_rules! out {
     ($($arg:tt)*) => {
         $crate::out::check({
             use ::std::io::Write as _;
-            ::std::write!(::std::io::stdout().lock(), $($arg)*)
+            ::std::write!($crate::out::Out, $($arg)*)
         })
     };
 }
@@ -56,13 +133,13 @@ macro_rules! outln {
     () => {
         $crate::out::check({
             use ::std::io::Write as _;
-            ::std::writeln!(::std::io::stdout().lock())
+            ::std::writeln!($crate::out::Out)
         })
     };
     ($($arg:tt)*) => {
         $crate::out::check({
             use ::std::io::Write as _;
-            ::std::writeln!(::std::io::stdout().lock(), $($arg)*)
+            ::std::writeln!($crate::out::Out, $($arg)*)
         })
     };
 }

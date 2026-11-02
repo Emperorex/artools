@@ -296,9 +296,11 @@ impl<W: Write> JsonPrinter<W> {
     }
 }
 
-impl JsonPrinter<io::Stdout> {
+impl JsonPrinter<arcommon::out::Out> {
+    /// Prints to stdout through `arcommon::out`, so it shares argrep's
+    /// output buffering and closed-pipe handling.
     pub fn stdout(mode: Mode, regex: Regex, replacement: Option<String>) -> Self {
-        Self::new(io::stdout(), mode, regex, replacement)
+        Self::new(arcommon::out::Out, mode, regex, replacement)
     }
 }
 

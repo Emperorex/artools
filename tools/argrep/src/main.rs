@@ -407,6 +407,14 @@ struct Args {
           default_value = "0")]
     max_filesize: u64,
 
+    /// Write each output line as soon as it is found, even when stdout is
+    /// a pipe or a file. By default output to a pipe or file is buffered,
+    /// which is much faster with many matches; a terminal, and searches of
+    /// stdin (e.g. `tail -f log | argrep ERROR | ...`), are always written
+    /// line by line.
+    #[arg(long = "line-buffered")]
+    line_buffered: bool,
+
     /// List the files that would be searched, without searching their
     /// content — every filter still runs (.gitignore/.ignore, --hidden,
     /// --no-ignore, --include, --exclude, --type, --type-not,
@@ -841,6 +849,14 @@ fn main() {
         }
     };
 
+    // Many output lines to a pipe or file would otherwise cost one write
+    // syscall each. Not for a terminal (interactive use) or for stdin
+    // input, which is often a live stream whose matches must come out as
+    // they happen. Flushed below, before the statistics and every exit.
+    if !use_stdin && !args.line_buffered && !io::stdout().is_terminal() {
+        arcommon::out::enable_buffering();
+    }
+
     let json_printer = args.json.then(|| {
         Arc::new(Mutex::new(JsonPrinter::stdout(
             json_mode,
@@ -908,6 +924,11 @@ fn main() {
                 .then(|| stats.files_too_large.load(Ordering::Relaxed)),
         });
     }
+
+    // Everything buffered goes out now: before the summary on stderr (so it
+    // still comes last when both streams go to one place) and before the
+    // exits below, since process::exit does not flush.
+    arcommon::out::flush();
 
     // --stats and --debug both print this summary block — --debug
     // additionally prints per-file/per-dir operational error lines as it
@@ -1025,7 +1046,7 @@ fn main() {
 struct StdinOut<'a> {
     /// `-0`: NUL-terminated name for -l/-L.
     null: bool,
-    json: Option<&'a mut JsonPrinter<io::Stdout>>,
+    json: Option<&'a mut JsonPrinter<arcommon::out::Out>>,
 }
 
 impl StdinOut<'_> {
@@ -1332,17 +1353,19 @@ fn print_stdin_line(line: &str, line_num: usize, is_context: bool, config: &argr
 /// By default: escaped for the terminal (see `display_path`), colored, one
 /// per line. With `-0`: the exact bytes followed by a NUL, so `xargs -0` and
 /// other NUL-aware readers get every name back unchanged, including names
-/// with spaces, newlines or control characters. Flushed at once, because
-/// stdout is line-buffered, NUL-separated output never ends a line, and
-/// argrep exits through `process::exit`, which does not flush.
+/// with spaces, newlines or control characters. Unless output is buffered
+/// (then main flushes it at the end), flushed at once: NUL-separated output
+/// never ends a line, so line-buffered stdout would hold it back.
 fn print_file_name(path: &Path, null: bool) {
     if null {
-        let mut out = io::stdout().lock();
+        let mut out = arcommon::out::Out;
         arcommon::out::check(
             out.write_all(&arcommon::fs::path_bytes(path))
-                .and_then(|()| out.write_all(b"\0"))
-                .and_then(|()| out.flush()),
+                .and_then(|()| out.write_all(b"\0")),
         );
+        if !arcommon::out::is_buffered() {
+            arcommon::out::flush();
+        }
     } else {
         arcommon::outln!("{}", display_path(path).magenta());
     }

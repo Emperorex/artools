@@ -20,6 +20,8 @@ cargo build --release --bin argrep
 argrep [OPTIONS] QUERY [PATH]
 ```
 
+Matches are reported under `PATH` as you typed it, like `grep` and `rg`: `argrep TODO src` prints `src/main.rs:…`, `argrep TODO .` prints `./src/main.rs:…`, and a named file is printed as named. A symlinked `PATH` is reported under the link, and an absolute one stays absolute. With no `PATH` (`argrep --files`), paths have no `./` prefix, except in `-0` output, where it is kept so a file named `-rf` reaches `xargs -0` as `./-rf`. `--json` paths follow the same rule.
+
 `QUERY` is required and is matched as a **regular expression** by default (Rust's [`regex`](https://docs.rs/regex) crate — a similar dialect to `grep -E`/PCRE, without backreferences or lookaround). Two exceptions: with `--files` (see below), `QUERY` is dropped entirely — `argrep --files [PATH]`, not `argrep --files QUERY [PATH]` — and with `-e`/`--regexp` or `-f`/`--file` (see below), patterns are supplied via repeated `-e` flags or pattern files instead of the positional `QUERY`.
 
 Use `-e`/`--regexp` to search for more than one pattern at once — a line matches if it matches **any** of them (combined via alternation, not required to match all), same semantics as `grep`/`ripgrep`'s multiple `-e`:

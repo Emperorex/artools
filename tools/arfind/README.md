@@ -22,6 +22,8 @@ arfind [OPTIONS] [PATH]
 
 `PATH` defaults to `.` (current directory) if not specified.
 
+Results are printed under `PATH` as you typed it, like `find` and `fd`: `arfind src` lists `src/main.rs`, `arfind .` lists `./src/main.rs`, and `arfind` with no `PATH` lists `src/main.rs` (the root itself is `.`). A symlinked `PATH` is reported under the link, and an absolute one stays absolute. Two outputs differ on purpose: `-0` keeps the `./` even with no `PATH` (see [NUL-separated output](#nul-separated-output)), and `--exec`/`-X` always get absolute paths (see [Safety](#safety)).
+
 ## Options
 
 | Flag                 | Short | Default   | Description                                                                     |
@@ -231,7 +233,7 @@ arfind . --type rust -0 | xargs -0 wc -l
 arfind src -t f -0 | xargs -0 -n1 argrep -l0 TODO | xargs -0 git add   # with argrep -0 (one PATH per run)
 ```
 
-With `-0`, paths are printed exactly as stored: no `\xHH` escaping and no color, since the reader is a program, not a terminal (see Terminal safety). `-0` can't be combined with `--count` or the exec options, which print something other than paths. For running a command on each result, `--exec`/`--execdir` avoid the pipe altogether.
+With `-0`, paths are printed exactly as stored: no `\xHH` escaping and no color, and with a leading `./` even when no `PATH` was given, as `fd` does, so a file named `-rf` reaches `xargs` as `./-rf` and never as an option, since the reader is a program, not a terminal (see Terminal safety). `-0` can't be combined with `--count` or the exec options, which print something other than paths. For running a command on each result, `--exec`/`--execdir` avoid the pipe altogether.
 
 ## Sorting results
 
@@ -288,7 +290,7 @@ Without any placeholder, the path is appended as the last argument. With `-X` on
 Running commands on search results is powerful, so arfind adds a few guarantees:
 
 - **No shell.** The command is started directly, with every path as one separate argument. Nothing in a file name is ever interpreted: spaces, quotes, `;`, `$(...)`, backticks and newlines are just characters. For pipes or `&&`, call a shell yourself and pass the path as an argument: `--exec sh -c 'gzip -c "$1" > "$1.gz"' sh {}`.
-- **No option injection.** Results are absolute paths starting with `/`, so `{}`, `{//}` and `{.}` can never be mistaken for an option. `{/}` and `{/.}` are bare file names: when one starts an argument and the name starts with `-`, arfind passes `./-rf` instead of `-rf`, as `find -execdir` does. So `--exec ls {/}` on a file named `--version` lists `./--version` instead of running `ls --version`.
+- **No option injection.** Commands get absolute paths starting with `/`, even though results are *printed* under `PATH` as typed, so `{}`, `{//}` and `{.}` can never be mistaken for an option. `{/}` and `{/.}` are bare file names: when one starts an argument and the name starts with `-`, arfind passes `./-rf` instead of `-rf`, as `find -execdir` does. So `--exec ls {/}` on a file named `--version` lists `./--version` instead of running `ls --version`.
 - **Search first, then run.** The whole search finishes before the first command starts, and commands run one at a time in path order (or in `--sort` order). A command that renames, moves or deletes files cannot affect which files are found, so nothing is processed twice or skipped.
 - **The command can't be a result.** `--exec {}` (running the files you found) is rejected.
 - **Options in the wrong place are refused.** In `arfind . --exec rm -f --dry-run`, `--dry-run` would be passed to `rm` and the files deleted for real. If an argument of the command is spelled like one of arfind's long options, arfind refuses to run anything unless the command is ended with `;`, which tells it those words really are for the command (`--exec rsync --dry-run {} host: ';'`).

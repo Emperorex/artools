@@ -15,8 +15,8 @@ use ardisk::{
     },
     tree::{render_tree_text, tree_lines},
 };
-use clap::Parser;
 use clap::builder::TypedValueParser as _;
+use clap::{CommandFactory, FromArgMatches, Parser, parser::ValueSource};
 use colored::Colorize;
 use glob::Pattern;
 use std::{
@@ -382,7 +382,11 @@ fn build_ignore_dirs(no_ignore: bool, extra: Vec<String>) -> HashSet<String> {
 }
 
 fn main() {
-    let args = Args::parse();
+    let matches = Args::command().get_matches();
+    // Whether PATH was typed or is clap's default ".": with no PATH,
+    // directories are listed without a leading "./".
+    let path_typed = matches.value_source("path") != Some(ValueSource::DefaultValue);
+    let args = Args::from_arg_matches(&matches).unwrap_or_else(|e| e.exit());
 
     let units = if args.si {
         SizeUnits::Si
@@ -400,6 +404,14 @@ fn main() {
 
     let ignore_dirs = build_ignore_dirs(args.no_ignore, args.ignore.clone());
     let target_path = fs::canonicalize(&args.path).unwrap_or_else(|_| PathBuf::from(&args.path));
+    // Scanned from the canonical root, reported under PATH as typed
+    // (`ardisk src` lists `src/...`). --json keeps its own format: paths
+    // relative to the canonical root it records.
+    arcommon::term::set_display_root(arcommon::term::DisplayRoot::new(
+        &args.path,
+        target_path.clone(),
+        !path_typed,
+    ));
 
     let include_pattern: Option<Pattern> = match &args.include {
         Some(p) => match Pattern::new(p) {

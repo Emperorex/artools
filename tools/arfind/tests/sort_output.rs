@@ -18,22 +18,23 @@ fn arfind(dir: &Path, args: &[&str]) -> Output {
 }
 
 /// stdout lines, relative to `root`, in the order printed.
-fn lines(root: &Path, out: &Output) -> Vec<String> {
+fn lines(_root: &Path, out: &Output) -> Vec<String> {
     assert!(
         out.status.success(),
         "{}",
         String::from_utf8_lossy(&out.stderr)
     );
-    let root = fs::canonicalize(root).unwrap();
+    // Run from inside root with no PATH: paths are printed relative to
+    // it, and the root itself as ".".
     String::from_utf8(out.stdout.clone())
         .unwrap()
         .lines()
         .map(|l| {
-            Path::new(l)
-                .strip_prefix(&root)
-                .unwrap_or(Path::new(l))
-                .to_string_lossy()
-                .into_owned()
+            if l == "." {
+                String::new()
+            } else {
+                l.to_string()
+            }
         })
         .collect()
 }
@@ -108,7 +109,7 @@ fn directories_and_the_root_are_sorted_too() {
     let dir = tree();
     let d = dir.path();
     let out = arfind(d, &["--sort", "path"]);
-    // The root (printed as its full path) sorts before everything under it.
+    // The root (printed as ".") sorts before everything under it.
     assert_eq!(
         lines(d, &out),
         ["", "a", "a/z.txt", "b", "b/a.txt", "c.txt"]
@@ -142,17 +143,17 @@ fn print0_output_is_sorted() {
     let d = dir.path();
     let out = arfind(d, &["-t", "f", "--sort", "size", "--reverse", "-0"]);
     assert!(out.status.success());
-    let root = fs::canonicalize(d).unwrap();
+    // -0 keeps the "./" even with no PATH, so no name can pass for an
+    // option in `xargs -0`.
     let names: Vec<String> = out
         .stdout
         .split(|&b| b == 0)
         .filter(|r| !r.is_empty())
         .map(|r| {
-            let p = Path::new(std::str::from_utf8(r).unwrap());
-            p.strip_prefix(&root)
-                .unwrap()
-                .to_string_lossy()
-                .into_owned()
+            let s = std::str::from_utf8(r).unwrap();
+            s.strip_prefix("./")
+                .unwrap_or_else(|| panic!("-0 path without ./: {s}"))
+                .to_string()
         })
         .collect();
     assert_eq!(names, ["a/z.txt", "c.txt", "b/a.txt"]);

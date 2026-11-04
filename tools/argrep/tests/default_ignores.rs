@@ -20,23 +20,18 @@ fn argrep(dir: &Path, args: &[&str]) -> Output {
 }
 
 /// Matching paths relative to the search root `dir`, sorted.
-fn hits(dir: &Path, out: &Output) -> Vec<String> {
+fn hits(_dir: &Path, out: &Output) -> Vec<String> {
     assert!(
         out.status.success(),
         "{}",
         String::from_utf8_lossy(&out.stderr)
     );
-    let root = fs::canonicalize(dir).unwrap();
+    // Run from inside dir, so paths are printed under PATH as typed
+    // ("." -> "./src/main.rs").
     let mut v: Vec<String> = String::from_utf8(out.stdout.clone())
         .unwrap()
         .lines()
-        .map(|l| {
-            Path::new(l)
-                .strip_prefix(&root)
-                .unwrap()
-                .to_string_lossy()
-                .into_owned()
-        })
+        .map(|l| l.strip_prefix("./").unwrap_or(l).to_string())
         .collect();
     v.sort();
     v

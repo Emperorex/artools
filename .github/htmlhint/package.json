@@ -4,5 +4,8 @@
   "description": "Pinned htmlhint for the Lint workflow; installed with npm ci so every run gets the same dependency tree.",
   "devDependencies": {
     "htmlhint": "1.9.2"
+  },
+  "overrides": {
+    "glob": "14.0.3"
   }
 }

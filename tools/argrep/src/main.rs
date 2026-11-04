@@ -873,8 +873,7 @@ fn main() {
         };
         grep_stdin(&config, &stats, out);
     } else if let Some(printer) = &json_printer {
-        let raw_path = args.path.as_deref().unwrap_or(".");
-        let root_path = fs::canonicalize(raw_path).unwrap_or_else(|_| PathBuf::from(raw_path));
+        let root_path = search_root(args.path.as_deref());
         let printer = Arc::clone(printer);
         parallel_grep(
             root_path,
@@ -886,8 +885,7 @@ fn main() {
             },
         );
     } else {
-        let raw_path = args.path.as_deref().unwrap_or(".");
-        let root_path = fs::canonicalize(raw_path).unwrap_or_else(|_| PathBuf::from(raw_path));
+        let root_path = search_root(args.path.as_deref());
 
         let regex = config.regex.clone();
         let mode = OutputMode {
@@ -1356,11 +1354,26 @@ fn print_stdin_line(line: &str, line_num: usize, is_context: bool, config: &argr
 /// with spaces, newlines or control characters. Unless output is buffered
 /// (then main flushes it at the end), flushed at once: NUL-separated output
 /// never ends a line, so line-buffered stdout would hold it back.
+/// The canonical root to walk for PATH (`.` when none was given), with
+/// results set to be reported under PATH as typed (see
+/// `arcommon::term::DisplayRoot`): `argrep foo src` prints `src/main.rs`,
+/// not an absolute path.
+fn search_root(path: Option<&str>) -> PathBuf {
+    let given = path.unwrap_or(".");
+    let canonical = fs::canonicalize(given).unwrap_or_else(|_| PathBuf::from(given));
+    arcommon::term::set_display_root(arcommon::term::DisplayRoot::new(
+        given,
+        canonical.clone(),
+        path.is_none(),
+    ));
+    canonical
+}
+
 fn print_file_name(path: &Path, null: bool) {
     if null {
         let mut out = arcommon::out::Out;
         arcommon::out::check(
-            out.write_all(&arcommon::fs::path_bytes(path))
+            out.write_all(&arcommon::fs::path_bytes(&arcommon::shown_arg_path(path)))
                 .and_then(|()| out.write_all(b"\0")),
         );
         if !arcommon::out::is_buffered() {

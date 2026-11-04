@@ -33,11 +33,10 @@ fn names(out: &Output) -> Vec<String> {
         .filter(|r| !r.is_empty())
         .map(|r| {
             let s = String::from_utf8(r.to_vec()).unwrap();
+            // The root is listed as ".", which has no file name.
             Path::new(&s)
                 .file_name()
-                .unwrap()
-                .to_string_lossy()
-                .into_owned()
+                .map_or(s.clone(), |n| n.to_string_lossy().into_owned())
         })
         .collect();
     v.sort();

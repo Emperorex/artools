@@ -24,22 +24,23 @@ fn arfind(dir: &Path, args: &[&str]) -> Output {
 }
 
 /// Printed paths relative to `root`, sorted ("" is the root itself).
-fn listed(root: &Path, out: &Output) -> Vec<String> {
+fn listed(_root: &Path, out: &Output) -> Vec<String> {
     assert!(
         out.status.success(),
         "{}",
         String::from_utf8_lossy(&out.stderr)
     );
-    let root = fs::canonicalize(root).unwrap();
+    // Run from inside root with no PATH, so paths are printed
+    // relative to it ("." for the root itself).
     let mut v: Vec<String> = String::from_utf8(out.stdout.clone())
         .unwrap()
         .lines()
         .map(|l| {
-            Path::new(l)
-                .strip_prefix(&root)
-                .unwrap()
-                .to_string_lossy()
-                .into_owned()
+            if l == "." {
+                String::new()
+            } else {
+                l.to_string()
+            }
         })
         .collect();
     v.sort();

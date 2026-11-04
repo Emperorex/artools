@@ -22,6 +22,8 @@ ardisk [OPTIONS] [PATH]
 
 `PATH` defaults to `.` (current directory) if not specified.
 
+Directories and files are reported under `PATH` as you typed it, like `du`: `ardisk src` lists `src/lib`, `ardisk .` lists `./src`, and `ardisk` with no `PATH` lists `src` (the root itself is `.`). A symlinked `PATH` is reported under the link. `--json` is unaffected: it records the canonical absolute `root` and paths relative to it, so snapshots compare with `--diff` however `PATH` was spelled.
+
 ## Options
 
 | Flag                | Short | Default   | Description                                                            |

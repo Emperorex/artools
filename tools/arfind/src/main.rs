@@ -6,7 +6,7 @@ use arfind::{
     parallel_find, sort_results,
     types::NameKindFilter,
 };
-use clap::{CommandFactory, Parser};
+use clap::{CommandFactory, FromArgMatches, parser::ValueSource};
 use colored::Colorize;
 use glob::Pattern;
 use std::{
@@ -135,7 +135,9 @@ fn collect(
 /// one per line; or with `-0` the exact path bytes and a NUL.
 fn write_item(out: &mut impl Write, item: &MatchResult, print0: bool) -> io::Result<()> {
     if print0 {
-        out.write_all(&arcommon::fs::path_bytes(&item.path))?;
+        out.write_all(&arcommon::fs::path_bytes(&arcommon::shown_arg_path(
+            &item.path,
+        )))?;
         out.write_all(b"\0")
     } else {
         writeln!(out, "{}", item.display())
@@ -149,7 +151,11 @@ fn fail(message: &str) -> ! {
 }
 
 fn main() {
-    let args = Args::parse();
+    let matches = Args::command().get_matches();
+    // Whether PATH was typed or is clap's default ".": with no PATH,
+    // results are listed without a leading "./", as fd does.
+    let path_typed = matches.value_source("path") != Some(ValueSource::DefaultValue);
+    let args = Args::from_arg_matches(&matches).unwrap_or_else(|e| e.exit());
 
     if args.type_list {
         arcommon::out!("{}", arcommon::filetypes::type_list());
@@ -178,6 +184,13 @@ fn main() {
     // --exclude patterns are anchored at the canonical root, the same path
     // the search reports entries under.
     let canonical_root = fs::canonicalize(&args.path).unwrap_or_else(|_| PathBuf::from(&args.path));
+    // Results are walked from the canonical root but reported under PATH
+    // as typed (`arfind src` lists `src/...`, not an absolute path).
+    arcommon::term::set_display_root(arcommon::term::DisplayRoot::new(
+        &args.path,
+        canonical_root.clone(),
+        !path_typed,
+    ));
     let exclude =
         build_exclude_matcher(&canonical_root, &args.exclude).unwrap_or_else(|e| fail(&e));
 
@@ -294,6 +307,10 @@ fn main() {
         // a stable order: by path, or as --sort says.
         let mut found = collect(root_path, args.jobs, config, &stats);
         sort_results(&mut found, args.sort.unwrap_or(SortKey::Path), args.reverse);
+        // Absolute (canonical) paths, not the PATH-as-typed form used for
+        // printing: exec.rs relies on them so that no placeholder can
+        // expand to something starting with `-`, and `{//}` always names a
+        // real directory.
         let paths: Vec<PathBuf> = found.into_iter().map(|m| m.path).collect();
 
         let stdout = io::stdout();
@@ -337,8 +354,10 @@ fn main() {
         parallel_find(root_path, args.jobs, config, stats.clone(), move |item| {
             let mut w = sink.lock().unwrap();
             arcommon::out::check(
-                w.write_all(&arcommon::fs::path_bytes(&item.path))
-                    .and_then(|()| w.write_all(b"\0")),
+                w.write_all(&arcommon::fs::path_bytes(&arcommon::shown_arg_path(
+                    &item.path,
+                )))
+                .and_then(|()| w.write_all(b"\0")),
             );
         });
         // Flushed before the statistics and the exit status below.

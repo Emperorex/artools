@@ -9,7 +9,7 @@
 //!
 //! | Module        | What it provides                                              |
 //! |---------------|---------------------------------------------------------------|
-//! | [`term`]      | Escaping control characters before printing to a terminal     |
+//! | [`term`]      | Escaping control characters, and reporting paths as typed      |
 //! | [`walk`]      | The parallel work queue every tool's directory walk runs on    |
 //! | [`ignore`]    | `.gitignore`/`.ignore` stacks, default ignored dirs, `--exclude` |
 //! | [`jobs`]      | The `-j/--jobs` default and upper bound                        |
@@ -29,4 +29,4 @@ pub mod walk;
 
 // The terminal helpers predate the module split; keep them at the crate
 // root too so existing `arcommon::display_path(...)` calls keep working.
-pub use term::{display_path, sanitize_for_display, sanitize_name};
+pub use term::{display_path, sanitize_for_display, sanitize_name, shown_arg_path, shown_path};

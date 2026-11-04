@@ -144,7 +144,8 @@ pub struct JsonPrinter<W: Write> {
 }
 
 fn path_text(path: &Path) -> String {
-    path.to_string_lossy().into_owned()
+    // Exact text, reported under PATH as typed (see arcommon::shown_path).
+    arcommon::shown_path(path).to_string_lossy().into_owned()
 }
 
 impl<W: Write> JsonPrinter<W> {

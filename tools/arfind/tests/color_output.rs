@@ -26,12 +26,21 @@ fn arfind(dir: &Path, args: &[&str], force_color: bool) -> Output {
     cmd.output().expect("failed to run arfind")
 }
 
-/// The output line for the entry whose path ends with `/name`.
+/// The output line for the entry whose path is `name` (run from inside the
+/// tree with no PATH, entries are printed relative to it), with or without
+/// a leading color code.
 fn line_for<'a>(stdout: &'a str, name: &str) -> &'a str {
-    let suffix = format!("/{name}");
     stdout
         .lines()
-        .find(|l| l.trim_end_matches(RESET).ends_with(&suffix))
+        .find(|l| {
+            let l = l.trim_end_matches(RESET);
+            // Drop a leading SGR sequence such as "\x1b[1;34m".
+            let text = l
+                .strip_prefix("\x1b[")
+                .and_then(|rest| rest.split_once('m'))
+                .map_or(l, |(_, text)| text);
+            text == name
+        })
         .unwrap_or_else(|| panic!("no line for {name} in:\n{stdout}"))
 }
 

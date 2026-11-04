@@ -55,8 +55,8 @@ fn prints_replaced_lines_and_never_touches_files() {
         None,
     );
     assert!(out.status.success());
-    let file = fs::canonicalize(d.path().join("src/m.rs")).unwrap();
-    let f = file.display();
+    // Reported under PATH as typed ("src"), not as an absolute path.
+    let f = "src/m.rs";
     assert_eq!(
         stdout(&out),
         format!("{f}:1:let a = x.expect(\"...\");\n{f}:3:let b = y.expect(\"...\");   \n")

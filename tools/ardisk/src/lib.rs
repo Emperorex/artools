@@ -13,6 +13,7 @@ pub use arcommon::ignore::{
     DEFAULT_IGNORED_DIRS as DEFAULT_IGNORES, exclude_matcher as build_exclude_matcher,
 };
 
+use arcommon::color::ErrPaint;
 use arcommon::{
     fs::device_of,
     ignore::{IgnoreStack, is_ignored},
@@ -501,7 +502,7 @@ pub fn scan_directory(
                 if config.debug {
                     eprintln!(
                         "{}: {}: {}",
-                        "ardisk".red(),
+                        "ardisk".err_red(),
                         arcommon::display_path(dir_path),
                         err
                     );
@@ -524,7 +525,7 @@ pub fn scan_directory(
             });
         if config.debug {
             for err in errors {
-                eprintln!("{}", format!("ardisk: {}", err).red());
+                eprintln!("{}", format!("ardisk: {}", err).err_red());
             }
         }
         stack
@@ -589,7 +590,7 @@ pub fn scan_directory(
                 if config.debug {
                     eprintln!(
                         "{}: {}: on another filesystem, skipped (--one-file-system)",
-                        "ardisk".yellow(),
+                        "ardisk".err_yellow(),
                         arcommon::display_path(&entry_path)
                     );
                 }

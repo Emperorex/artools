@@ -22,7 +22,7 @@ arfind [OPTIONS] [PATH]
 
 `PATH` defaults to `.` (current directory) if not specified.
 
-Results are printed under `PATH` as you typed it, like `find` and `fd`: `arfind src` lists `src/main.rs`, `arfind .` lists `./src/main.rs`, and `arfind` with no `PATH` lists `src/main.rs` (the root itself is `.`). A symlinked `PATH` is reported under the link, and an absolute one stays absolute. Two outputs differ on purpose: `-0` keeps the `./` even with no `PATH` (see [NUL-separated output](#nul-separated-output)), and `--exec`/`-X` always get absolute paths (see [Safety](#safety)).
+Results are printed under `PATH` as you typed it, like `find`: `arfind src` lists `src/main.rs`, `arfind .` lists `./src/main.rs`, and `arfind` with no `PATH` lists `src/main.rs` (the root itself is `.`). A symlinked `PATH` is reported under the link, and an absolute one stays absolute. Two outputs differ on purpose: `-0` keeps the `./` even with no `PATH` (see [NUL-separated output](#nul-separated-output)), and `--exec`/`-X` always get absolute paths (see [Safety](#safety)).
 
 ## Options
 
@@ -41,6 +41,7 @@ Results are printed under `PATH` as you typed it, like `find` and `fd`: `arfind 
 | `--empty`            | `-e`  | —         | Match only empty files (0 bytes) or empty directories (no children)             |
 | `--count`            | `-c`  | —         | Print total match count instead of paths                                        |
 | `--print0`           | `-0`  | —         | End each path with NUL instead of a newline, unescaped (for `xargs -0`; see [NUL-separated output](#nul-separated-output)) |
+| `--color WHEN`       | —     | `auto`    | `auto` (terminal only), `always` or `never`, decided separately for stdout and stderr (see [Colors](#colors)) |
 | `--exec CMD...`      | —     | —         | Run `CMD` once per result, without a shell (see [Running commands](#running-commands)) |
 | `--exec-batch CMD...`| `-X`  | —         | Run `CMD` once with all results as arguments                                    |
 | `--execdir CMD...`   | —     | —         | Like `--exec`, but run from each result's directory with `./NAME` (safer on trees others can write to) |
@@ -233,7 +234,7 @@ arfind . --type rust -0 | xargs -0 wc -l
 arfind src -t f -0 | xargs -0 -n1 argrep -l0 TODO | xargs -0 git add   # with argrep -0 (one PATH per run)
 ```
 
-With `-0`, paths are printed exactly as stored: no `\xHH` escaping and no color, and with a leading `./` even when no `PATH` was given, as `fd` does, so a file named `-rf` reaches `xargs` as `./-rf` and never as an option, since the reader is a program, not a terminal (see Terminal safety). `-0` can't be combined with `--count` or the exec options, which print something other than paths. For running a command on each result, `--exec`/`--execdir` avoid the pipe altogether.
+With `-0`, paths are printed exactly as stored: no `\xHH` escaping and no color, and with a leading `./` even when no `PATH` was given, so a file named `-rf` reaches `xargs` as `./-rf` and never as an option, since the reader is a program, not a terminal (see Terminal safety). `-0` can't be combined with `--count` or the exec options, which print something other than paths. For running a command on each result, `--exec`/`--execdir` avoid the pipe altogether.
 
 ## Sorting results
 
@@ -337,7 +338,9 @@ On a terminal, arfind colors each result by its kind, with the same defaults as 
 | regular file                 | uncolored    |
 
 - **The entry's own kind.** A symlink is cyan even when it points to a directory, as in `ls`. The kind comes from the directory listing arfind reads anyway, so coloring adds no extra system calls.
-- **Terminal only.** Piped or redirected output has no color codes, so scripts and `grep` see plain paths. `NO_COLOR` (any value) or `CLICOLOR=0` turns color off on a terminal too; `CLICOLOR_FORCE=1` keeps it in a pipe, e.g. `CLICOLOR_FORCE=1 arfind . | less -R`.
+- **`--color auto`** (the default) colors a stream only when it goes to a terminal. stdout and stderr are decided separately, so `arfind … 2>err.log` gets no escape codes in the log while results on the terminal stay colored, and `arfind … | less` keeps colored error messages on the terminal.
+- **`--color always`** colors even into a pipe or file, e.g. `arfind . --color always | less -R`. **`--color never`** turns color off everywhere. `--colour` works too.
+- **Environment**, for `auto` only: `NO_COLOR` (any non-empty value) or `CLICOLOR=0` turns color off, and `CLICOLOR_FORCE=1` turns it on in a pipe. An explicit `--color always|never` beats both. Piped or redirected output is plain by default, so scripts and `grep` see plain paths.
 - **`-0` is never colored**, and neither are `--count` and `--dry-run` output.
 - Colors are fixed for now; `LS_COLORS` is not read.
 

@@ -42,6 +42,7 @@ Directories and files are reported under `PATH` as you typed it, like `du`: `ard
 | `--inodes`          | —     | —         | Count inodes instead of bytes, like `du --inodes` (see [Counting inodes](#counting-inodes)) |
 | `--si`              | —     | —         | Use powers of 1000 (`kB`, `MB`) instead of 1024, for output and size arguments (see [Size units](#size-units)) |
 | `--json`            | —     | —         | Print the result as one JSON document on stdout (see [JSON output](#json-output)) |
+| `--color WHEN`      | —     | `auto`    | `auto` (terminal only), `always` or `never`, decided separately for stdout and stderr (see [Colors](#colors)) |
 | `--include PATTERN` | —     | —         | Only count files matching this glob pattern (e.g. `"*.rs"`, `"*.mp4"`) |
 | `--older-than AGE`  | —     | —         | Only count files last modified at least `AGE` ago, e.g. `1y`, `6mo`, `30d` (see [Filtering by age](#filtering-by-age)) |
 | `--newer-than AGE`  | —     | —         | Only count files modified less than `AGE` ago, e.g. `7d`, `12h` |
@@ -612,6 +613,15 @@ On **Windows**, logical file size is always used regardless of the flag.
 Sizes are rolled up bottom-up in a single pass — parent directories always include the full recursive size of all children. Symlinks are never counted to prevent double-counting.
 
 **Hard links** are also deduplicated: if two directory entries share the same inode (`fs::hard_link`, or `ln` without `-s`), that file is counted once, not once per name — in both physical and `--apparent-size` mode. A file with 100MB of content and two hard-linked names contributes 100MB to the total, matching how `du` itself counts hard links. Which of the two paths gets "credit" for that size in a per-directory breakdown can vary between runs, since scanning is parallel; the grand total is unaffected either way.
+
+## Colors
+
+On a terminal, sizes are colored by magnitude (MB green, GB cyan, TB bold magenta) and errors and warnings on stderr are red and yellow.
+
+- **`--color auto`** (the default) colors a stream only when it goes to a terminal. stdout and stderr are decided separately, so `ardisk … 2>err.log` gets no escape codes in the log while results on the terminal stay colored, and `ardisk … | less` keeps colored error messages on the terminal.
+- **`--color always`** colors even into a pipe or file, e.g. `ardisk ~ --color always --bar | less -R`. **`--color never`** turns color off everywhere. `--colour` works too.
+- **Environment**, for `auto` only: `NO_COLOR` (any non-empty value) or `CLICOLOR=0` turns color off, and `CLICOLOR_FORCE=1` turns it on in a pipe. An explicit `--color always|never` beats both.
+- `--json` is never colored. `--color` covers colors only; whether usage bars are drawn is `--bar`'s job, so `--color never` keeps the bars on a terminal.
 
 ## Terminal safety
 

@@ -1,4 +1,4 @@
-//! Results are reported under PATH as typed, like find and fd, not under
+//! Results are reported under PATH as typed, like find, not under
 //! the canonical (absolute, symlink-free) root the search walks from.
 //! `--exec` arguments are the exception: they stay absolute.
 

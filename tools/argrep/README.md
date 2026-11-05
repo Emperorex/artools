@@ -20,7 +20,7 @@ cargo build --release --bin argrep
 argrep [OPTIONS] QUERY [PATH]
 ```
 
-Matches are reported under `PATH` as you typed it, like `grep` and `rg`: `argrep TODO src` prints `src/main.rs:…`, `argrep TODO .` prints `./src/main.rs:…`, and a named file is printed as named. A symlinked `PATH` is reported under the link, and an absolute one stays absolute. With no `PATH` (`argrep --files`), paths have no `./` prefix, except in `-0` output, where it is kept so a file named `-rf` reaches `xargs -0` as `./-rf`. `--json` paths follow the same rule.
+Matches are reported under `PATH` as you typed it, like `grep`: `argrep TODO src` prints `src/main.rs:…`, `argrep TODO .` prints `./src/main.rs:…`, and a named file is printed as named. A symlinked `PATH` is reported under the link, and an absolute one stays absolute. With no `PATH` (`argrep --files`), paths have no `./` prefix, except in `-0` output, where it is kept so a file named `-rf` reaches `xargs -0` as `./-rf`. `--json` paths follow the same rule.
 
 `QUERY` is required and is matched as a **regular expression** by default (Rust's [`regex`](https://docs.rs/regex) crate — a similar dialect to `grep -E`/PCRE, without backreferences or lookaround). Two exceptions: with `--files` (see below), `QUERY` is dropped entirely — `argrep --files [PATH]`, not `argrep --files QUERY [PATH]` — and with `-e`/`--regexp` or `-f`/`--file` (see below), patterns are supplied via repeated `-e` flags or pattern files instead of the positional `QUERY`.
 
@@ -412,6 +412,7 @@ Combinations: `-o` adds nothing (every match is already under `submatches`) and 
 | `--files-without-match` | `-L`  | —                 | Print only filenames of files containing NO match (conflicts with `-l`, `-c`)                                                                            |
 | `--json`                | —     | —                 | Print results as JSON Lines (begin/match/context/end, file, summary); see JSON output                                                                     |
 | `--null`                | `-0`  | —                 | With `-l`, `-L` or `--files`: end each name with NUL instead of a newline, unescaped (for `xargs -0`)                                                     |
+| `--color WHEN`          | —     | `auto`            | `auto` (terminal only), `always` or `never`, decided separately for stdout and stderr; see Colors                                                       |
 | `--count`               | `-c`  | —                 | Print count of matching lines per file (conflicts with `-l`, `-L`)                                                                                       |
 | `--include PATTERN`     | —     | —                 | Only search files matching this glob (e.g. `"*.rs"`, `"*.log"`)                                                                                          |
 | `--exclude PATTERN`     | —     | —                 | Skip files matching this glob (e.g. `"*.min.js"`, `"*.lock"`); repeatable; wins over `--include` on overlap                                              |
@@ -484,6 +485,15 @@ With `-z`/`--search-compressed` (see Usage above), the binary sniff runs on the 
 The null-byte sniff only catches files that are binary *in that specific way* — plenty of non-NUL content still isn't meant to be printed as text (cache files, compiled artifacts without embedded NULs, etc.), and a search run with `--hidden --no-ignore` deliberately walks into exactly that kind of content. So as a second, independent layer of protection: any control character in a matched or context line — bell, escape, carriage return, and the rest of the C0 control range plus DEL — is escaped as visible `\xHH` text before printing (C1 controls U+0080–U+009F as `\u{9b}` and so on), rather than being sent to the terminal raw. Without this, a match landing inside such a file could ring the terminal bell, overwrite the current line, or in principle inject arbitrary ANSI sequences into your terminal. This only affects what gets *printed*: the query still matches against the original, unescaped content, so a pattern that's meant to match a real control byte still works exactly as before.
 
 File names get the same treatment. A name can contain ESC and other control bytes too, so every path argrep prints (matches, `-l`/`-L`/`-c`, `--files`, and `--debug` messages on stderr) is escaped the same way, with tab and newline escaped as well so one name can't pose as several lines. A file named `x<ESC>]0;PWNED<BEL>.txt` is shown as `x\x1b]0;PWNED\x07.txt`.
+
+## Colors
+
+On a terminal, file names are magenta, line numbers green and each match bold red; errors and warnings on stderr are red and yellow.
+
+- **`--color auto`** (the default) colors a stream only when it goes to a terminal. stdout and stderr are decided separately, so `argrep … 2>err.log` gets no escape codes in the log while results on the terminal stay colored, and `argrep … | less` keeps colored error messages on the terminal.
+- **`--color always`** colors even into a pipe or file, e.g. `argrep TODO . --color always | less -R`. **`--color never`** turns color off everywhere. `--colour` works too.
+- **Environment**, for `auto` only: `NO_COLOR` (any non-empty value) or `CLICOLOR=0` turns color off, and `CLICOLOR_FORCE=1` turns it on in a pipe. An explicit `--color always|never` beats both.
+- `-0` and `--json` output are never colored, whatever `--color` says. Unlike `--bar` in ardisk, `--color` always takes a value (`--color never`, or `--color=never`), so `argrep --color never TODO` can't mistake `never` for the pattern.
 
 ## Examples
 
@@ -644,7 +654,7 @@ argrep -z 'OutOfMemoryError' /var/log/app/*.log.gz
 - **Binary skipping** — no `-I` flag needed, binaries are automatically detected and skipped
 - **Smart ignores** — `.git/`, `node_modules/`, `.gitignore`d build output (such as Cargo's `target/`) and dotfiles skipped automatically (opt back in with `--no-ignore` and/or `--hidden`)
 - **stdin support** — works as a drop-in in pipes without any special flags
-- **Colored output** — matched filenames in magenta, line numbers in green, query highlighted in red
+- **Colored output** — matched filenames in magenta, line numbers in green, query highlighted in red; `--color` decides per stream, so `2>err.log` never gets escape codes
 
 ## How searching works
 

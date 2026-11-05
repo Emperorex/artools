@@ -79,8 +79,8 @@ pub fn sanitize_name(s: &str) -> Cow<'_, str> {
 /// The tools walk from the canonical root (symlinks and `.`/`..` resolved),
 /// which `--exclude` anchoring, `--one-file-system` and `--execdir` rely
 /// on. Printed as is, though, `argrep foo src` would report
-/// `/home/me/project/src/main.rs`. Like grep, rg, find and fd, results are
-/// reported under the root as given instead:
+/// `/home/me/project/src/main.rs`. Like grep and find, results are reported
+/// under the root as given instead:
 ///
 /// | Typed            | Reported              |
 /// |------------------|-----------------------|
@@ -90,8 +90,8 @@ pub fn sanitize_name(s: &str) -> Cow<'_, str> {
 /// | `/abs/path`      | `/abs/path/lib.rs`    |
 /// | nothing (default)| `src/main.rs`         |
 ///
-/// The last row is what rg and fd do when no path is given: the implicit
-/// `./` prefix carries no information, so it is left off. Paths outside
+/// In the last row no path was given, so the implicit `./` prefix carries
+/// no information and is left off. Paths outside
 /// the canonical root are returned unchanged.
 #[derive(Debug, Clone)]
 pub struct DisplayRoot {
@@ -118,7 +118,7 @@ impl DisplayRoot {
 
     /// `path` for output another program may take as an argument (NUL
     /// lists for `xargs -0`): like [`map`](Self::map), but keeps the `./`
-    /// even when no path was typed, as fd does, so a file named `-rf`
+    /// even when no path was typed, so a file named `-rf`
     /// comes out as `./-rf` and can never be read as an option.
     pub fn map_arg<'a>(&self, path: &'a Path) -> Cow<'a, Path> {
         self.map_with(path, false)

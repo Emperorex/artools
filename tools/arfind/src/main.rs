@@ -1,3 +1,4 @@
+use arcommon::color::ErrPaint;
 use arfind::{
     Args, DEFAULT_IGNORES, MatchResult, SearchConfig, SearchStats, SizeFilter, SortKey,
     age::{MtimeFilter, check_window},
@@ -7,7 +8,6 @@ use arfind::{
     types::NameKindFilter,
 };
 use clap::{CommandFactory, FromArgMatches, parser::ValueSource};
-use colored::Colorize;
 use glob::Pattern;
 use std::{
     collections::HashSet,
@@ -146,16 +146,19 @@ fn write_item(out: &mut impl Write, item: &MatchResult, print0: bool) -> io::Res
 
 /// Prints `error: ...` in red and exits with status 1.
 fn fail(message: &str) -> ! {
-    eprintln!("{}", format!("error: {}", message).red());
+    eprintln!("{}", format!("error: {}", message).err_red());
     std::process::exit(1);
 }
 
 fn main() {
     let matches = Args::command().get_matches();
     // Whether PATH was typed or is clap's default ".": with no PATH,
-    // results are listed without a leading "./", as fd does.
+    // results are listed without a leading "./".
     let path_typed = matches.value_source("path") != Some(ValueSource::DefaultValue);
     let args = Args::from_arg_matches(&matches).unwrap_or_else(|e| e.exit());
+    // Colors are decided once, separately for stdout and stderr (see
+    // arcommon::color), before anything is printed.
+    arcommon::color::init(args.color);
 
     if args.type_list {
         arcommon::out!("{}", arcommon::filetypes::type_list());
@@ -173,7 +176,7 @@ fn main() {
                 "error: Invalid type '{}'. Use 'f' for files, 'd' for directories, or 'l' for symlinks.",
                 t
             )
-            .red()
+            .err_red()
         );
         std::process::exit(1);
     }
@@ -200,7 +203,7 @@ fn main() {
         eprintln!(
             "{}",
             "arfind: --one-file-system is only supported on Unix-like systems; searching normally"
-                .yellow()
+                .err_yellow()
         );
     }
 
@@ -210,7 +213,7 @@ fn main() {
         Some(s) => match parse_size(s) {
             Ok(f) => Some(f),
             Err(e) => {
-                eprintln!("{}", format!("error: {}", e).red());
+                eprintln!("{}", format!("error: {}", e).err_red());
                 std::process::exit(1);
             }
         },
@@ -325,13 +328,13 @@ fn main() {
                         summary.runs,
                         if summary.runs == 1 { "" } else { "s" }
                     )
-                    .red()
+                    .err_red()
                 );
                 exit_code = 1;
             }
             Ok(_) => {}
             Err(e) => {
-                eprintln!("{}", format!("error: {}", e).red());
+                eprintln!("{}", format!("error: {}", e).err_red());
                 exit_code = 1;
             }
         }
@@ -378,15 +381,26 @@ fn main() {
     }
 
     if args.debug {
-        eprintln!("{}", "\n=== Search Statistics ===".yellow().bold());
-        eprintln!("Worker threads:        {}", args.jobs.to_string().cyan());
+        eprintln!("{}", "\n=== Search Statistics ===".err_yellow().bold());
+        eprintln!(
+            "Worker threads:        {}",
+            args.jobs.to_string().err_cyan()
+        );
         eprintln!(
             "Files checked:         {}",
-            stats.total_files.load(Ordering::Relaxed).to_string().cyan()
+            stats
+                .total_files
+                .load(Ordering::Relaxed)
+                .to_string()
+                .err_cyan()
         );
         eprintln!(
             "Directories checked:   {}",
-            stats.total_dirs.load(Ordering::Relaxed).to_string().cyan()
+            stats
+                .total_dirs
+                .load(Ordering::Relaxed)
+                .to_string()
+                .err_cyan()
         );
         eprintln!(
             "Matches found:         {}",
@@ -394,7 +408,7 @@ fn main() {
                 .matched_count
                 .load(Ordering::Relaxed)
                 .to_string()
-                .green()
+                .err_green()
                 .bold()
         );
         eprintln!("Execution time:        {:.2?}", duration);

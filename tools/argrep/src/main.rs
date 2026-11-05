@@ -1,5 +1,6 @@
 mod json_output;
 
+use arcommon::color::ErrPaint;
 use arcommon::{
     filetypes::{type_globs, type_list},
     jobs::{MAX_JOBS, default_jobs},
@@ -302,6 +303,21 @@ struct Args {
     #[arg(long, conflicts_with_all = ["quiet", "null"])]
     json: bool,
 
+    /// When to use colors: auto (only where the output goes to a terminal),
+    /// always (e.g. for `less -R`), or never. Decided separately for
+    /// results on stdout and messages on stderr, so `2>err.log` gets no
+    /// color codes. With auto, NO_COLOR turns colors off and
+    /// CLICOLOR_FORCE=1 turns them on. -0 and --json output are
+    /// never colored.
+    #[arg(
+        long,
+        alias = "colour",
+        value_name = "WHEN",
+        value_enum,
+        default_value_t = arcommon::color::ColorChoice::Auto
+    )]
+    color: arcommon::color::ColorChoice,
+
     /// Print count of matching lines per file instead of the lines themselves
     #[arg(short = 'c', long = "count")]
     count_per_file: bool,
@@ -508,7 +524,7 @@ fn compile_glob(pattern: &str, flag_name: &str, quiet: bool) -> Pattern {
                     "error: Invalid glob pattern for {}: '{}': {}",
                     flag_name, pattern, e
                 )
-                .red()
+                .err_red()
             );
             std::process::exit(if quiet { 2 } else { 1 });
         }
@@ -517,12 +533,15 @@ fn compile_glob(pattern: &str, flag_name: &str, quiet: bool) -> Pattern {
 
 /// Prints `error: ...` in red and exits with `code`.
 fn fail(message: &str, code: i32) -> ! {
-    eprintln!("{}", format!("error: {}", message).red());
+    eprintln!("{}", format!("error: {}", message).err_red());
     std::process::exit(code);
 }
 
 fn main() {
     let mut args = Args::parse();
+    // Colors are decided once, separately for stdout and stderr (see
+    // arcommon::color), before anything is printed.
+    arcommon::color::init(args.color);
 
     if args.type_list {
         arcommon::out!("{}", type_list());
@@ -550,7 +569,7 @@ fn main() {
         match resolve_files_path(args.query.take(), args.path.take()) {
             Ok(path) => args.path = path,
             Err(msg) => {
-                eprintln!("{}", format!("error: {msg}").red());
+                eprintln!("{}", format!("error: {msg}").err_red());
                 std::process::exit(2);
             }
         }
@@ -559,7 +578,7 @@ fn main() {
                 "{}",
                 "error: --files lists files in a directory tree; it can't \
                  be combined with stdin input"
-                    .red()
+                    .err_red()
             );
             std::process::exit(2);
         }
@@ -569,7 +588,7 @@ fn main() {
         match resolve_e_path(args.query.take(), args.path.take()) {
             Ok(path) => args.path = path,
             Err(msg) => {
-                eprintln!("{}", format!("error: {msg}").red());
+                eprintln!("{}", format!("error: {msg}").err_red());
                 std::process::exit(2);
             }
         }
@@ -704,7 +723,7 @@ fn main() {
         match result {
             Ok(re) => re,
             Err(e) => {
-                eprintln!("{}", format!("error: {}", e).red());
+                eprintln!("{}", format!("error: {}", e).err_red());
                 // Under -q, exit codes are the whole interface (0=match,
                 // 1=no match, 2=error), matching grep's own convention — so a
                 // config error has to land on 2, not 1, which -q reserves for
@@ -719,7 +738,7 @@ fn main() {
     if let Some(replacement) = &args.replace
         && let Err(e) = check_replacement(&regex, replacement)
     {
-        eprintln!("{}", format!("error: {}", e).red());
+        eprintln!("{}", format!("error: {}", e).err_red());
         std::process::exit(1);
     }
 
@@ -765,7 +784,7 @@ fn main() {
         // from elsewhere shouldn't be treated as a hard failure.
         eprintln!(
             "{}",
-            "warning: -A/-B/-C have no effect with -o/--only-matching".yellow()
+            "warning: -A/-B/-C have no effect with -o/--only-matching".err_yellow()
         );
         before_context = 0;
         after_context = 0;
@@ -935,12 +954,16 @@ fn main() {
     // either way, so a --stats user never sees the error noise and a
     // --debug user isn't missing anything they had before.
     if args.debug || args.stats {
-        eprintln!("{}", "\n=== Search Statistics ===".yellow().bold());
+        eprintln!("{}", "\n=== Search Statistics ===".err_yellow().bold());
         if use_stdin {
-            eprintln!("Workers:            {}", "n/a (stdin mode)".cyan());
+            eprintln!("Workers:            {}", "n/a (stdin mode)".err_cyan());
             eprintln!(
                 "Bytes read:         {}",
-                stats.bytes_read.load(Ordering::Relaxed).to_string().cyan()
+                stats
+                    .bytes_read
+                    .load(Ordering::Relaxed)
+                    .to_string()
+                    .err_cyan()
             );
         } else {
             eprintln!(
@@ -949,11 +972,15 @@ fn main() {
                     .files_discovered
                     .load(Ordering::Relaxed)
                     .to_string()
-                    .cyan()
+                    .err_cyan()
             );
             eprintln!(
                 "Files searched:     {}",
-                stats.total_files.load(Ordering::Relaxed).to_string().cyan()
+                stats
+                    .total_files
+                    .load(Ordering::Relaxed)
+                    .to_string()
+                    .err_cyan()
             );
             let too_large = stats.files_too_large.load(Ordering::Relaxed);
             eprintln!(
@@ -962,7 +989,7 @@ fn main() {
                     .files_skipped
                     .load(Ordering::Relaxed)
                     .to_string()
-                    .cyan(),
+                    .err_cyan(),
                 if too_large > 0 {
                     format!(" ({too_large} over --max-filesize)")
                 } else {
@@ -971,13 +998,21 @@ fn main() {
             );
             eprintln!(
                 "Directories:        {}",
-                stats.total_dirs.load(Ordering::Relaxed).to_string().cyan()
+                stats
+                    .total_dirs
+                    .load(Ordering::Relaxed)
+                    .to_string()
+                    .err_cyan()
             );
             eprintln!(
                 "Bytes read:         {}",
-                stats.bytes_read.load(Ordering::Relaxed).to_string().cyan()
+                stats
+                    .bytes_read
+                    .load(Ordering::Relaxed)
+                    .to_string()
+                    .err_cyan()
             );
-            eprintln!("Workers:            {}", args.jobs.to_string().cyan());
+            eprintln!("Workers:            {}", args.jobs.to_string().err_cyan());
         }
         eprintln!(
             "Matches:            {}",
@@ -985,7 +1020,7 @@ fn main() {
                 .matched_lines
                 .load(Ordering::Relaxed)
                 .to_string()
-                .green()
+                .err_green()
                 .bold()
         );
         eprintln!("Elapsed:            {:.2?}", duration);
@@ -1011,7 +1046,7 @@ fn main() {
                     " (rerun with --debug for details)"
                 }
             )
-            .red()
+            .err_red()
         );
     }
 

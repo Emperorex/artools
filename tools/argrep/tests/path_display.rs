@@ -1,4 +1,4 @@
-//! Results are reported under PATH as typed, like grep and rg, not under
+//! Results are reported under PATH as typed, like grep, not under
 //! the canonical (absolute, symlink-free) root the search walks from.
 
 use std::{

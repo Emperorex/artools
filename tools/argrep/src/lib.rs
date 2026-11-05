@@ -1,8 +1,8 @@
+use arcommon::color::ErrPaint;
 use arcommon::{
     ignore::{IgnoreStack, is_ignored},
     walk::{self, Queue},
 };
-use colored::Colorize;
 use crossbeam_channel::unbounded;
 use flate2::read::GzDecoder;
 use glob::Pattern;
@@ -766,7 +766,7 @@ pub fn scan_and_grep(
             stats.files_too_large.fetch_add(1, Ordering::Relaxed);
             eprintln!(
                 "{}: {}: {} bytes, over --max-filesize {} bytes; not searched",
-                "argrep".yellow(),
+                "argrep".err_yellow(),
                 display_path(dir_path),
                 meta.len(),
                 config.max_filesize
@@ -789,7 +789,12 @@ pub fn scan_and_grep(
         Err(err) => {
             stats.io_errors.fetch_add(1, Ordering::Relaxed);
             if config.debug {
-                eprintln!("{}: {}: {}", "argrep".red(), display_path(dir_path), err);
+                eprintln!(
+                    "{}: {}: {}",
+                    "argrep".err_red(),
+                    display_path(dir_path),
+                    err
+                );
             }
             return;
         }
@@ -808,7 +813,7 @@ pub fn scan_and_grep(
             });
         if config.debug {
             for err in errors {
-                eprintln!("{}", format!("argrep: {}", err).red());
+                eprintln!("{}", format!("argrep: {}", err).err_red());
             }
         }
         stack
@@ -851,7 +856,7 @@ pub fn scan_and_grep(
             if config.debug {
                 eprintln!(
                     "{}: {}: not a regular file, skipped",
-                    "argrep".red(),
+                    "argrep".err_red(),
                     display_path(&entry.path())
                 );
             }
@@ -945,7 +950,7 @@ pub fn scan_and_grep(
                 if config.debug {
                     eprintln!(
                         "{}: {}: {} bytes, over --max-filesize, skipped",
-                        "argrep".red(),
+                        "argrep".err_red(),
                         display_path(&entry_path),
                         meta.len()
                     );
@@ -1197,7 +1202,12 @@ pub fn grep_file(
         Err(err) => {
             stats.io_errors.fetch_add(1, Ordering::Relaxed);
             if config.debug {
-                eprintln!("{}: {}: {}", "argrep".red(), display_path(file_path), err);
+                eprintln!(
+                    "{}: {}: {}",
+                    "argrep".err_red(),
+                    display_path(file_path),
+                    err
+                );
             }
             return;
         }
@@ -1241,7 +1251,12 @@ pub fn grep_file(
         Err(err) => {
             stats.io_errors.fetch_add(1, Ordering::Relaxed);
             if config.debug {
-                eprintln!("{}: {}: {}", "argrep".red(), display_path(file_path), err);
+                eprintln!(
+                    "{}: {}: {}",
+                    "argrep".err_red(),
+                    display_path(file_path),
+                    err
+                );
             }
             return;
         }
@@ -1348,7 +1363,7 @@ pub fn grep_file(
                         had_io_error = true;
                         eprintln!(
                             "{}: {}: decompressed size exceeds --max-decompressed-size ({} bytes); rest of file not searched",
-                            "argrep".red(),
+                            "argrep".err_red(),
                             display_path(file_path),
                             decompressed_cap
                         );
@@ -1377,7 +1392,7 @@ pub fn grep_file(
                         had_io_error = true;
                         eprintln!(
                             "{}: {}: decompressed size exceeds --max-decompressed-size ({} bytes); rest of file not searched",
-                            "argrep".red(),
+                            "argrep".err_red(),
                             display_path(file_path),
                             decompressed_cap
                         );
@@ -1390,7 +1405,12 @@ pub fn grep_file(
                 stats.io_errors.fetch_add(1, Ordering::Relaxed);
                 had_io_error = true;
                 if config.debug {
-                    eprintln!("{}: {}: {}", "argrep".red(), display_path(file_path), err);
+                    eprintln!(
+                        "{}: {}: {}",
+                        "argrep".err_red(),
+                        display_path(file_path),
+                        err
+                    );
                 }
                 break;
             }
@@ -1406,7 +1426,7 @@ pub fn grep_file(
             if !had_io_error {
                 eprintln!(
                     "{}: {}: line {} exceeds --max-line-size ({} bytes); skipping oversized lines",
-                    "argrep".red(),
+                    "argrep".err_red(),
                     display_path(file_path),
                     line_num,
                     config.max_line_bytes

@@ -9,6 +9,7 @@ pub use arcommon::ignore::{
     DEFAULT_IGNORED_DIRS as DEFAULT_IGNORES, exclude_matcher as build_exclude_matcher,
 };
 
+use arcommon::color::ErrPaint;
 use arcommon::{
     fs::{device_of, device_of_metadata},
     ignore::{IgnoreStack, is_ignored},
@@ -199,6 +200,21 @@ pub struct Args {
         conflicts_with_all = ["count", "exec", "exec_batch", "execdir", "dry_run"]
     )]
     pub print0: bool,
+
+    /// When to use colors: auto (only where the output goes to a terminal),
+    /// always (e.g. for `less -R`), or never. Decided separately for
+    /// results on stdout and messages on stderr, so `2>err.log` gets no
+    /// color codes. With auto, NO_COLOR turns colors off and
+    /// CLICOLOR_FORCE=1 turns them on. -0, --count and --dry-run
+    /// output are never colored.
+    #[arg(
+        long,
+        alias = "colour",
+        value_name = "WHEN",
+        value_enum,
+        default_value_t = arcommon::color::ColorChoice::Auto
+    )]
+    pub color: arcommon::color::ColorChoice,
 
     /// Run a command once for each result instead of printing it, like
     /// find -exec / fd -x. Everything after --exec up to a ';' argument (or
@@ -431,8 +447,8 @@ impl EntryKind {
     /// `text` in this kind's color, the defaults of GNU `ls --color`
     /// (dircolors): directories bold blue, symlinks bold cyan, FIFOs
     /// yellow, sockets bold magenta, devices bold yellow, regular files
-    /// uncolored. `colored` drops the color when stdout is not a terminal
-    /// or `NO_COLOR` is set (`CLICOLOR_FORCE=1` keeps it).
+    /// uncolored. Whether color is shown at all follows `--color` for
+    /// stdout (see `arcommon::color`).
     ///
     /// Takes the text by value so it is wrapped, not copied: this runs for
     /// every printed result.
@@ -793,7 +809,7 @@ pub fn scan_directory(
             if config.debug {
                 eprintln!(
                     "{}",
-                    format!("arfind: {}: {}", arcommon::display_path(&task.path), err).red()
+                    format!("arfind: {}: {}", arcommon::display_path(&task.path), err).err_red()
                 );
             }
             return;
@@ -813,7 +829,7 @@ pub fn scan_directory(
             });
         if config.debug {
             for err in errors {
-                eprintln!("{}", format!("arfind: {}", err).red());
+                eprintln!("{}", format!("arfind: {}", err).err_red());
             }
         }
         stack
@@ -981,7 +997,7 @@ pub fn scan_directory(
                             "arfind: {}: on another filesystem, not descending (--one-file-system)",
                             arcommon::display_path(&entry_path)
                         )
-                        .yellow()
+                        .err_yellow()
                     );
                 }
                 continue;

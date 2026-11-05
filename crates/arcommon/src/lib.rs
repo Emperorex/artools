@@ -10,6 +10,7 @@
 //! | Module        | What it provides                                              |
 //! |---------------|---------------------------------------------------------------|
 //! | [`term`]      | Escaping control characters, and reporting paths as typed      |
+//! | [`color`]     | `--color`: coloring decided separately for stdout and stderr   |
 //! | [`walk`]      | The parallel work queue every tool's directory walk runs on    |
 //! | [`ignore`]    | `.gitignore`/`.ignore` stacks, default ignored dirs, `--exclude` |
 //! | [`jobs`]      | The `-j/--jobs` default and upper bound                        |
@@ -19,6 +20,7 @@
 //! | [`out`]       | `out!`/`outln!`: stdout writes that exit quietly on a closed pipe (the one module that ends the process) |
 
 pub mod age;
+pub mod color;
 pub mod filetypes;
 pub mod fs;
 pub mod ignore;

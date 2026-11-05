@@ -7,6 +7,12 @@ description = "Shared helpers for the artools command-line tools"
 publish = false
 
 [dependencies]
+# --color: anstream decides per stream (NO_COLOR, CLICOLOR, CLICOLOR_FORCE,
+# terminal); anstyle writes stderr colors. Both already come with clap.
+anstream = "1"
+anstyle = "1"
+clap = { version = "4", features = ["derive"] }
+colored = "3.1"
 glob = "0.3"
 ignore = "0.4"
 

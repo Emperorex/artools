@@ -1,3 +1,4 @@
+use arcommon::color::ErrPaint;
 use arcommon::jobs::{MAX_JOBS, default_jobs};
 use ardisk::{
     Collect, DEFAULT_IGNORES, ScanConfig, ScanOutput, SizeUnits,
@@ -233,6 +234,21 @@ struct Args {
     #[arg(long)]
     json: bool,
 
+    /// When to use colors: auto (only where the output goes to a terminal),
+    /// always (e.g. for `less -R`), or never. Decided separately for
+    /// results on stdout and messages on stderr, so `2>err.log` gets no
+    /// color codes. With auto, NO_COLOR turns colors off and
+    /// CLICOLOR_FORCE=1 turns them on. --json output is never
+    /// colored; usage bars have their own --bar.
+    #[arg(
+        long,
+        alias = "colour",
+        value_name = "WHEN",
+        value_enum,
+        default_value_t = arcommon::color::ColorChoice::Auto
+    )]
+    color: arcommon::color::ColorChoice,
+
     /// Show which file types take up the space: files and total size per
     /// extension, biggest first, with each type's share of the total. The
     /// extension is the part of the name after the last '.', compared
@@ -387,6 +403,9 @@ fn main() {
     // directories are listed without a leading "./".
     let path_typed = matches.value_source("path") != Some(ValueSource::DefaultValue);
     let args = Args::from_arg_matches(&matches).unwrap_or_else(|e| e.exit());
+    // Colors are decided once, separately for stdout and stderr (see
+    // arcommon::color), before anything is printed.
+    arcommon::color::init(args.color);
 
     let units = if args.si {
         SizeUnits::Si
@@ -419,7 +438,7 @@ fn main() {
             Err(e) => {
                 eprintln!(
                     "{}",
-                    format!("error: Invalid glob pattern \'{}\': {}", p, e).red()
+                    format!("error: Invalid glob pattern \'{}\': {}", p, e).err_red()
                 );
                 std::process::exit(1);
             }
@@ -430,13 +449,13 @@ fn main() {
     let exclude = match build_exclude_matcher(&target_path, &args.exclude) {
         Ok(m) => m,
         Err(e) => {
-            eprintln!("{}", format!("error: {}", e).red());
+            eprintln!("{}", format!("error: {}", e).err_red());
             std::process::exit(1);
         }
     };
 
     if let Err(e) = check_window(args.older_than.as_ref(), args.newer_than.as_ref()) {
-        eprintln!("{}", format!("error: {}", e).red());
+        eprintln!("{}", format!("error: {}", e).err_red());
         std::process::exit(1);
     }
 
@@ -444,7 +463,7 @@ fn main() {
         eprintln!(
             "{}",
             "ardisk: --one-file-system is only supported on Unix-like systems; scanning normally"
-                .yellow()
+                .err_yellow()
         );
     }
 
@@ -541,7 +560,7 @@ fn main() {
         } {
             Ok(bytes) => Some(bytes),
             Err(e) => {
-                eprintln!("{}", format!("error: {}", e).red());
+                eprintln!("{}", format!("error: {}", e).err_red());
                 std::process::exit(1);
             }
         },
@@ -617,12 +636,12 @@ fn main() {
                     "ardisk: {} path(s) are not valid UTF-8; invalid bytes were replaced by U+FFFD in the JSON",
                     lossy
                 )
-                .yellow()
+                .err_yellow()
             ),
             // The reader (e.g. `head`) went away; that is not an error.
             Err(e) if e.kind() == io::ErrorKind::BrokenPipe => {}
             Err(e) => {
-                eprintln!("{}", format!("error: cannot write JSON: {}", e).red());
+                eprintln!("{}", format!("error: cannot write JSON: {}", e).err_red());
                 std::process::exit(1);
             }
         }
@@ -746,7 +765,7 @@ fn main() {
     }
 
     if args.debug {
-        eprintln!("\n{}", "=== Operational Metrics ===".green().bold());
+        eprintln!("\n{}", "=== Operational Metrics ===".err_green().bold());
         eprintln!("Worker threads:        {}", args.jobs);
         eprintln!("Total scanned folders: {}", raw_sizes.len());
         eprintln!("Execution time:        {:.2?}", duration);
@@ -756,7 +775,11 @@ fn main() {
             eprintln!("  same length:         {}", st.same_length);
             eprintln!("  prefix-hashed:       {}", st.prefix_hashed);
             eprintln!("  fully hashed:        {}", st.full_hashed);
-            eprintln!("  bytes read:          {}", format_size(st.bytes_read));
+            // format_size colors for stdout; this line is on stderr.
+            eprintln!(
+                "  bytes read:          {}",
+                format_size_plain(st.bytes_read)
+            );
         }
     }
 }
@@ -768,7 +791,7 @@ fn run_diff(args: &Args, before: &std::path::Path, after: &std::path::Path, unit
         write_json,
     };
     let fail = |msg: &str| -> ! {
-        eprintln!("{}", format!("error: {msg}").red());
+        eprintln!("{}", format!("error: {msg}").err_red());
         std::process::exit(1);
     };
     let stdin = std::path::Path::new("-");
@@ -817,7 +840,7 @@ fn run_diff(args: &Args, before: &std::path::Path, after: &std::path::Path, unit
         arcommon::out!("{}", render_text(&diff, &selection));
     }
     if let Some(warning) = partial_warning(&diff, &before, &after) {
-        eprintln!("{}", warning.yellow());
+        eprintln!("{}", warning.err_yellow());
     }
 }
 
@@ -880,7 +903,7 @@ fn warn_unreadable(report: &DuplicateReport, debug: bool) {
                     " (use --debug to list them)"
                 }
             )
-            .yellow()
+            .err_yellow()
         );
         if debug {
             for (path, reason) in &report.unreadable {

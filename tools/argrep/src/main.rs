@@ -25,62 +25,20 @@ use std::{
     time::Instant,
 };
 
-/// Resolves the positional PATH argument for --files mode, given the raw
-/// values clap bound to the (still positionally-first) `query` slot and
-/// the (positionally-second) `path` slot. --files takes no QUERY, but
-/// clap has no way to know that while parsing positionals — it always
-/// binds the first bare positional to `query` — so this function is
-/// where the "a lone positional under --files means PATH, not QUERY"
-/// rule actually lives, kept separate from `main()` so it's directly
-/// unit-testable without going through full CLI parsing.
-///
-/// - Neither given -> no path was specified at all; caller defaults it.
-/// - Only the query slot filled -> that's the one positional the user
-///   gave (e.g. `argrep --files .`, where clap bound "." to `query`
-///   since it's positionally first) -> treated as PATH.
-/// - Only the path slot filled -> already unambiguous (can only happen
-///   if a future clap version changes how it fills positional slots, but
-///   handled here in case it does).
-/// - Both filled -> two positionals were given together with --files,
-///   which is never valid (--files has nothing for a QUERY to do) -> an
-///   error naming both values, rather than silently picking one and
-///   discarding the other.
-fn resolve_files_path(
-    query: Option<String>,
-    path: Option<String>,
-) -> Result<Option<String>, String> {
-    match (query, path) {
-        (None, None) => Ok(None),
-        (Some(p), None) => Ok(Some(p)),
-        (None, Some(p)) => Ok(Some(p)),
-        (Some(q), Some(p)) => Err(format!(
-            "--files does not take a QUERY, only a PATH, but got two \
-             positional arguments: '{q}' and '{p}'. Use \
-             `argrep --files {p}` (or `argrep --files {q}`, whichever \
-             was meant as the path)."
-        )),
-    }
-}
-
-/// Same idea as resolve_files_path, for -e/--regexp: once -e is given,
-/// QUERY isn't treated as an additional pattern (matching GNU grep's own
-/// -e/-f rule), so a lone positional clap bound to the query slot is
-/// reinterpreted as PATH instead. Kept as a separate function rather
-/// than generalizing resolve_files_path to cover both cases, so neither
-/// function's existing tests or call sites need to change to support
-/// the other's error message.
-fn resolve_e_path(query: Option<String>, path: Option<String>) -> Result<Option<String>, String> {
-    match (query, path) {
-        (None, None) => Ok(None),
-        (Some(p), None) => Ok(Some(p)),
-        (None, Some(p)) => Ok(Some(p)),
-        (Some(q), Some(p)) => Err(format!(
-            "with -e/--regexp or -f/--file, QUERY is not an additional \
-             pattern, only PATH, but got two positional arguments: '{q}' \
-             and '{p}'. Use `argrep -e '...' {p}` (or `argrep -e '...' {q}`, \
-             whichever was meant as the path — and add another -e if \
-             '{q}' was meant as a pattern instead)."
-        )),
+/// The paths to search, from the positionals clap parsed. In --files mode
+/// and with -e/-f there is no QUERY, but clap always binds the first bare
+/// positional to `query`, so that value is the first PATH instead
+/// (`argrep --files src tests`, `argrep -e TODO src`). Otherwise `paths`
+/// is already exactly the PATH arguments. Kept out of `main()` so the rule
+/// is unit-testable without going through full CLI parsing.
+fn paths_from_positionals(
+    query_is_path: bool,
+    query: &mut Option<String>,
+    paths: Vec<String>,
+) -> Vec<String> {
+    match query.take_if(|_| query_is_path) {
+        Some(first) => std::iter::once(first).chain(paths).collect(),
+        None => paths,
     }
 }
 
@@ -150,18 +108,19 @@ struct Args {
     #[arg(required_unless_present_any = ["files", "patterns", "pattern_files"])]
     query: Option<String>,
 
-    /// Root directory or file to start the search
-    #[arg()]
-    path: Option<String>,
+    /// Files or directories to search (repeatable). Without any, argrep
+    /// searches the current directory, or stdin when it is piped; `-` reads
+    /// stdin explicitly (on its own, not together with other paths).
+    #[arg(value_name = "PATH")]
+    paths: Vec<String>,
 
     /// An additional pattern to search for. Repeatable: a line matches
     /// if it matches ANY given pattern (combined via alternation, not
     /// ANDed together) — same semantics as grep/ripgrep's multiple -e.
     /// When -e is given at all, QUERY stops being treated as an
     /// additional pattern (the same "-e overrides the positional
-    /// pattern" rule GNU grep follows); a lone leftover positional is
-    /// reinterpreted as PATH instead, same idea as --files (see
-    /// resolve_e_path).
+    /// pattern" rule GNU grep follows); every positional is a PATH
+    /// instead, same idea as --files (see paths_from_positionals).
     #[arg(short = 'e', long = "regexp")]
     patterns: Vec<String>,
 
@@ -561,37 +520,32 @@ fn main() {
         args.only_matching = false;
     }
 
-    if args.files {
-        // --files takes no QUERY — resolve_files_path decides whether the
-        // one positional clap bound to `query` (since it's positionally
-        // first) should actually be treated as PATH. See its doc comment
-        // for the exact rules.
-        match resolve_files_path(args.query.take(), args.path.take()) {
-            Ok(path) => args.path = path,
-            Err(msg) => {
-                eprintln!("{}", format!("error: {msg}").err_red());
-                std::process::exit(2);
-            }
-        }
-        if args.path.as_deref() == Some("-") {
-            eprintln!(
-                "{}",
-                "error: --files lists files in a directory tree; it can't \
-                 be combined with stdin input"
-                    .err_red()
-            );
-            std::process::exit(2);
-        }
-    } else if !args.patterns.is_empty() || !args.pattern_files.is_empty() {
-        // -e or -f was given: QUERY is not an additional pattern (same
-        // rule as GNU grep's -e/-f), so a lone leftover positional is PATH.
-        match resolve_e_path(args.query.take(), args.path.take()) {
-            Ok(path) => args.path = path,
-            Err(msg) => {
-                eprintln!("{}", format!("error: {msg}").err_red());
-                std::process::exit(2);
-            }
-        }
+    // --files, -e and -f take no QUERY: the first positional is a PATH.
+    let query_is_path = args.files || !args.patterns.is_empty() || !args.pattern_files.is_empty();
+    args.paths = paths_from_positionals(
+        query_is_path,
+        &mut args.query,
+        std::mem::take(&mut args.paths),
+    );
+    if args.paths.len() > 1 && args.paths.iter().any(|p| p == "-") {
+        eprintln!(
+            "{}",
+            "error: - (stdin) can't be combined with other paths; search stdin \
+             and the files in two runs"
+                .err_red()
+        );
+        std::process::exit(2);
+    }
+    let stdin_path = args.paths.first().is_some_and(|p| p == "-");
+
+    if args.files && stdin_path {
+        eprintln!(
+            "{}",
+            "error: --files lists files in a directory tree; it can't \
+             be combined with stdin input"
+                .err_red()
+        );
+        std::process::exit(2);
     }
 
     // The actual set of patterns to search for: -e's list if any were
@@ -609,7 +563,7 @@ fn main() {
         if args.pattern_files.iter().filter(|f| *f == "-").count() > 1 {
             fail("-f - (patterns from stdin) can be given only once", 2);
         }
-        if args.pattern_files.iter().any(|f| f == "-") && args.path.as_deref() == Some("-") {
+        if args.pattern_files.iter().any(|f| f == "-") && stdin_path {
             fail(
                 "stdin can't hold both the patterns (-f -) and the text to search (PATH -); \
                  give a file or directory to search",
@@ -851,7 +805,7 @@ fn main() {
     let start_time = Instant::now();
 
     let patterns_from_stdin = args.pattern_files.iter().any(|f| f == "-");
-    let use_stdin = if args.files || (patterns_from_stdin && args.path.is_none()) {
+    let use_stdin = if args.files || (patterns_from_stdin && args.paths.is_empty()) {
         // With -f -, stdin has already been read for the patterns, so the
         // data comes from PATH (default ".") and never from stdin.
         // --files always lists a directory tree — never falls back to
@@ -861,10 +815,9 @@ fn main() {
         // a hard error, before this point.
         false
     } else {
-        match &args.path {
-            Some(p) if p == "-" => true,
-            Some(_) => false,
-            None => !io::stdin().is_terminal(),
+        match args.paths.as_slice() {
+            [] => !io::stdin().is_terminal(),
+            _ => stdin_path,
         }
     };
 
@@ -875,6 +828,15 @@ fn main() {
     if !use_stdin && !args.line_buffered && !io::stdout().is_terminal() {
         arcommon::out::enable_buffering();
     }
+
+    // Paths that don't exist are reported now, by name, and skipped; the
+    // others are still searched (exit status 1 at the end, as for any file
+    // that could not be read).
+    let (roots, missing_roots) = if use_stdin {
+        (Vec::new(), 0)
+    } else {
+        search_roots(&args.paths)
+    };
 
     let json_printer = args.json.then(|| {
         Arc::new(Mutex::new(JsonPrinter::stdout(
@@ -892,10 +854,9 @@ fn main() {
         };
         grep_stdin(&config, &stats, out);
     } else if let Some(printer) = &json_printer {
-        let root_path = search_root(args.path.as_deref());
         let printer = Arc::clone(printer);
         parallel_grep(
-            root_path,
+            roots.clone(),
             args.jobs,
             config.clone(),
             stats.clone(),
@@ -904,8 +865,6 @@ fn main() {
             },
         );
     } else {
-        let root_path = search_root(args.path.as_deref());
-
         let regex = config.regex.clone();
         let mode = OutputMode {
             names_only: config.files_with_matches
@@ -916,9 +875,15 @@ fn main() {
             null: args.null,
         };
 
-        parallel_grep(root_path, args.jobs, config, stats.clone(), move |result| {
-            print_result(&result, mode, &regex);
-        });
+        parallel_grep(
+            roots.clone(),
+            args.jobs,
+            config,
+            stats.clone(),
+            move |result| {
+                print_result(&result, mode, &regex);
+            },
+        );
     }
 
     let duration = start_time.elapsed();
@@ -935,7 +900,7 @@ fn main() {
                 stats.total_files.load(Ordering::Relaxed)
             },
             bytes_read: stats.bytes_read.load(Ordering::Relaxed),
-            errors: stats.io_errors.load(Ordering::Relaxed),
+            errors: stats.io_errors.load(Ordering::Relaxed) + missing_roots,
             elapsed_ms: duration.as_millis(),
             files_skipped_size: (args.max_filesize > 0)
                 .then(|| stats.files_too_large.load(Ordering::Relaxed)),
@@ -1057,7 +1022,7 @@ fn main() {
         // from the tool's default (non -q) contract just below, where 0
         // always means "the scan ran" and 1 means "an I/O error occurred",
         // regardless of whether anything matched.
-        std::process::exit(if io_error_count > 0 {
+        std::process::exit(if io_error_count + missing_roots > 0 {
             2
         } else if stats.matched_lines.load(Ordering::Relaxed) > 0 {
             0
@@ -1066,7 +1031,7 @@ fn main() {
         });
     }
 
-    if io_error_count > 0 {
+    if io_error_count + missing_roots > 0 {
         std::process::exit(1);
     }
 }
@@ -1389,19 +1354,42 @@ fn print_stdin_line(line: &str, line_num: usize, is_context: bool, config: &argr
 /// with spaces, newlines or control characters. Unless output is buffered
 /// (then main flushes it at the end), flushed at once: NUL-separated output
 /// never ends a line, so line-buffered stdout would hold it back.
-/// The canonical root to walk for PATH (`.` when none was given), with
-/// results set to be reported under PATH as typed (see
+/// The canonical roots to walk for the PATH arguments (`.` when none was
+/// given), with results set to be reported under each PATH as typed (see
 /// `arcommon::term::DisplayRoot`): `argrep foo src` prints `src/main.rs`,
-/// not an absolute path.
-fn search_root(path: Option<&str>) -> PathBuf {
-    let given = path.unwrap_or(".");
-    let canonical = fs::canonicalize(given).unwrap_or_else(|_| PathBuf::from(given));
-    arcommon::term::set_display_root(arcommon::term::DisplayRoot::new(
-        given,
-        canonical.clone(),
-        path.is_none(),
-    ));
-    canonical
+/// not an absolute path. A PATH that does not exist is reported on stderr
+/// and left out; the count of those is returned alongside.
+fn search_roots(paths: &[String]) -> (Vec<PathBuf>, usize) {
+    let implicit = paths.is_empty();
+    let dot = [".".to_string()];
+    let given = if implicit { &dot[..] } else { paths };
+    let mut roots = Vec::new();
+    let mut display = Vec::new();
+    let mut missing = 0;
+    for path in given {
+        if let Err(err) = fs::metadata(path) {
+            eprintln!(
+                "{}",
+                format!(
+                    "argrep: {}: {}",
+                    arcommon::sanitize_name(path),
+                    arcommon::fs::error_text(&err)
+                )
+                .err_red()
+            );
+            missing += 1;
+            continue;
+        }
+        let canonical = fs::canonicalize(path).unwrap_or_else(|_| PathBuf::from(path));
+        display.push(arcommon::term::DisplayRoot::new(
+            path,
+            canonical.clone(),
+            implicit,
+        ));
+        roots.push(canonical);
+    }
+    arcommon::term::set_display_roots(display);
+    (roots, missing)
 }
 
 fn print_file_name(path: &Path, null: bool) {
@@ -1492,8 +1480,8 @@ fn print_result(result: &argrep::MatchResult, mode: OutputMode, regex: &Regex) {
 #[cfg(test)]
 mod tests {
     use super::{
-        Args, build_ignore_dirs, default_jobs, resolve_e_path, resolve_files_path,
-        smart_case_ignore_case, type_globs,
+        Args, build_ignore_dirs, default_jobs, paths_from_positionals, smart_case_ignore_case,
+        type_globs,
     };
     use arcommon::filetypes::TYPE_TABLE;
     use clap::Parser;
@@ -1505,7 +1493,7 @@ mod tests {
         let a = Args::try_parse_from(["argrep", "-f", "a.txt", "-f", "b.txt", "src"]).unwrap();
         assert_eq!(a.pattern_files, ["a.txt", "b.txt"]);
         // Parsing binds the lone positional to `query`; main() then moves
-        // it to PATH via resolve_e_path, exactly as for -e.
+        // it to PATH via paths_from_positionals, exactly as for -e.
         assert_eq!(a.query.as_deref(), Some("src"));
         let a = Args::try_parse_from(["argrep", "--file", "rules.txt"]).unwrap();
         assert_eq!(a.pattern_files, ["rules.txt"]);
@@ -1989,9 +1977,9 @@ mod tests {
     }
 
     // ── --files ───────────────────────────────────────────────────────────
-    // QUERY becomes optional, a lone positional under --files is PATH not
-    // QUERY, and --files conflicts with every flag that presupposes real
-    // content search. resolve_files_path is tested directly (it's a pure
+    // QUERY becomes optional, every positional under --files is a PATH,
+    // and --files conflicts with every flag that presupposes real content
+    // search. paths_from_positionals is tested directly (it's a pure
     // function) rather than only through full CLI parsing, since it's
     // where the actual positional-reinterpretation logic lives.
 
@@ -2071,42 +2059,35 @@ mod tests {
         assert!(args.fixed_strings);
     }
 
-    #[test]
-    fn resolve_files_path_with_no_positionals_is_none() {
-        assert_eq!(resolve_files_path(None, None), Ok(None));
+    fn positionals(query_is_path: bool, argv: &[&str]) -> (Option<String>, Vec<String>) {
+        let mut full = vec!["argrep"];
+        full.extend(argv);
+        let mut args = Args::try_parse_from(full).unwrap();
+        let paths = paths_from_positionals(query_is_path, &mut args.query, args.paths);
+        (args.query, paths)
     }
 
     #[test]
-    fn resolve_files_path_treats_lone_query_slot_value_as_path() {
-        // This is the common case: `argrep --files .` — clap binds "."
-        // to the (positionally-first) query slot, and this function is
-        // what turns that into PATH instead.
+    fn several_paths_follow_the_query() {
         assert_eq!(
-            resolve_files_path(Some(".".to_string()), None),
-            Ok(Some(".".to_string()))
+            positionals(false, &["foo", "src", "tests"]),
+            (Some("foo".into()), vec!["src".into(), "tests".into()])
         );
-        assert_eq!(
-            resolve_files_path(Some("~".to_string()), None),
-            Ok(Some("~".to_string()))
-        );
+        assert_eq!(positionals(false, &["foo"]), (Some("foo".into()), vec![]));
     }
 
     #[test]
-    fn resolve_files_path_treats_lone_path_slot_value_as_path() {
+    fn with_files_every_positional_is_a_path() {
+        // `argrep --files .`: clap binds "." to the query slot.
         assert_eq!(
-            resolve_files_path(None, Some("src".to_string())),
-            Ok(Some("src".to_string()))
+            positionals(true, &["--files", "."]),
+            (None, vec![".".into()])
         );
-    }
-
-    #[test]
-    fn resolve_files_path_rejects_two_positionals() {
-        let result = resolve_files_path(Some("foo".to_string()), Some(".".to_string()));
-        assert!(
-            result.is_err(),
-            "two positionals together with --files must be a usage error, \
-             not a silent guess about which one was meant as the path"
+        assert_eq!(
+            positionals(true, &["--files", "src", "tests"]),
+            (None, vec!["src".into(), "tests".into()])
         );
+        assert_eq!(positionals(true, &["--files"]), (None, vec![]));
     }
 
     // ── -e / --regexp ─────────────────────────────────────────────────────
@@ -2135,29 +2116,16 @@ mod tests {
     }
 
     #[test]
-    fn resolve_e_path_with_no_positionals_is_none() {
-        assert_eq!(resolve_e_path(None, None), Ok(None));
-    }
-
-    #[test]
-    fn resolve_e_path_treats_lone_query_slot_value_as_path() {
-        // `argrep -e TODO .` — clap binds "." to the (positionally-first)
-        // query slot regardless of -e, and this function is what turns
-        // that into PATH instead of treating it as another pattern.
+    fn with_e_every_positional_is_a_path() {
+        // `argrep -e TODO .`: QUERY is never an additional pattern once -e
+        // is given, so "." and anything after it are paths.
         assert_eq!(
-            resolve_e_path(Some(".".to_string()), None),
-            Ok(Some(".".to_string()))
+            positionals(true, &["-e", "TODO", "."]),
+            (None, vec![".".into()])
         );
-    }
-
-    #[test]
-    fn resolve_e_path_rejects_two_positionals() {
-        let result = resolve_e_path(Some("foo".to_string()), Some(".".to_string()));
-        assert!(
-            result.is_err(),
-            "two positionals together with -e must be a usage error — \
-             QUERY is never treated as an additional pattern once -e is \
-             given, so there's no reasonable default interpretation"
+        assert_eq!(
+            positionals(true, &["-e", "TODO", "src", "tests"]),
+            (None, vec!["src".into(), "tests".into()])
         );
     }
 
@@ -2166,7 +2134,7 @@ mod tests {
         let args = Args::try_parse_from(["argrep", "-e", "TODO", "src"]).unwrap();
         assert_eq!(args.patterns, vec!["TODO".to_string()]);
         // Parsing alone can't distinguish "src" as path vs. leftover
-        // query slot — that's resolve_e_path's job in main(), covered
+        // query slot — that's paths_from_positionals's job in main(), covered
         // above. This test only confirms clap accepts the combination.
     }
 

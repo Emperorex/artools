@@ -13,7 +13,7 @@ use std::{
     collections::HashSet,
     fs,
     io::{self, BufWriter, Write},
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::{Arc, Mutex, atomic::Ordering},
     time::{Instant, SystemTime},
 };
@@ -116,16 +116,51 @@ fn build_ignore_dirs(
         .map_err(|(entry, e)| format!("Invalid glob pattern for --exclude-dir: '{}': {}", entry, e))
 }
 
+/// The roots to search, as given (see `parallel_find`), with results set to
+/// be reported under each PATH as typed (`arfind src` lists `src/...`, not
+/// an absolute path). A PATH that does not exist is reported on stderr and
+/// left out; the count of those is returned alongside.
+fn search_roots(paths: &[String], typed: bool) -> (Vec<PathBuf>, usize) {
+    let mut roots = Vec::new();
+    let mut display = Vec::new();
+    let mut missing = 0;
+    for path in paths {
+        // symlink_metadata: a dangling symlink named as PATH is listed as
+        // the symlink it is, not reported as missing.
+        if let Err(err) = fs::symlink_metadata(path) {
+            eprintln!(
+                "{}",
+                format!(
+                    "arfind: {}: {}",
+                    arcommon::sanitize_name(path),
+                    arcommon::fs::error_text(&err)
+                )
+                .err_red()
+            );
+            missing += 1;
+            continue;
+        }
+        let canonical = fs::canonicalize(path).unwrap_or_else(|_| PathBuf::from(path));
+        display.push(arcommon::term::DisplayRoot::new(path, canonical, !typed));
+        // Passed as given: parallel_find canonicalizes, but keeps the
+        // argument too, since resolving "." or ".." away before matching
+        // would silently break `--name .`/`--name ..` against the root.
+        roots.push(PathBuf::from(path));
+    }
+    arcommon::term::set_display_roots(display);
+    (roots, missing)
+}
+
 /// Runs the search and returns every result, in traversal order.
 fn collect(
-    root: PathBuf,
+    roots: Vec<PathBuf>,
     jobs: usize,
     config: Arc<SearchConfig>,
     stats: &SearchStats,
 ) -> Vec<MatchResult> {
     let found: Arc<Mutex<Vec<MatchResult>>> = Arc::new(Mutex::new(Vec::new()));
     let sink = Arc::clone(&found);
-    parallel_find(root, jobs, config, stats.clone(), move |item| {
+    parallel_find(roots, jobs, config, stats.clone(), move |item| {
         sink.lock().unwrap().push(item);
     });
     std::mem::take(&mut *found.lock().unwrap())
@@ -154,7 +189,7 @@ fn main() {
     let matches = Args::command().get_matches();
     // Whether PATH was typed or is clap's default ".": with no PATH,
     // results are listed without a leading "./".
-    let path_typed = matches.value_source("path") != Some(ValueSource::DefaultValue);
+    let path_typed = matches.value_source("paths") != Some(ValueSource::DefaultValue);
     let args = Args::from_arg_matches(&matches).unwrap_or_else(|e| e.exit());
     // Colors are decided once, separately for stdout and stderr (see
     // arcommon::color), before anything is printed.
@@ -184,18 +219,9 @@ fn main() {
     let (ignore_dirs, ignore_dir_patterns) =
         build_ignore_dirs(args.no_ignore, args.exclude_dir).unwrap_or_else(|e| fail(&e));
 
-    // --exclude patterns are anchored at the canonical root, the same path
-    // the search reports entries under.
-    let canonical_root = fs::canonicalize(&args.path).unwrap_or_else(|_| PathBuf::from(&args.path));
-    // Results are walked from the canonical root but reported under PATH
-    // as typed (`arfind src` lists `src/...`, not an absolute path).
-    arcommon::term::set_display_root(arcommon::term::DisplayRoot::new(
-        &args.path,
-        canonical_root.clone(),
-        !path_typed,
-    ));
-    let exclude =
-        build_exclude_matcher(&canonical_root, &args.exclude).unwrap_or_else(|e| fail(&e));
+    // --exclude is anchored at each search root and built per root by the
+    // search; checked here once, so a bad pattern fails before anything runs.
+    build_exclude_matcher(Path::new("."), &args.exclude).unwrap_or_else(|e| fail(&e));
 
     check_window(args.older_than.as_ref(), args.newer_than.as_ref()).unwrap_or_else(|e| fail(&e));
 
@@ -232,7 +258,7 @@ fn main() {
         case_insensitive: args.case_insensitive,
         respect_gitignore: !args.no_ignore,
         ignore_dir_patterns,
-        exclude,
+        exclude: args.exclude.clone(),
         one_file_system: args.one_file_system,
         name_kind: NameKindFilter::new(&args.types, &args.type_not, &args.extension),
         mtime: MtimeFilter::new(
@@ -293,22 +319,21 @@ fn main() {
         fail("--dry-run only applies to --exec, --exec-batch or --execdir");
     }
 
+    // Paths that don't exist are reported now, by name, and skipped; the
+    // others are still searched, and the exit status is 1 at the end.
+    let (roots, missing_roots) = search_roots(&args.paths, path_typed);
+
     let stats = SearchStats::new();
     let start_time = Instant::now();
-    // Passed as given — parallel_find canonicalizes internally, but keeps
-    // the original argument around too, since resolving "." or ".." away
-    // before matching would silently break `--name .`/`--name ..` against
-    // the root itself.
-    let root_path = PathBuf::from(&args.path);
     let count_only = args.count;
 
-    let mut exit_code = 0;
+    let mut exit_code = if missing_roots > 0 { 1 } else { 0 };
 
     if let Some(template) = exec {
         // --exec/--exec-batch: collect everything first, so commands that
         // move or delete files cannot affect the search, then run them in
         // a stable order: by path, or as --sort says.
-        let mut found = collect(root_path, args.jobs, config, &stats);
+        let mut found = collect(roots, args.jobs, config, &stats);
         sort_results(&mut found, args.sort.unwrap_or(SortKey::Path), args.reverse);
         // Absolute (canonical) paths, not the PATH-as-typed form used for
         // printing: exec.rs relies on them so that no placeholder can
@@ -340,7 +365,7 @@ fn main() {
         }
     } else if let Some(key) = args.sort {
         // --sort: the whole result set is needed before the first line.
-        let mut found = collect(root_path, args.jobs, config, &stats);
+        let mut found = collect(roots, args.jobs, config, &stats);
         sort_results(&mut found, key, args.reverse);
         let mut out = BufWriter::new(io::stdout().lock());
         for item in &found {
@@ -354,7 +379,7 @@ fn main() {
         // buffer is line-based, and NUL-separated output never ends a line.
         let out = Arc::new(Mutex::new(BufWriter::new(io::stdout())));
         let sink = Arc::clone(&out);
-        parallel_find(root_path, args.jobs, config, stats.clone(), move |item| {
+        parallel_find(roots, args.jobs, config, stats.clone(), move |item| {
             let mut w = sink.lock().unwrap();
             arcommon::out::check(
                 w.write_all(&arcommon::fs::path_bytes(&arcommon::shown_arg_path(
@@ -366,7 +391,7 @@ fn main() {
         // Flushed before the statistics and the exit status below.
         arcommon::out::check(out.lock().unwrap().flush());
     } else {
-        parallel_find(root_path, args.jobs, config, stats.clone(), move |item| {
+        parallel_find(roots, args.jobs, config, stats.clone(), move |item| {
             if !count_only {
                 arcommon::outln!("{}", item.display());
             }

@@ -700,8 +700,11 @@ pub fn build_matcher_multi(patterns: &[String], opts: MatchOptions) -> Result<Re
 
 /// Runs a parallel grep across all text files under `root`,
 /// calling `on_match` for every matched line.
+/// Searches every root in `roots` (directories, or files named directly)
+/// with one shared pool of `workers` threads, calling `on_match` for each
+/// result as it is found.
 pub fn parallel_grep(
-    root: PathBuf,
+    roots: impl IntoIterator<Item = PathBuf>,
     workers: usize,
     config: Arc<SearchConfig>,
     stats: SearchStats,
@@ -715,11 +718,15 @@ pub fn parallel_grep(
         }
     });
 
-    let root_task = Task {
-        path: root,
-        ignore_stack: Arc::new(Vec::new()),
-    };
-    walk::for_each([root_task], workers, |task, queue| {
+    // Each root starts with an empty .gitignore stack of its own.
+    let root_tasks: Vec<Task> = roots
+        .into_iter()
+        .map(|path| Task {
+            path,
+            ignore_stack: Arc::new(Vec::new()),
+        })
+        .collect();
+    walk::for_each(root_tasks, workers, |task, queue| {
         if config.quiet && stats.matched_lines.load(Ordering::Relaxed) > 0 {
             // -q already has its answer: drop the rest of the walk.
             queue.stop();

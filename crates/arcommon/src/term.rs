@@ -141,22 +141,65 @@ impl DisplayRoot {
     }
 }
 
-static DISPLAY_ROOT: OnceLock<DisplayRoot> = OnceLock::new();
+/// The roots of one search (`argrep foo src tests` has two), each
+/// reported as typed.
+#[derive(Debug, Clone, Default)]
+pub struct DisplayRoots(Vec<DisplayRoot>);
 
-/// Sets the root that [`shown_path`] and [`display_path`] report paths
+impl DisplayRoots {
+    pub fn new(roots: Vec<DisplayRoot>) -> Self {
+        DisplayRoots(roots)
+    }
+
+    /// The root `path` is reported under: the one whose canonical path is
+    /// the longest prefix of it. So with `src` and `src/lib` both given, a
+    /// file below `src/lib` is shown as `src/lib/...` whichever walk found
+    /// it, and two roots that are one directory (`. $PWD`) use the first.
+    fn root_of(&self, path: &Path) -> Option<&DisplayRoot> {
+        self.0
+            .iter()
+            .filter(|r| path.starts_with(&r.canonical))
+            .max_by_key(|r| r.canonical.components().count())
+    }
+
+    /// [`DisplayRoot::map`] with the root `path` belongs to.
+    pub fn map<'a>(&self, path: &'a Path) -> Cow<'a, Path> {
+        match self.root_of(path) {
+            Some(root) => root.map(path),
+            None => Cow::Borrowed(path),
+        }
+    }
+
+    /// [`DisplayRoot::map_arg`] with the root `path` belongs to.
+    pub fn map_arg<'a>(&self, path: &'a Path) -> Cow<'a, Path> {
+        match self.root_of(path) {
+            Some(root) => root.map_arg(path),
+            None => Cow::Borrowed(path),
+        }
+    }
+}
+
+static DISPLAY_ROOTS: OnceLock<DisplayRoots> = OnceLock::new();
+
+/// Sets the roots that [`shown_path`] and [`display_path`] report paths
 /// under, for the rest of the process. Called once by a tool's `main`
 /// before the walk starts; later calls are ignored. Without a call, paths
 /// are shown exactly as they are.
+pub fn set_display_roots(roots: Vec<DisplayRoot>) {
+    let _ = DISPLAY_ROOTS.set(DisplayRoots::new(roots));
+}
+
+/// [`set_display_roots`] for a search with a single root.
 pub fn set_display_root(root: DisplayRoot) {
-    let _ = DISPLAY_ROOT.set(root);
+    set_display_roots(vec![root]);
 }
 
 /// `path` in the form it is reported to the user (see [`DisplayRoot`]),
 /// with the exact bytes kept, e.g. for JSON. [`display_path`] applies it
 /// too.
 pub fn shown_path(path: &Path) -> Cow<'_, Path> {
-    match DISPLAY_ROOT.get() {
-        Some(root) => root.map(path),
+    match DISPLAY_ROOTS.get() {
+        Some(roots) => roots.map(path),
         None => Cow::Borrowed(path),
     }
 }
@@ -165,8 +208,8 @@ pub fn shown_path(path: &Path) -> Cow<'_, Path> {
 /// [`DisplayRoot::map_arg`]. (`--exec` arguments are not mapped at all:
 /// arfind passes absolute paths there, see its `exec` module.)
 pub fn shown_arg_path(path: &Path) -> Cow<'_, Path> {
-    match DISPLAY_ROOT.get() {
-        Some(root) => root.map_arg(path),
+    match DISPLAY_ROOTS.get() {
+        Some(roots) => roots.map_arg(path),
         None => Cow::Borrowed(path),
     }
 }
@@ -270,6 +313,47 @@ mod tests {
         // With a typed path, both forms are the same.
         let typed = DisplayRoot::new("src", "/p/src", false);
         assert_eq!(typed.map_arg(Path::new("/p/src/-rf")), Path::new("src/-rf"));
+    }
+
+    #[test]
+    fn several_roots_each_keep_their_typed_form() {
+        let roots = DisplayRoots::new(vec![
+            DisplayRoot::new("src", "/p/src", false),
+            DisplayRoot::new("../other", "/home/other", false),
+            DisplayRoot::new("/abs", "/abs", false),
+        ]);
+        let m = |p: &str| roots.map(Path::new(p)).to_string_lossy().into_owned();
+        assert_eq!(m("/p/src/a.rs"), "src/a.rs");
+        assert_eq!(m("/home/other/b"), "../other/b");
+        assert_eq!(m("/abs/c"), "/abs/c");
+        assert_eq!(m("/elsewhere/d"), "/elsewhere/d");
+    }
+
+    #[test]
+    fn nested_roots_use_the_most_specific_one() {
+        // Given in either order, a file under both is shown under the
+        // deeper root.
+        for roots in [
+            vec![
+                DisplayRoot::new("src", "/p/src", false),
+                DisplayRoot::new("src/lib", "/p/src/lib", false),
+            ],
+            vec![
+                DisplayRoot::new("src/lib", "/p/src/lib", false),
+                DisplayRoot::new("src", "/p/src", false),
+            ],
+        ] {
+            let roots = DisplayRoots::new(roots);
+            let m = |p: &str| roots.map(Path::new(p)).to_string_lossy().into_owned();
+            assert_eq!(m("/p/src/lib/x.rs"), "src/lib/x.rs");
+            assert_eq!(m("/p/src/main.rs"), "src/main.rs");
+        }
+        // A sibling that only shares a string prefix is not "under" it.
+        let roots = DisplayRoots::new(vec![DisplayRoot::new("src", "/p/src", false)]);
+        assert_eq!(
+            roots.map(Path::new("/p/srcfoo/x")),
+            Path::new("/p/srcfoo/x")
+        );
     }
 
     #[test]

@@ -61,9 +61,10 @@ impl SortKey {
 #[derive(Parser, Debug)]
 #[command(author, version, about = "Fast parallel find (Rust version)")]
 pub struct Args {
-    /// Root directory
-    #[arg(default_value = ".")]
-    pub path: String,
+    /// Directories (or files) to search, repeatable; the current directory
+    /// if none is given.
+    #[arg(value_name = "PATH", default_value = ".")]
+    pub paths: Vec<String>,
 
     /// Filename pattern
     #[arg(short, long, default_value = "*")]
@@ -283,6 +284,18 @@ pub struct Args {
     pub reverse: bool,
 }
 
+/// What a directory needs to know about the search root it was found
+/// under. Shared by every task below one root; with several roots
+/// (`arfind src tests`), each has its own.
+#[derive(Debug, Default)]
+pub struct Root {
+    /// `--exclude`, anchored at this root (a pattern with a `/` is relative
+    /// to the root it is matched under). See [`build_exclude_matcher`].
+    pub exclude: Option<Gitignore>,
+    /// `-x`: this root's device, which every directory entered must share.
+    pub dev: Option<u64>,
+}
+
 /// Task sent to workers
 pub struct Task {
     pub path: PathBuf,
@@ -291,6 +304,8 @@ pub struct Task {
     /// directory's parent, in order (deepest = highest priority, mirroring
     /// git's own precedence for nested ignore files).
     pub ignore_stack: IgnoreStack,
+    /// The search root this directory was found under.
+    pub root: Arc<Root>,
 }
 
 impl std::fmt::Debug for Task {
@@ -326,10 +341,10 @@ pub struct SearchConfig {
     /// live in `ignore_dirs`. Like `ignore_dirs`, a matching directory is
     /// listed but not descended into.
     pub ignore_dir_patterns: Vec<Pattern>,
-    /// `--exclude`: gitignore-style patterns rooted at the search root; a
-    /// matching entry is neither listed nor searched. See
-    /// [`build_exclude_matcher`].
-    pub exclude: Option<Gitignore>,
+    /// `--exclude`: gitignore-style patterns, anchored at each search root
+    /// (see [`Root`]); a matching entry is neither listed nor searched.
+    /// Checked up front with [`build_exclude_matcher`] by `main`.
+    pub exclude: Vec<String>,
     /// `-x` / `--one-file-system`: don't descend into directories on a
     /// different device than the search root (they are still listed).
     pub one_file_system: bool,
@@ -364,7 +379,7 @@ impl SearchConfig {
             case_insensitive: false,
             respect_gitignore: true,
             ignore_dir_patterns: Vec::new(),
-            exclude: None,
+            exclude: Vec::new(),
             one_file_system: false,
             mtime: age::MtimeFilter::default(),
             name_kind: types::NameKindFilter::default(),
@@ -719,20 +734,16 @@ fn check_root(
     ))
 }
 
+/// Searches every root in `roots`, as given on the command line, with one
+/// shared pool of `workers` threads, calling `on_match` for each result as
+/// it is found.
 pub fn parallel_find(
-    root: PathBuf,
+    roots: impl IntoIterator<Item = PathBuf>,
     workers: usize,
     config: Arc<SearchConfig>,
     stats: SearchStats,
     on_match: impl Fn(MatchResult) + Send + 'static,
 ) {
-    // Resolve symlinks and relative components (e.g. "." or "..") to a real
-    // absolute path for traversal and for the paths reported in output —
-    // but keep the original `root` argument around too, exactly as given.
-    // `find`'s `-name` test against the starting point uses that argument's
-    // own literal name, and canonicalizing loses it (see `root_match_name`).
-    let canonical_root = fs::canonicalize(&root).unwrap_or_else(|_| root.clone());
-
     let (output_tx, output_rx) = unbounded::<MatchResult>();
     // Results are printed while the walk is still running.
     let printer = thread::spawn(move || {
@@ -741,25 +752,44 @@ pub fn parallel_find(
         }
     });
 
-    if let Some(result) = check_root(&canonical_root, &root, &config, &stats) {
-        stats.matched_count.fetch_add(1, Ordering::Relaxed);
-        let _ = output_tx.send(result);
+    let mut root_tasks = Vec::new();
+    for root in roots {
+        // Resolve symlinks and relative components (e.g. "." or "..") to a
+        // real absolute path for traversal and for the paths reported in
+        // output, but keep the original `root` argument around too, exactly
+        // as given. `find`'s `-name` test against the starting point uses
+        // that argument's own literal name, and canonicalizing loses it
+        // (see `root_match_name`).
+        let canonical_root = fs::canonicalize(&root).unwrap_or_else(|_| root.clone());
+
+        if let Some(result) = check_root(&canonical_root, &root, &config, &stats) {
+            stats.matched_count.fetch_add(1, Ordering::Relaxed);
+            let _ = output_tx.send(result);
+        }
+
+        let context = Root {
+            // `main` has already rejected invalid patterns, so building
+            // cannot fail here.
+            exclude: build_exclude_matcher(&canonical_root, &config.exclude)
+                .ok()
+                .flatten(),
+            // --one-file-system: everything is compared with the root's device.
+            dev: if config.one_file_system {
+                device_of(&canonical_root)
+            } else {
+                None
+            },
+        };
+        root_tasks.push(Task {
+            path: canonical_root,
+            depth: 0,
+            ignore_stack: Arc::new(Vec::new()),
+            root: Arc::new(context),
+        });
     }
 
-    // --one-file-system: everything is compared with the root's device.
-    let root_dev = if config.one_file_system {
-        device_of(&canonical_root)
-    } else {
-        None
-    };
-
-    let root_task = Task {
-        path: canonical_root,
-        depth: 0,
-        ignore_stack: Arc::new(Vec::new()),
-    };
-    walk::for_each([root_task], workers, |task, queue| {
-        scan_directory(task, &config, queue, &output_tx, &stats, root_dev);
+    walk::for_each(root_tasks, workers, |task, queue| {
+        scan_directory(task, &config, queue, &output_tx, &stats);
     });
 
     drop(output_tx);
@@ -772,7 +802,6 @@ pub fn scan_directory(
     queue: &Queue<Task>,
     output_tx: &Sender<MatchResult>,
     stats: &SearchStats,
-    root_dev: Option<u64>,
 ) {
     // `--max-depth N` follows `find`'s semantics: depth 0 is the root itself
     // (already tested by `check_root`, before this function is ever called),
@@ -858,7 +887,7 @@ pub fn scan_directory(
         // --exclude: independent of .gitignore handling, so it also applies
         // with --no-ignore. Matched on the entry's own path only: for
         // `target/**`, `target` itself is still listed and entered.
-        if let Some(exclude) = &config.exclude
+        if let Some(exclude) = &task.root.exclude
             && exclude.matched(&entry_path, is_dir).is_ignore()
         {
             continue;
@@ -987,7 +1016,7 @@ pub fn scan_directory(
             // -x: a directory on another device is a mount point (or another
             // APFS volume). It was listed above like any directory; it is
             // just not entered, as with find -xdev.
-            if let Some(dev) = root_dev
+            if let Some(dev) = task.root.dev
                 && entry.metadata().ok().as_ref().and_then(device_of_metadata) != Some(dev)
             {
                 if config.debug {
@@ -1008,6 +1037,7 @@ pub fn scan_directory(
                     path: entry_path,
                     depth: task.depth + 1,
                     ignore_stack: Arc::clone(&ignore_stack),
+                    root: Arc::clone(&task.root),
                 });
             }
         }

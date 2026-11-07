@@ -17,12 +17,12 @@ cargo build --release --bin arfind
 ## Usage
 
 ```
-arfind [OPTIONS] [PATH]
+arfind [OPTIONS] [PATH]...
 ```
 
-`PATH` defaults to `.` (current directory) if not specified.
+`PATH` defaults to `.` (current directory) if not specified. Give several to search them all with one pool of workers, like `find a b c`: `arfind src tests --extension rs`. Each root is handled on its own terms: `--exclude` patterns with a `/` are anchored at each root, `-x` keeps each root on its own filesystem, and each root is tested against `--name`/`-t` like any entry. `--sort`, `--count`, `-X` and `-0` cover the results of all roots together. A `PATH` that doesn't exist is reported by name (`arfind: missing: No such file or directory`); the others are still searched and the exit code is `1`. A directory under two given paths is searched once for each, as with `find`.
 
-Results are printed under `PATH` as you typed it, like `find`: `arfind src` lists `src/main.rs`, `arfind .` lists `./src/main.rs`, and `arfind` with no `PATH` lists `src/main.rs` (the root itself is `.`). A symlinked `PATH` is reported under the link, and an absolute one stays absolute. Two outputs differ on purpose: `-0` keeps the `./` even with no `PATH` (see [NUL-separated output](#nul-separated-output)), and `--exec`/`-X` always get absolute paths (see [Safety](#safety)).
+Results are printed under each `PATH` as you typed it, like `find`: `arfind src` lists `src/main.rs`, `arfind .` lists `./src/main.rs`, and `arfind` with no `PATH` lists `src/main.rs` (the root itself is `.`). A symlinked `PATH` is reported under the link, and an absolute one stays absolute. Two outputs differ on purpose: `-0` keeps the `./` even with no `PATH` (see [NUL-separated output](#nul-separated-output)), and `--exec`/`-X` always get absolute paths (see [Safety](#safety)).
 
 ## Options
 
@@ -429,7 +429,7 @@ arfind /home -j 8 --name "*.txt"
 | Code | Meaning                                                  |
 |------|----------------------------------------------------------|
 | `0`  | Success (even if no matches found)                       |
-| `1`  | Invalid `--size`, `--exclude`, `--exclude-dir` or `-t` value, an empty `--older-than`/`--newer-than` window, a rejected `--exec` command, or a command that failed or could not be started |
+| `1`  | A `PATH` that does not exist, an invalid `--size`, `--exclude`, `--exclude-dir` or `-t` value, an empty `--older-than`/`--newer-than` window, a rejected `--exec` command, or a command that failed or could not be started |
 | `2`  | Invalid CLI usage — bad or missing flag (e.g. `-j 0`, an unknown `--type`, an empty `--extension`, an unknown `--owner`/`--group` name) |
 
 **Closed output.** When the reader of stdout goes away (`arfind ... | head`), arfind stops at once and exits with `0`, quietly: that is a normal way to cut output short. If writing fails for another reason (disk full, an I/O error on a redirected file), arfind prints `error: cannot write output: ...` and exits with `1`.

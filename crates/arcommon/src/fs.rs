@@ -1,6 +1,17 @@
 //! Small platform helpers.
 
-use std::{borrow::Cow, fs::Metadata, path::Path};
+use std::{borrow::Cow, fs::Metadata, io, path::Path};
+
+/// An I/O error as a short message for the user, without the
+/// " (os error N)" that `io::Error`'s `Display` appends: `No such file or
+/// directory`, as `ls` and `grep` print it.
+pub fn error_text(err: &io::Error) -> String {
+    let text = err.to_string();
+    match text.rfind(" (os error ") {
+        Some(i) if text.ends_with(')') => text[..i].to_string(),
+        _ => text,
+    }
+}
 
 /// The exact bytes of a path, for machine-readable output such as
 /// NUL-separated lists (`argrep -0`, `arfind -0`) that must round-trip any
@@ -44,6 +55,14 @@ pub fn device_of_metadata(metadata: &Metadata) -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn error_text_drops_the_os_error_number() {
+        let missing = std::fs::metadata("/no/such/path/for/arcommon").unwrap_err();
+        assert_eq!(error_text(&missing), "No such file or directory");
+        let custom = io::Error::other("disk on fire");
+        assert_eq!(error_text(&custom), "disk on fire");
+    }
 
     #[test]
     fn path_bytes_are_the_exact_name() {

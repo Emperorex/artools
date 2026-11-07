@@ -17,10 +17,12 @@ cargo build --release --bin argrep
 ## Usage
 
 ```
-argrep [OPTIONS] QUERY [PATH]
+argrep [OPTIONS] QUERY [PATH]...
 ```
 
-Matches are reported under `PATH` as you typed it, like `grep`: `argrep TODO src` prints `src/main.rs:…`, `argrep TODO .` prints `./src/main.rs:…`, and a named file is printed as named. A symlinked `PATH` is reported under the link, and an absolute one stays absolute. With no `PATH` (`argrep --files`), paths have no `./` prefix, except in `-0` output, where it is kept so a file named `-rf` reaches `xargs -0` as `./-rf`. `--json` paths follow the same rule.
+Give as many `PATH`s as you like, files or directories: `argrep TODO src tests README.md` searches all of them with one pool of workers. A `PATH` that doesn't exist is reported by name (`argrep: missing: No such file or directory`); the others are still searched and the exit code is `1` (`2` with `-q`). A file under two given paths (`argrep TODO src src/lib`) is searched once for each, as with `grep -r`. `-` reads stdin, on its own only.
+
+Matches are reported under each `PATH` as you typed it, like `grep`: `argrep TODO src` prints `src/main.rs:…`, `argrep TODO .` prints `./src/main.rs:…`, and a named file is printed as named. A symlinked `PATH` is reported under the link, and an absolute one stays absolute. With no `PATH` (`argrep --files`), paths have no `./` prefix, except in `-0` output, where it is kept so a file named `-rf` reaches `xargs -0` as `./-rf`. `--json` paths follow the same rule.
 
 `QUERY` is required and is matched as a **regular expression** by default (Rust's [`regex`](https://docs.rs/regex) crate — a similar dialect to `grep -E`/PCRE, without backreferences or lookaround). Two exceptions: with `--files` (see below), `QUERY` is dropped entirely — `argrep --files [PATH]`, not `argrep --files QUERY [PATH]` — and with `-e`/`--regexp` or `-f`/`--file` (see below), patterns are supplied via repeated `-e` flags or pattern files instead of the positional `QUERY`.
 
@@ -31,15 +33,7 @@ argrep -e 'TODO' -e 'FIXME' -e 'HACK' .
 argrep -e 'error' -e 'panic' src/
 ```
 
-`-e` is repeatable, and once it's given at all, the positional `QUERY` is **not** treated as an additional pattern — the same rule GNU grep follows once `-e`/`-f` is used. This means `QUERY` becomes optional with `-e`, exactly like it does with `--files`: `argrep -e 'TODO' .`, not `argrep -e 'TODO' QUERY .`. If a single positional value is given anyway, it's treated as `PATH`, not as another pattern — clap always binds the first bare positional to the `QUERY` slot regardless of `-e`, so this reinterpretation happens the same way it does for `--files`. Giving two positionals together with `-e` is a usage error rather than a guess about which one was meant as a path and which as a forgotten pattern:
-
-```
-$ argrep -e 'TODO' foo .
-error: with -e/--regexp or -f/--file, QUERY is not an additional pattern,
-only PATH, but got two positional arguments: 'foo' and '.'. Use
-`argrep -e '...' .` (or `argrep -e '...' foo`, whichever was meant as the path
-— and add another -e if 'foo' was meant as a pattern instead).
-```
+`-e` is repeatable, and once it's given at all, the positional `QUERY` is **not** treated as an additional pattern — the same rule GNU grep follows once `-e`/`-f` is used. This means `QUERY` becomes optional with `-e`, exactly like it does with `--files`: `argrep -e 'TODO' .`, not `argrep -e 'TODO' QUERY .`. Every positional is then a `PATH`, as with `grep -e`: `argrep -e TODO src tests` searches `src` and `tests`. To search for a second pattern, add another `-e`.
 
 Use `-f`/`--file FILE` to read patterns from a file, one per line, like `grep -f`/`rg -f`. It's handy for long lists, rules shared between scripts, or generated lists:
 
@@ -263,7 +257,7 @@ argrep 'TODO' . --exclude-dir 'build*'
 
 Repeatable, and accepts both plain names (`node_modules`) and glob patterns (`build*`) — plain names are matched directly, patterns are compiled as globs, and a directory is skipped if it matches *any* given `--exclude-dir`. `--exclude-dir` is the same mechanism as the older `--ignore` flag (kept as an alias for compatibility) merged with the built-in defaults (`.git`, `node_modules`, `__pycache__`, disabled via `--no-ignore`).
 
-`PATH` defaults to `.` (current directory) if not specified.
+`PATH` defaults to `.` (current directory) if not specified, and can be given more than once.
 
 `argrep` also reads from **stdin** when used in a pipeline — no path argument needed.
 
@@ -322,14 +316,7 @@ argrep --files --type rust .
 argrep --files --exclude '*.generated.rs' .
 ```
 
-QUERY isn't needed in `--files` mode: it's `argrep --files .`, not `argrep --files QUERY .`. If you give a single positional, it's treated as `PATH`, not `QUERY` — there's nothing for a query to do here, so there's no ambiguity to preserve. Giving two positionals together with `--files` is a usage error rather than a guess about which one you meant:
-
-```
-$ argrep --files foo .
-error: --files does not take a QUERY, only a PATH, but got two positional
-arguments: 'foo' and '.'. Use `argrep --files .` (or `argrep --files foo`,
-whichever was meant as the path).
-```
+QUERY isn't needed in `--files` mode: it's `argrep --files .`, not `argrep --files QUERY .`. Every positional is a `PATH` (there's nothing for a query to do here), so `argrep --files src tests` lists both.
 
 `--files` conflicts with every flag that only makes sense once content is actually being searched: `-l`/`-L`/`-c`/`-v`/`-o`/`-n`/`-A`/`-B`/`-C`/`-m`/`-q`. `-i`/`-F`/`-w`/`-x`/`-S`/`-e` are accepted but have no effect, since they only configure how `QUERY`/`-e`'s patterns become a regex and `--files` never builds a real one.
 
@@ -673,7 +660,7 @@ Output is still written line by line to a terminal, and when argrep reads stdin,
 | Code | Meaning                                                                                                                                                 |
 | ---- | ------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `0`  | Success — every file was read, matches or not                                                                                                           |
-| `1`  | A file or directory could not be read (permission denied, I/O error), an invalid regex `QUERY`, or another config error (e.g. invalid `--include` glob) |
+| `1`  | A `PATH` does not exist, a file or directory could not be read (permission denied, I/O error), an invalid regex `QUERY`, or another config error (e.g. invalid `--include` glob) |
 | `2`  | Invalid CLI usage — bad or missing flag (e.g. `-j 0`, missing `QUERY`)                                                                                  |
 
 **Closed output.** When the reader of stdout goes away (`argrep ... | head`), argrep stops at once and exits with `0`, quietly: that is a normal way to cut output short. If writing fails for another reason (disk full, an I/O error on a redirected file), argrep prints `error: cannot write output: ...` and exits with `1`.

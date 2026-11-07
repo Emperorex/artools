@@ -48,6 +48,8 @@ Directories and files are reported under `PATH` as you typed it, like `du`: `ard
 | `--newer-than AGE`  | —     | —         | Only count files modified less than `AGE` ago, e.g. `7d`, `12h` |
 | `--exclude GLOB`    | —     | —         | Exclude files/dirs matching a gitignore-style glob; repeatable (see [Excluding paths](#excluding-paths)) |
 | `--no-hidden`       | —     | —         | Skip files and directories whose name starts with `.` (see [Hidden files](#hidden-files)) |
+| `--skip-ignored`    | —     | —         | Skip `.git`, `node_modules`, `__pycache__` and `.gitignore`/`.ignore` matches; off by default, so totals match `du` (see [Ignored files](#ignored-files)) |
+| `--ignore NAME`     | —     | —         | Skip directories with this name at any depth; repeatable, applies with or without `--skip-ignored` |
 | `--one-file-system` | `-x`  | —         | Stay on the filesystem of `PATH`; don't enter other mounts or volumes, like `du -x` (see [Staying on one filesystem](#staying-on-one-filesystem)) |
 | `--apparent-size`   | —     | —         | Use logical file sizes instead of block allocation — matches `du -sh`  |
 | `--jobs N`          | `-j`  | CPU-aware | Number of parallel worker threads (1–128; default is half the available cores, clamped to 1–16) |
@@ -129,11 +131,11 @@ Like `du`, ardisk counts hidden files and directories (names starting with `.`) 
 ```bash
 ardisk ~ --no-hidden             # only non-dot entries
 ardisk ~ --by-type               # includes ~/.cache, ~/.cargo, ...
-ardisk ~/project --no-ignore     # also counts .git
+ardisk ~/project --skip-ignored  # also leaves out .git, node_modules, ...
 ```
 
 - A hidden directory is **not entered**, so everything below it is skipped, whatever the names down there are.
-- `--no-hidden` and `--no-ignore` are independent: `--no-ignore` re-enables `.git`, `node_modules` and `.gitignore`d paths, `--no-hidden` removes dot-entries. Use both for "everything that is not a dotfile".
+- `--no-hidden` and `--skip-ignored` are independent: `--skip-ignored` leaves out `.git`, `node_modules` and `.gitignore`d paths, `--no-hidden` leaves out dot-entries. By default both are off and everything is counted.
 - Works with every mode (`--by-type`, `--largest-files`, `--duplicates`, `--json`) and with `--ignore`, `--include` and `--exclude`; an entry is counted only if every filter lets it through.
 - A hard link whose hidden name is skipped is still counted through its visible name.
 - The scan root is never skipped: `ardisk ~/.cache --no-hidden` scans `~/.cache`, but not its dot-entries.
@@ -161,13 +163,24 @@ Notes:
 - With `--debug`, each skipped mount point is printed to stderr.
 - Unix-like systems only (Linux, macOS). Elsewhere ardisk prints a warning and scans normally.
 
-## Default ignores
+## Ignored files
 
-The following directories are always skipped:
+Like `du`, ardisk counts every file by default, including `.git`, `node_modules`, `__pycache__` and anything a `.gitignore` lists, so the total is the space actually used on disk.
 
-- `.git`
-- `node_modules`
-- `__pycache__`
+To see only what belongs to a project itself, pass `--skip-ignored`. It leaves out:
+
+- the `.git`, `node_modules` and `__pycache__` directories, at any depth
+- everything matched by `.gitignore` and `.ignore` files, read in every directory of the scan
+
+```bash
+ardisk ~/project                    # everything, matches du
+ardisk ~/project --skip-ignored     # without .git, node_modules and gitignored build output
+ardisk ~/project --ignore vendor    # skip directories named vendor, with or without --skip-ignored
+```
+
+- `--ignore NAME`, `--exclude GLOB` and `--no-hidden` apply whether or not `--skip-ignored` is given.
+- Works with every mode (`--tree`, `--inodes`, `--by-type`, `--largest-files`, `--duplicates`, `--json`).
+- **Changed behavior:** earlier versions skipped these entries by default, and `--no-ignore` turned that off. `--no-ignore` is still accepted and now changes nothing. A `--json` snapshot saved by an earlier version skipped them, so `--diff` refuses to compare it with a new default scan; take the new snapshot with `--skip-ignored` instead.
 
 ## Usage bars
 
@@ -225,7 +238,7 @@ ardisk ~ --largest-files 20
 
 What counts as a candidate is exactly what counts toward the directory totals:
 
-- **Same filters as the directory report.** `--include`, `--exclude`, `--ignore`, the built-in ignores and `.gitignore`/`.ignore` rules all apply, so `ardisk . --largest-files 10 --include "*.mp4"` finds the biggest videos, and files you excluded can never show up.
+- **Same filters as the directory report.** `--include`, `--exclude`, `--ignore` and, with `--skip-ignored`, the built-in ignores and `.gitignore`/`.ignore` rules all apply, so `ardisk . --largest-files 10 --include "*.mp4"` finds the biggest videos, and files you excluded can never show up.
 - **Same sizes.** Physical block allocation by default, logical length with `--apparent-size`, so the numbers agree with the directory report.
 - **Hard links are listed once.** A file with several names (hard links) appears as a single entry. Which name is shown depends on which one the parallel scan reached first and can differ between runs; the size and the set of other files are unaffected. A name hidden by `--exclude`/`--include` never "uses up" the file, so another name that passes the filters is still reported.
 - **Symlinks are never listed** (and never followed), and directories are never listed.
@@ -272,7 +285,7 @@ Rows are ordered by size, biggest first; types of equal size are ordered by exte
 
 **What is counted.**
 
-- The same files as the directory report: `--include`, `--exclude`, `--ignore`, the built-in ignores and `.gitignore` rules apply, symlinks are never followed, and a hard-linked file counts once.
+- The same files as the directory report: `--include`, `--exclude`, `--ignore` and `--skip-ignored` apply, symlinks are never followed, and a hard-linked file counts once.
 - Sizes follow `--apparent-size`: physical block allocation by default, logical length with the flag. (`--include` patterns are case-sensitive, even though types are grouped case-insensitively.)
 - The total is the sum of the **file** sizes. It is smaller than the root total of the directory report by the space taken by the directory entries themselves.
 - Empty files count as files of their type (with 0 bytes).
@@ -309,7 +322,7 @@ Groups are formed from the 256-bit hash plus the length. Files are not additiona
 
 **What counts.**
 
-- Same filters as the directory report: `--include`, `--exclude`, `--ignore`, the built-in ignores and `.gitignore` rules apply, so `--include "*.jpg"` looks for duplicate photos only.
+- Same filters as the directory report: `--include`, `--exclude`, `--ignore` and `--skip-ignored` apply, so `--include "*.jpg"` looks for duplicate photos only.
 - Only regular files. Symlinks are never followed or listed.
 - **Hard links are not duplicates.** Several names for one file occupy the space once, so they never form a group on their own. If a hard-linked file also has a separate copy, the group holds two entries (one of the hard-link names and the copy); which name is shown can vary between runs.
 - **Empty files are never reported** (all empty files are trivially identical). `--min-size` can only raise this floor.
@@ -346,7 +359,7 @@ ardisk /var --inodes -s                  # just the total
 - A hard-linked inode counts once per scan, as in `du`.
 - Counts roll up: a directory's number includes everything below it. The list is sorted by count, biggest first; ties are ordered by path.
 - `--threshold` is a plain whole number here (`10000`), not a size.
-- Works with `--top`, `--max-depth`, `--summarize`, `--json`, `--include` (matched against file and symlink names; directories always cost their own inode), `--exclude`, `--ignore`, `--no-ignore` and `--no-hidden`. By default `.git`, `node_modules` and `.gitignore`d paths are skipped as usual, so use `--no-ignore` to match `du --inodes` exactly.
+- Works with `--top`, `--max-depth`, `--summarize`, `--json`, `--include` (matched against file and symlink names; directories always cost their own inode), `--exclude`, `--ignore`, `--skip-ignored` and `--no-hidden`. Everything is counted by default, so the total matches `du --inodes`.
 - Cannot be combined with `--by-type`, `--duplicates`, `--largest-files`, `--min-size` or `--apparent-size`.
 - Directories that cannot be read are not counted (use `--debug` to see them).
 
@@ -384,7 +397,7 @@ ardisk /data --json --top 0 | ardisk --diff before.json -   # compare with right
 ```
 
 - **Save snapshots with `--top 0`.** A snapshot lists only what `--top` (default 20), `--max-depth` and `--threshold` let through, and a `--summarize` snapshot lists no directories at all (only its total is compared). A directory missing from a complete snapshot really wasn't there, so it shows as new or gone. A directory missing from a partial snapshot may just have been below its cutoff, so ardisk doesn't guess: it skips it and warns on stderr that the snapshot is partial, saying how to save a complete one.
-- **Like with like.** Both snapshots must be directory reports of the same root, taken the same way: both disk usage or both `--apparent-size`, with the same `--include`, `--exclude`, `--ignore`, `--no-hidden`, `-x` and age filters. Anything else would compare different measurements, so ardisk refuses with a message saying what differs. Two `--inodes` snapshots can be compared too; then `--threshold` is a number of inodes.
+- **Like with like.** Both snapshots must be directory reports of the same root, taken the same way: both disk usage or both `--apparent-size`, with the same `--include`, `--exclude`, `--ignore`, `--skip-ignored`, `--no-hidden`, `-x` and age filters. Anything else would compare different measurements, so ardisk refuses with a message saying what differs. Two `--inodes` snapshots can be compared too; then `--threshold` is a number of inodes.
 - **Checked input.** A snapshot must be an ardisk `--json` directory or inode report with a root total (`summary.total_bytes` / `total_inodes`, or at least the root's own `"."` entry) and a number for every listed directory. A file that is cut off, hand-edited into a different shape, or holds a wrong type is refused with a message naming the problem, instead of being compared as if its missing values were 0.
 - **Options.** `--diff` is a mode of its own: it takes no PATH and works only with `--top`, `--threshold` (smallest change shown, in the snapshots' unit), `--si` and `--json`. `-` reads one of the snapshots from stdin.
 - Moves and renames show as one directory gone and another new; file contents are not compared.
@@ -413,7 +426,7 @@ Every document is one object with the same header:
 | `mode`           | `"directories"`, `"largest_files"`, `"duplicates"`, `"by_type"` or `"inodes"` |
 | `root`           | Canonical absolute path that was scanned |
 | `size_mode`      | Absent for `inodes`. `"disk"` (block allocation, the default) or `"apparent"` (logical length, `--apparent-size`). Always `"apparent"` for `duplicates`. |
-| `filters`        | `include` (string or `null`), `exclude` (array), `ignore` (array, extra `--ignore` names only), `no_ignore` (bool), `no_hidden` (bool), `one_file_system` (bool), `older_than` / `newer_than` (string as given, or `null`) |
+| `filters`        | `include` (string or `null`), `exclude` (array), `ignore` (array, extra `--ignore` names only), `no_ignore` (bool: `true` unless `--skip-ignored`, i.e. everything was counted), `no_hidden` (bool), `one_file_system` (bool), `older_than` / `newer_than` (string as given, or `null`) |
 | `params`         | Options that shape the result, mode-specific (below) |
 | `summary`        | Totals for the **whole scan**, mode-specific (below) |
 | `entries` / `groups` / `types` | The listed items |
@@ -592,7 +605,7 @@ Notes:
 - A pattern only prunes a directory when it matches **that directory's own path**. A contents-only pattern such as `target/**` keeps `target` in the report (with just its own entry size) but drops everything inside it.
 - Like gitignore, a pattern that matches a *directory's* name excludes that whole directory: `*.log` would also drop a directory called `x.log`. Add a trailing `/` to target directories only, or anchor the pattern (`/logs/*.log`) when that matters.
 - As in git, `!pattern` cannot rescue a path below an excluded directory.
-- `--exclude` always applies, including with `--no-ignore`, and wins over `--include`.
+- `--exclude` always applies, with or without `--skip-ignored`, and wins over `--include`.
 - Excluded entries count as 0 bytes in every total.
 - Quote patterns so the shell doesn't expand them: `--exclude '*.log'`.
 
@@ -700,7 +713,7 @@ ardisk / -j 8 --top 20
 | Filter by file type | not supported                      | `ardisk . --include "*.mp4"`                |
 | Space per file type | not supported                      | `ardisk . --by-type`                        |
 | Biggest files       | `find . -type f -printf '%s %p\n' \| sort -rn \| head` | `ardisk . --largest-files 20`      |
-| Skip node_modules   | `--exclude=node_modules`           | automatic                                   |
+| Skip node_modules   | `--exclude=node_modules`           | `ardisk . --skip-ignored` (also `.git`, gitignored) |
 | Exclude by glob     | `--exclude='*.log'`                | `ardisk . --exclude '*.log'`                |
 
 ## Key advantages over `du`

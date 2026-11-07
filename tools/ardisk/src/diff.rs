@@ -245,8 +245,17 @@ pub fn check_comparable(before: &Snapshot, after: &Snapshot) -> Result<(), Strin
             }
             _ => vec!["filters".to_string()],
         };
+        // The likeliest cause: one snapshot predates counting everything
+        // by default (no_ignore was false unless --no-ignore was given).
+        let hint = if differing.iter().any(|d| d.starts_with("no_ignore:")) {
+            ". ardisk now counts .git, node_modules and gitignored files by \
+             default; take the new snapshot with --skip-ignored to compare \
+             it with one that skipped them"
+        } else {
+            ""
+        };
         return Err(format!(
-            "the snapshots were taken with different filters ({}); sizes would not be comparable",
+            "the snapshots were taken with different filters ({}); sizes would not be comparable{hint}",
             differing.join("; ")
         ));
     }

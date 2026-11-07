@@ -37,7 +37,8 @@ fn data(seed: u8, len: usize) -> Vec<u8> {
         .collect()
 }
 
-/// A small tree with one duplicate pair, one unique file and an ignored dir.
+/// A small tree with one duplicate pair, one unique file and a node_modules
+/// dir (counted by default, skipped with --skip-ignored).
 fn sample() -> (TempDir, PathBuf) {
     let dir = TempDir::new().unwrap();
     for (rel, content) in [
@@ -72,15 +73,17 @@ fn default_mode_prints_one_directories_document() {
     assert_eq!(entries[0]["path"], ".");
     assert_eq!(entries[0]["depth"], 0);
     assert_eq!(entries[0]["bytes"], doc["summary"]["total_bytes"]);
-    // node_modules is ignored by default, so only the three real files count.
-    assert_eq!(doc["summary"]["files"], 3);
-    assert_eq!(doc["summary"]["directories"], 4); // root + photos, backup, docs
+    // Everything is counted by default, like du: node_modules too.
+    assert_eq!(doc["summary"]["files"], 4);
+    // root + photos, backup, docs, node_modules, node_modules/pkg
+    assert_eq!(doc["summary"]["directories"], 6);
+    assert_eq!(doc["filters"]["no_ignore"], true);
     let paths: Vec<&str> = entries
         .iter()
         .map(|e| e["path"].as_str().unwrap())
         .collect();
     assert!(paths.contains(&"photos") && paths.contains(&"backup") && paths.contains(&"docs"));
-    assert!(!paths.iter().any(|p| p.contains("node_modules")));
+    assert!(paths.contains(&"node_modules"));
     for e in entries {
         assert_eq!(e["kind"], "directory");
         assert!(
@@ -88,6 +91,19 @@ fn default_mode_prints_one_directories_document() {
             "paths are relative"
         );
     }
+
+    // --skip-ignored leaves node_modules out, and says so in the filters.
+    let (doc, _) = json(&[p(&root), "--json", "--apparent-size", "--skip-ignored"]);
+    assert_eq!(doc["summary"]["files"], 3);
+    assert_eq!(doc["summary"]["directories"], 4); // root + photos, backup, docs
+    assert_eq!(doc["filters"]["no_ignore"], false);
+    assert!(
+        !doc["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|e| e["path"].as_str().unwrap().contains("node_modules"))
+    );
 }
 
 #[test]
@@ -95,6 +111,7 @@ fn largest_files_mode_prints_one_largest_files_document() {
     let (_d, root) = sample();
     let (doc, stderr) = json(&[
         p(&root),
+        "--skip-ignored",
         "--json",
         "--largest-files",
         "2",
@@ -332,7 +349,13 @@ fn typed_sample() -> (TempDir, PathBuf) {
 #[test]
 fn by_type_json_prints_one_by_type_document() {
     let (_d, root) = typed_sample();
-    let (doc, stderr) = json(&[p(&root), "--by-type", "--json", "--apparent-size"]);
+    let (doc, stderr) = json(&[
+        p(&root),
+        "--skip-ignored",
+        "--by-type",
+        "--json",
+        "--apparent-size",
+    ]);
     assert_eq!(stderr, "");
     assert_eq!(doc["schema_version"], 1);
     assert_eq!(doc["mode"], "by_type");
@@ -358,12 +381,25 @@ fn by_type_json_prints_one_by_type_document() {
 #[test]
 fn by_type_json_top_truncates_and_summarize_empties_the_list() {
     let (_d, root) = typed_sample();
-    let (doc, _) = json(&[p(&root), "--by-type", "--json", "--top", "2"]);
+    let (doc, _) = json(&[
+        p(&root),
+        "--skip-ignored",
+        "--by-type",
+        "--json",
+        "--top",
+        "2",
+    ]);
     assert_eq!(doc["types"].as_array().unwrap().len(), 2);
     assert_eq!(doc["truncated"], true);
     assert_eq!(doc["summary"]["types"], 4);
 
-    let (doc, _) = json(&[p(&root), "--by-type", "--json", "--summarize"]);
+    let (doc, _) = json(&[
+        p(&root),
+        "--skip-ignored",
+        "--by-type",
+        "--json",
+        "--summarize",
+    ]);
     assert_eq!(doc["types"], serde_json::json!([]));
     assert_eq!(doc["summary"]["files"], 7);
 }
@@ -380,6 +416,7 @@ fn by_type_applies_filters_and_echoes_them() {
     let (_d, root) = typed_sample();
     let (doc, _) = json(&[
         p(&root),
+        "--skip-ignored",
         "--by-type",
         "--json",
         "--apparent-size",
@@ -399,6 +436,7 @@ fn by_type_applies_filters_and_echoes_them() {
 
     let (doc, _) = json(&[
         p(&root),
+        "--skip-ignored",
         "--by-type",
         "--json",
         "--apparent-size",
@@ -415,7 +453,7 @@ fn by_type_applies_filters_and_echoes_them() {
 #[test]
 fn by_type_text_output_is_a_table_with_a_total() {
     let (_d, root) = typed_sample();
-    let out = ardisk(&[p(&root), "--by-type", "--apparent-size"]);
+    let out = ardisk(&[p(&root), "--skip-ignored", "--by-type", "--apparent-size"]);
     assert!(out.status.success());
     let stdout = String::from_utf8(out.stdout).unwrap();
     let lines: Vec<&str> = stdout.lines().collect();
@@ -444,7 +482,13 @@ fn by_type_text_output_is_a_table_with_a_total() {
 #[test]
 fn by_type_summarize_text_is_one_line() {
     let (_d, root) = typed_sample();
-    let out = ardisk(&[p(&root), "--by-type", "--summarize", "--apparent-size"]);
+    let out = ardisk(&[
+        p(&root),
+        "--skip-ignored",
+        "--by-type",
+        "--summarize",
+        "--apparent-size",
+    ]);
     let stdout = String::from_utf8(out.stdout).unwrap();
     assert_eq!(stdout, "7 files in 4 types, 7.77 KB total\n");
 }
@@ -600,7 +644,7 @@ fn hidden_duplicates_are_found_by_default_and_hidden_by_no_hidden() {
 }
 
 #[test]
-fn no_hidden_and_no_ignore_are_independent_flags() {
+fn no_hidden_and_skip_ignored_are_independent_flags() {
     let dir = TempDir::new().unwrap();
     for (rel, len) in [
         (".git/pack", 100),
@@ -618,10 +662,13 @@ fn no_hidden_and_no_ignore_are_independent_flags() {
         args.extend(extra);
         json(&args).0["summary"]["total_bytes"].as_u64().unwrap()
     };
-    assert_eq!(total(&[]), 400 + 800);
-    assert_eq!(total(&["--no-hidden"]), 400);
-    assert_eq!(total(&["--no-ignore"]), 100 + 200 + 400 + 800);
-    assert_eq!(total(&["--no-hidden", "--no-ignore"]), 200 + 400);
+    // Everything by default, like du.
+    assert_eq!(total(&[]), 100 + 200 + 400 + 800);
+    assert_eq!(total(&["--no-hidden"]), 200 + 400);
+    assert_eq!(total(&["--skip-ignored"]), 400 + 800);
+    assert_eq!(total(&["--no-hidden", "--skip-ignored"]), 400);
+    // --no-ignore is the default now, still accepted.
+    assert_eq!(total(&["--no-ignore"]), total(&[]));
 }
 
 #[test]
@@ -670,13 +717,13 @@ fn inodes_mode_prints_one_inodes_document() {
     assert_eq!(doc["schema_version"], 1);
     assert_eq!(doc["mode"], "inodes");
     assert!(doc.get("size_mode").is_none(), "no sizes involved");
-    // root, a, a/b, c, .h + 5 files (node_modules is ignored)
-    assert_eq!(doc["summary"]["total_inodes"], 10);
-    assert_eq!(doc["summary"]["files"], 5);
-    assert_eq!(doc["summary"]["directories"], 5);
+    // root, a, a/b, c, .h, node_modules + 6 files: everything counts
+    assert_eq!(doc["summary"]["total_inodes"], 12);
+    assert_eq!(doc["summary"]["files"], 6);
+    assert_eq!(doc["summary"]["directories"], 6);
     let entries = doc["entries"].as_array().unwrap();
     assert_eq!(entries[0]["path"], ".");
-    assert_eq!(entries[0]["inodes"], 10);
+    assert_eq!(entries[0]["inodes"], 12);
     assert_eq!(entries[1]["path"], "a");
     assert_eq!(entries[1]["inodes"], 5);
     assert!(entries[0].get("bytes").is_none());
@@ -714,7 +761,8 @@ fn inodes_threshold_top_depth_and_hidden() {
         "--no-hidden",
     ]);
     assert_eq!(doc["entries"].as_array().unwrap().len(), 1);
-    assert_eq!(doc["summary"]["total_inodes"], 8);
+    // 12 minus the hidden .h and its file
+    assert_eq!(doc["summary"]["total_inodes"], 10);
     assert_eq!(doc["filters"]["no_hidden"], true);
 }
 
@@ -777,6 +825,7 @@ fn older_than_and_newer_than_filter_and_are_echoed() {
 
     let (doc, _) = json(&[
         p(&root),
+        "--skip-ignored",
         "--json",
         "--largest-files",
         "10",
@@ -795,6 +844,7 @@ fn older_than_and_newer_than_filter_and_are_echoed() {
 
     let (doc, _) = json(&[
         p(&root),
+        "--skip-ignored",
         "--json",
         "--by-type",
         "--apparent-size",
@@ -808,6 +858,7 @@ fn older_than_and_newer_than_filter_and_are_echoed() {
     // A window: newer than 1 month, older than 1 week.
     let (doc, _) = json(&[
         p(&root),
+        "--skip-ignored",
         "--json",
         "--largest-files",
         "10",
@@ -821,7 +872,14 @@ fn older_than_and_newer_than_filter_and_are_echoed() {
     assert_eq!(entries[0]["path"], "backup/a-copy.raw");
 
     // Duplicates only see files that pass the filter: the pair is split.
-    let (doc, _) = json(&[p(&root), "--json", "--duplicates", "--older-than", "1y"]);
+    let (doc, _) = json(&[
+        p(&root),
+        "--skip-ignored",
+        "--json",
+        "--duplicates",
+        "--older-than",
+        "1y",
+    ]);
     assert_eq!(doc["summary"]["groups"], 0);
 }
 

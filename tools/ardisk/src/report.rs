@@ -149,7 +149,9 @@ pub struct Filters {
     pub exclude: Vec<String>,
     /// Extra `--ignore` directory names (the built-in ones are not listed).
     pub ignore: Vec<String>,
-    /// `--no-ignore`: built-in ignores and `.gitignore` rules were off.
+    /// Built-in ignores and `.gitignore` rules were off: true unless
+    /// `--skip-ignored` (named after the old `--no-ignore` flag, which is now
+    /// the default).
     pub no_ignore: bool,
     /// `--no-hidden`: hidden files and directories (names starting with `.`)
     /// were skipped.

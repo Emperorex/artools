@@ -561,8 +561,9 @@ pub fn scan_directory(
             continue;
         }
 
-        // --exclude is independent of .gitignore handling: it applies even
-        // with --no-ignore, and a `!pattern` in a .gitignore can't undo it.
+        // --exclude is independent of .gitignore handling: it applies with
+        // or without --skip-ignored, and a `!pattern` in a .gitignore can't
+        // undo it.
         // The entry is matched on its own path only; a directory that is
         // merely the parent of excluded content (e.g. `target` for
         // `target/**`) is still traversed.

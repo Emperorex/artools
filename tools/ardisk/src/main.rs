@@ -180,7 +180,7 @@ struct Args {
     summarize: bool,
 
     /// List the N largest individual files instead of the directory report.
-    /// Respects --include, --exclude, --ignore and .gitignore; hard-linked
+    /// Respects --include, --exclude, --ignore and --skip-ignored; hard-linked
     /// files are listed once; sizes follow --apparent-size.
     #[arg(
         long,
@@ -193,7 +193,7 @@ struct Args {
     /// Report groups of files with identical content (nothing is modified or
     /// deleted). Files are grouped by length, then by a hash of their first
     /// 4 KiB, then by a hash of their full content. Respects --include,
-    /// --exclude, --ignore and .gitignore; hard links to one file are not
+    /// --exclude, --ignore and --skip-ignored; hard links to one file are not
     /// duplicates; empty files are ignored. --top limits the groups shown,
     /// --summarize prints only the totals. Sizes are logical file lengths.
     #[arg(
@@ -253,7 +253,7 @@ struct Args {
     /// extension, biggest first, with each type's share of the total. The
     /// extension is the part of the name after the last '.', compared
     /// case-insensitively ('foo.tar.gz' is '.gz'; '.env', 'foo.' and 'README'
-    /// have none). Respects --include, --exclude, --ignore and .gitignore;
+    /// have none). Respects --include, --exclude, --ignore and --skip-ignored;
     /// hard-linked files count once; sizes follow --apparent-size. --top
     /// limits the rows (the rest are summed into one line), --summarize
     /// prints only the totals.
@@ -327,7 +327,7 @@ struct Args {
     /// one; a hard-linked inode counts once. Shows the directories with the
     /// most inodes. --threshold is then a plain number (e.g. 10000). Respects
     /// --include (files and symlinks by name), --exclude, --ignore,
-    /// --no-hidden and .gitignore; works with --top, --max-depth, --summarize
+    /// --no-hidden and --skip-ignored; works with --top, --max-depth, --summarize
     /// and --json.
     #[arg(
         long,
@@ -340,8 +340,9 @@ struct Args {
     #[arg(long)]
     apparent_size: bool,
 
-    /// Additional ignored directories
-    #[arg(long)]
+    /// Skip directories with this name, at any depth (repeatable), e.g.
+    /// --ignore vendor. Applies with or without --skip-ignored.
+    #[arg(long, value_name = "NAME")]
     ignore: Vec<String>,
 
     /// Exclude files and directories matching a gitignore-style glob
@@ -353,15 +354,23 @@ struct Args {
     #[arg(long, value_name = "GLOB")]
     exclude: Vec<String>,
 
-    /// Do not respect .gitignore / .ignore files (scan everything)
-    #[arg(long = "no-ignore")]
+    /// Skip what a repository leaves out: .git, node_modules and
+    /// __pycache__ directories, and everything matched by .gitignore and
+    /// .ignore files. Off by default: ardisk counts every file, like du, so
+    /// its total matches the space actually used.
+    #[arg(long)]
+    skip_ignored: bool,
+
+    /// Count everything, .git, node_modules and .gitignored entries
+    /// included. This is the default now (see --skip-ignored); the flag is
+    /// still accepted so existing scripts keep working.
+    #[arg(long = "no-ignore", hide = true, conflicts_with = "skip_ignored")]
     no_ignore: bool,
 
     /// Skip hidden files and directories (names starting with '.'). A hidden
     /// directory is not entered, so everything below it is skipped too. The
     /// path you scan is never skipped, even if it is hidden. Independent of
-    /// --no-ignore: hidden entries are included by default, like du; use
-    /// --no-ignore to count .git, node_modules and other ignored entries.
+    /// --skip-ignored; by default everything is counted, like du.
     #[arg(long = "no-hidden")]
     no_hidden: bool,
 
@@ -379,21 +388,22 @@ struct Args {
             "path", "debug", "max_depth", "include", "summarize", "largest_files",
             "duplicates", "min_size", "by_type", "progress", "older_than", "newer_than",
             "one_file_system", "bar", "tree", "inodes", "apparent_size", "ignore",
-            "exclude", "no_ignore", "no_hidden", "jobs",
+            "exclude", "skip_ignored", "no_ignore", "no_hidden", "jobs",
         ]
     )]
     diff: Option<Vec<PathBuf>>,
 }
 
-/// Builds the set of directory names to skip, given `--no-ignore` and any
-/// explicit `--ignore` values. `--no-ignore` disables the built-in defaults
-/// (`.git`, `node_modules`, `__pycache__`), but an explicit `--ignore` is
-/// still honored either way, since that's the user asking for something
-/// specific rather than the tool's automatic noise filtering.
-fn build_ignore_dirs(no_ignore: bool, extra: Vec<String>) -> HashSet<String> {
+/// Builds the set of directory names to skip, given `--skip-ignored` and
+/// any explicit `--ignore` values. The built-in names (`.git`,
+/// `node_modules`, `__pycache__`) are skipped only with `--skip-ignored`;
+/// an explicit `--ignore` is honored either way, since that's the user
+/// asking for something specific.
+fn build_ignore_dirs(skip_ignored: bool, extra: Vec<String>) -> HashSet<String> {
     // ardisk's --ignore takes plain names only (globs go to --exclude).
-    let (names, _) = arcommon::ignore::split_dir_excludes(DEFAULT_IGNORES, no_ignore, extra, false)
-        .expect("no glob is compiled when globs are not allowed");
+    let (names, _) =
+        arcommon::ignore::split_dir_excludes(DEFAULT_IGNORES, !skip_ignored, extra, false)
+            .expect("no glob is compiled when globs are not allowed");
     names
 }
 
@@ -421,7 +431,9 @@ fn main() {
         return;
     }
 
-    let ignore_dirs = build_ignore_dirs(args.no_ignore, args.ignore.clone());
+    // Everything is counted, like du, unless --skip-ignored (--no-ignore is
+    // the old spelling of the default and changes nothing).
+    let ignore_dirs = build_ignore_dirs(args.skip_ignored, args.ignore.clone());
     let target_path = fs::canonicalize(&args.path).unwrap_or_else(|_| PathBuf::from(&args.path));
     // Scanned from the canonical root, reported under PATH as typed
     // (`ardisk src` lists `src/...`). --json keeps its own format: paths
@@ -474,7 +486,7 @@ fn main() {
         include_pattern,
         debug: args.debug,
         apparent_size: args.apparent_size,
-        respect_gitignore: !args.no_ignore,
+        respect_gitignore: args.skip_ignored,
         exclude,
         skip_hidden: args.no_hidden,
         inodes: args.inodes,
@@ -586,7 +598,10 @@ fn main() {
                 include: args.include.clone(),
                 exclude: args.exclude.clone(),
                 ignore: args.ignore.clone(),
-                no_ignore: args.no_ignore,
+                // Kept under its old name and meaning ("ignore rules were
+                // off"), so an old filtered snapshot and a new full one
+                // differ here and --diff refuses to compare them.
+                no_ignore: !args.skip_ignored,
                 no_hidden: args.no_hidden,
                 one_file_system: args.one_file_system,
                 older_than: args.older_than.as_ref().map(|a| a.text.clone()),
@@ -1092,7 +1107,7 @@ mod tests {
                 vec!["--duplicates"],
                 vec!["--largest-files", "3"],
                 vec!["--json", "-s"],
-                vec!["--no-hidden", "--no-ignore"],
+                vec!["--no-hidden", "--skip-ignored"],
             ] {
                 let mut argv = vec!["ardisk", ".", flag];
                 argv.extend(extra.iter());
@@ -1114,7 +1129,7 @@ mod tests {
             vec!["--inodes"],
             vec!["--inodes", "--threshold", "1000"],
             vec!["--apparent-size"],
-            vec!["--no-hidden", "--no-ignore"],
+            vec!["--no-hidden", "--skip-ignored"],
             vec!["--include", "*.rs", "--exclude", "*.log", "--ignore", "x"],
         ] {
             let mut argv = vec!["ardisk", ".", "--tree"];
@@ -1150,7 +1165,7 @@ mod tests {
             vec!["--top", "5"],
             vec!["--max-depth", "2"],
             vec!["--threshold", "1000"],
-            vec!["--no-hidden", "--no-ignore"],
+            vec!["--no-hidden", "--skip-ignored"],
             vec!["--include", "*.rs", "--exclude", "*.log", "--ignore", "x"],
         ] {
             let mut argv = vec!["ardisk", ".", "--inodes"];
@@ -1202,7 +1217,7 @@ mod tests {
             vec!["--duplicates"],
             vec!["--largest-files", "5"],
             vec!["--json"],
-            vec!["--no-ignore"],
+            vec!["--skip-ignored"],
             vec!["--ignore", "vendor"],
             vec!["--exclude", "*.log"],
             vec!["--include", "*.rs"],
@@ -1546,30 +1561,36 @@ mod tests {
     // ── build_ignore_dirs ────────────────────────────────────────────────────
 
     #[test]
-    fn default_ignores_included_when_not_no_ignore() {
-        let dirs = build_ignore_dirs(false, vec![]);
+    fn nothing_is_skipped_by_default() {
+        assert!(build_ignore_dirs(false, vec![]).is_empty());
+    }
+
+    #[test]
+    fn skip_ignored_adds_the_built_in_names() {
+        let dirs = build_ignore_dirs(true, vec![]);
         assert!(dirs.contains(".git"));
         assert!(dirs.contains("node_modules"));
         assert!(dirs.contains("__pycache__"));
     }
 
     #[test]
-    fn no_ignore_excludes_default_ignores() {
-        let dirs = build_ignore_dirs(true, vec![]);
-        assert!(dirs.is_empty());
-    }
-
-    #[test]
-    fn explicit_ignore_honored_alongside_defaults() {
-        let dirs = build_ignore_dirs(false, vec!["vendor".to_string()]);
+    fn explicit_ignore_honored_alongside_built_ins() {
+        let dirs = build_ignore_dirs(true, vec!["vendor".to_string()]);
         assert!(dirs.contains("vendor"));
         assert!(dirs.contains(".git"));
     }
 
     #[test]
-    fn explicit_ignore_honored_even_with_no_ignore() {
-        let dirs = build_ignore_dirs(true, vec!["vendor".to_string()]);
+    fn explicit_ignore_honored_without_skip_ignored() {
+        let dirs = build_ignore_dirs(false, vec!["vendor".to_string()]);
         assert_eq!(dirs.len(), 1);
         assert!(dirs.contains("vendor"));
+    }
+
+    #[test]
+    fn no_ignore_is_still_accepted_but_not_with_skip_ignored() {
+        let args = Args::try_parse_from(["ardisk", "--no-ignore", "."]).unwrap();
+        assert!(args.no_ignore && !args.skip_ignored);
+        assert!(Args::try_parse_from(["ardisk", "--no-ignore", "--skip-ignored", "."]).is_err());
     }
 }

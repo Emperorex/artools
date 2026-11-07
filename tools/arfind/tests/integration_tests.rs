@@ -52,7 +52,7 @@ fn collect_names(
         case_insensitive: false,
         respect_gitignore: false,
         ignore_dir_patterns: Vec::new(),
-        exclude: None,
+        exclude: Vec::new(),
         one_file_system: false,
         mtime: Default::default(),
         name_kind: Default::default(),
@@ -64,7 +64,7 @@ fn collect_names(
     let results: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
     let results_clone = Arc::clone(&results);
 
-    parallel_find(root, 4, config, stats, move |item| {
+    parallel_find([root], 4, config, stats, move |item| {
         let name = item.path.file_name().unwrap().to_string_lossy().to_string();
         results_clone.lock().unwrap().push(name);
     });
@@ -250,7 +250,7 @@ fn stats_count_files_and_dirs_correctly() {
         case_insensitive: false,
         respect_gitignore: false,
         ignore_dir_patterns: Vec::new(),
-        exclude: None,
+        exclude: Vec::new(),
         one_file_system: false,
         mtime: Default::default(),
         name_kind: Default::default(),
@@ -261,7 +261,7 @@ fn stats_count_files_and_dirs_correctly() {
     let stats = SearchStats::new();
     let stats_clone = stats.clone();
 
-    parallel_find(root, 4, config, stats_clone, |_| {});
+    parallel_find([root], 4, config, stats_clone, |_| {});
 
     // root + sub = 2 directories examined as candidates (root via
     // check_root, "sub" when discovered in root's entry list)
@@ -295,7 +295,7 @@ fn stats_count_root_even_when_max_depth_stops_recursion() {
         case_insensitive: false,
         respect_gitignore: false,
         ignore_dir_patterns: Vec::new(),
-        exclude: None,
+        exclude: Vec::new(),
         one_file_system: false,
         mtime: Default::default(),
         name_kind: Default::default(),
@@ -306,7 +306,7 @@ fn stats_count_root_even_when_max_depth_stops_recursion() {
     let stats = SearchStats::new();
     let stats_clone = stats.clone();
 
-    parallel_find(root, 4, config, stats_clone, |_| {});
+    parallel_find([root], 4, config, stats_clone, |_| {});
 
     assert_eq!(stats.total_dirs.load(Ordering::Relaxed), 1);
     assert_eq!(stats.total_files.load(Ordering::Relaxed), 0);
@@ -333,7 +333,7 @@ fn stats_count_child_dir_examined_even_when_not_recursed_into() {
         case_insensitive: false,
         respect_gitignore: false,
         ignore_dir_patterns: Vec::new(),
-        exclude: None,
+        exclude: Vec::new(),
         one_file_system: false,
         mtime: Default::default(),
         name_kind: Default::default(),
@@ -344,7 +344,7 @@ fn stats_count_child_dir_examined_even_when_not_recursed_into() {
     let stats = SearchStats::new();
     let stats_clone = stats.clone();
 
-    parallel_find(root, 4, config, stats_clone, |_| {});
+    parallel_find([root], 4, config, stats_clone, |_| {});
 
     // root + "sub" = 2 dirs examined, even though "sub"'s contents
     // (b.txt) are never scanned at --max-depth 1.
@@ -470,7 +470,7 @@ fn multiple_workers_produce_same_results_as_single_worker() {
             case_insensitive: false,
             respect_gitignore: false,
             ignore_dir_patterns: Vec::new(),
-            exclude: None,
+            exclude: Vec::new(),
             one_file_system: false,
             mtime: Default::default(),
             name_kind: Default::default(),
@@ -480,7 +480,7 @@ fn multiple_workers_produce_same_results_as_single_worker() {
         let results: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
         let results_clone = Arc::clone(&results);
         parallel_find(
-            root.clone(),
+            [root.clone()],
             workers,
             config,
             SearchStats::new(),
@@ -517,7 +517,7 @@ fn make_tree_with_content(files: &[(&str, &[u8])]) -> (TempDir, PathBuf) {
 fn collect_with_config(root: PathBuf, config: std::sync::Arc<arfind::SearchConfig>) -> Vec<String> {
     let results: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
     let results_clone = Arc::clone(&results);
-    parallel_find(root, 4, config, SearchStats::new(), move |item| {
+    parallel_find([root], 4, config, SearchStats::new(), move |item| {
         results_clone
             .lock()
             .unwrap()
@@ -551,7 +551,7 @@ fn size_min_filters_small_files() {
         case_insensitive: false,
         respect_gitignore: false,
         ignore_dir_patterns: Vec::new(),
-        exclude: None,
+        exclude: Vec::new(),
         one_file_system: false,
         mtime: Default::default(),
         name_kind: Default::default(),
@@ -592,7 +592,7 @@ fn size_max_filters_large_files() {
         case_insensitive: false,
         respect_gitignore: false,
         ignore_dir_patterns: Vec::new(),
-        exclude: None,
+        exclude: Vec::new(),
         one_file_system: false,
         mtime: Default::default(),
         name_kind: Default::default(),
@@ -633,7 +633,7 @@ fn size_filter_does_not_affect_directories() {
         case_insensitive: false,
         respect_gitignore: false,
         ignore_dir_patterns: Vec::new(),
-        exclude: None,
+        exclude: Vec::new(),
         one_file_system: false,
         mtime: Default::default(),
         name_kind: Default::default(),
@@ -667,7 +667,7 @@ fn empty_finds_zero_byte_files() {
         case_insensitive: false,
         respect_gitignore: false,
         ignore_dir_patterns: Vec::new(),
-        exclude: None,
+        exclude: Vec::new(),
         one_file_system: false,
         mtime: Default::default(),
         name_kind: Default::default(),
@@ -700,7 +700,7 @@ fn empty_finds_empty_directories() {
         case_insensitive: false,
         respect_gitignore: false,
         ignore_dir_patterns: Vec::new(),
-        exclude: None,
+        exclude: Vec::new(),
         one_file_system: false,
         mtime: Default::default(),
         name_kind: Default::default(),
@@ -736,7 +736,7 @@ fn empty_false_returns_all_files() {
         case_insensitive: false,
         respect_gitignore: false,
         ignore_dir_patterns: Vec::new(),
-        exclude: None,
+        exclude: Vec::new(),
         one_file_system: false,
         mtime: Default::default(),
         name_kind: Default::default(),
@@ -764,7 +764,7 @@ fn config_with_gitignore(pattern: &str, respect_gitignore: bool) -> Arc<SearchCo
         case_insensitive: false,
         respect_gitignore,
         ignore_dir_patterns: Vec::new(),
-        exclude: None,
+        exclude: Vec::new(),
         one_file_system: false,
         mtime: Default::default(),
         name_kind: Default::default(),
@@ -848,7 +848,7 @@ fn run_rel(root: &std::path::Path, config: SearchConfig) -> Vec<String> {
     let results: Arc<Mutex<Vec<PathBuf>>> = Arc::new(Mutex::new(Vec::new()));
     let sink = Arc::clone(&results);
     parallel_find(
-        root.to_path_buf(),
+        [root.to_path_buf()],
         4,
         Arc::new(config),
         SearchStats::new(),
@@ -877,10 +877,11 @@ fn any() -> SearchConfig {
     SearchConfig::new(Pattern::new("*").unwrap())
 }
 
-fn excluding(root: &std::path::Path, patterns: &[&str]) -> SearchConfig {
+/// A config with these `--exclude` patterns (anchored at each search root).
+fn excluding(patterns: &[&str]) -> SearchConfig {
     let patterns: Vec<String> = patterns.iter().map(|s| s.to_string()).collect();
     SearchConfig {
-        exclude: arfind::build_exclude_matcher(root, &patterns).unwrap(),
+        exclude: patterns,
         ..any()
     }
 }
@@ -900,7 +901,7 @@ fn exclude_tree() -> (TempDir, PathBuf) {
 #[test]
 fn exclude_basename_glob_hides_matching_files_and_dirs_at_any_depth() {
     let (_d, root) = exclude_tree();
-    let found = run_rel(&root, excluding(&root, &["*.log"]));
+    let found = run_rel(&root, excluding(&["*.log"]));
     assert!(!found.iter().any(|p| p.ends_with(".log")), "{found:?}");
     // Like gitignore, a directory named x.log matches too, contents and all.
     assert!(!found.iter().any(|p| p.starts_with("x.log")), "{found:?}");
@@ -910,7 +911,7 @@ fn exclude_basename_glob_hides_matching_files_and_dirs_at_any_depth() {
 #[test]
 fn exclude_contents_pattern_keeps_the_directory_itself() {
     let (_d, root) = exclude_tree();
-    let found = run_rel(&root, excluding(&root, &["target/**"]));
+    let found = run_rel(&root, excluding(&["target/**"]));
     assert!(found.contains(&"target".to_string()), "{found:?}");
     assert!(!found.iter().any(|p| p.starts_with("target/")), "{found:?}");
 }
@@ -918,12 +919,12 @@ fn exclude_contents_pattern_keeps_the_directory_itself() {
 #[test]
 fn exclude_anchored_path_and_dir_only_patterns() {
     let (_d, root) = exclude_tree();
-    let found = run_rel(&root, excluding(&root, &["src/gen"]));
+    let found = run_rel(&root, excluding(&["src/gen"]));
     assert!(found.contains(&"src/main.rs".to_string()));
     assert!(!found.iter().any(|p| p.starts_with("src/gen")), "{found:?}");
 
     // Trailing slash: directories only.
-    let found = run_rel(&root, excluding(&root, &["logs/"]));
+    let found = run_rel(&root, excluding(&["logs/"]));
     assert!(!found.iter().any(|p| p.starts_with("logs")), "{found:?}");
     assert!(found.contains(&"readme.md".to_string()));
 }
@@ -935,7 +936,7 @@ fn exclude_applies_even_with_no_ignore_and_never_hides_the_root() {
     let config = SearchConfig {
         ignore_dirs: HashSet::new(),
         respect_gitignore: false,
-        ..excluding(&root, &[name.as_str(), "*.rs"])
+        ..excluding(&[name.as_str(), "*.rs"])
     };
     let found = run_rel(&root, config);
     assert!(
@@ -1203,9 +1204,13 @@ fn a_file_given_as_the_root_is_tested_by_type_too() {
     let hits = |c: SearchConfig| {
         let out: Arc<Mutex<Vec<PathBuf>>> = Arc::new(Mutex::new(Vec::new()));
         let sink = Arc::clone(&out);
-        parallel_find(file.clone(), 1, Arc::new(c), SearchStats::new(), move |m| {
-            sink.lock().unwrap().push(m.path)
-        });
+        parallel_find(
+            [file.clone()],
+            1,
+            Arc::new(c),
+            SearchStats::new(),
+            move |m| sink.lock().unwrap().push(m.path),
+        );
         Arc::try_unwrap(out).unwrap().into_inner().unwrap()
     };
     assert_eq!(

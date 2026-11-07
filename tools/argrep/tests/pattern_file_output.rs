@@ -155,11 +155,6 @@ fn errors_are_clear_and_nothing_is_printed() {
         (&["-f", "-", "-f", "-", "src"], 2, "only once"),
         (&["-f", "-", "-"], 2, "both the patterns"),
         (
-            &["-f", "p.txt", "foo", "src"],
-            2,
-            "two positional arguments",
-        ),
-        (
             &["-f", "missing.txt", "src", "-q"],
             2,
             "cannot read pattern file",

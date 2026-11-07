@@ -91,7 +91,7 @@ fn collect_matches(root: PathBuf, query: &str, ignore_case: bool) -> (Vec<String
     let fn_clone = Arc::clone(&file_names);
     let lc_clone = Arc::clone(&line_contents);
 
-    parallel_grep(root, 4, config, stats, move |item| {
+    parallel_grep([root], 4, config, stats, move |item| {
         fn_clone.lock().unwrap().push(
             item.file_path
                 .file_name()
@@ -670,7 +670,7 @@ fn unreadable_file_is_skipped_but_other_matches_are_still_found() {
     let file_names: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
     let fn_clone = Arc::clone(&file_names);
 
-    parallel_grep(root, 4, config, stats.clone(), move |item| {
+    parallel_grep([root], 4, config, stats.clone(), move |item| {
         fn_clone.lock().unwrap().push(
             item.file_path
                 .file_name()
@@ -921,7 +921,7 @@ fn hidden_config(query: &str, hidden: bool, no_ignore: bool) -> StdArc<SearchCon
 fn run(root: PathBuf, config: StdArc<SearchConfig>) -> Vec<String> {
     let results: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
     let r = Arc::clone(&results);
-    parallel_grep(root, 4, config, SearchStats::new(), move |item| {
+    parallel_grep([root], 4, config, SearchStats::new(), move |item| {
         r.lock().unwrap().push(
             item.file_path
                 .file_name()
@@ -1251,7 +1251,7 @@ fn custom_ignore_dir_is_excluded() {
     let results: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
     let r = Arc::clone(&results);
 
-    parallel_grep(root, 4, config, stats, move |item| {
+    parallel_grep([root], 4, config, stats, move |item| {
         r.lock().unwrap().push(
             item.file_path
                 .file_name()
@@ -1320,7 +1320,7 @@ fn stats_counts_are_accurate() {
     let stats = SearchStats::new();
     let stats_clone = stats.clone();
 
-    parallel_grep(root, 4, config, stats_clone, |_| {});
+    parallel_grep([root], 4, config, stats_clone, |_| {});
 
     // root + sub = 2 dirs minimum; macOS may add extra via symlink resolution
     assert!(stats.total_dirs.load(Ordering::Relaxed) >= 2);
@@ -1374,7 +1374,7 @@ fn files_discovered_counts_every_file_regardless_of_filtering() {
     ]);
     let config = stats_config("needle", &["*.min.js"]);
     let stats = SearchStats::new();
-    parallel_grep(root, 4, config, stats.clone(), |_| {});
+    parallel_grep([root], 4, config, stats.clone(), |_| {});
 
     assert_eq!(
         stats.files_discovered.load(Ordering::Relaxed),
@@ -1393,7 +1393,7 @@ fn files_skipped_counts_excluded_files_not_binary_ones() {
     ]);
     let config = stats_config("needle", &["*.min.js"]);
     let stats = SearchStats::new();
-    parallel_grep(root, 4, config, stats.clone(), |_| {});
+    parallel_grep([root], 4, config, stats.clone(), |_| {});
 
     assert_eq!(
         stats.files_skipped.load(Ordering::Relaxed),
@@ -1416,7 +1416,7 @@ fn files_discovered_equals_searched_plus_skipped_when_nothing_errors() {
     ]);
     let config = stats_config("needle", &["*.min.js"]);
     let stats = SearchStats::new();
-    parallel_grep(root, 4, config, stats.clone(), |_| {});
+    parallel_grep([root], 4, config, stats.clone(), |_| {});
 
     assert_eq!(stats.io_errors.load(Ordering::Relaxed), 0);
     assert_eq!(
@@ -1442,7 +1442,7 @@ fn binary_files_count_as_searched_not_skipped() {
 
     let config = stats_config("needle", &[]);
     let stats = SearchStats::new();
-    parallel_grep(root, 4, config, stats.clone(), |_| {});
+    parallel_grep([root], 4, config, stats.clone(), |_| {});
 
     assert_eq!(stats.files_discovered.load(Ordering::Relaxed), 2);
     assert_eq!(
@@ -1460,7 +1460,7 @@ fn bytes_read_is_nonzero_after_reading_file_content() {
     let (_dir, root) = make_tree(&[("a.txt", "needle and some more text\n")]);
     let config = stats_config("needle", &[]);
     let stats = SearchStats::new();
-    parallel_grep(root, 4, config, stats.clone(), |_| {});
+    parallel_grep([root], 4, config, stats.clone(), |_| {});
 
     assert!(
         stats.bytes_read.load(Ordering::Relaxed) >= "needle and some more text\n".len(),
@@ -1545,7 +1545,7 @@ fn files_never_reads_file_content() {
     let stats = SearchStats::new();
     let names_count = Arc::new(Mutex::new(0usize));
     let n = Arc::clone(&names_count);
-    parallel_grep(root, 2, config, stats.clone(), move |_| {
+    parallel_grep([root], 2, config, stats.clone(), move |_| {
         *n.lock().unwrap() += 1;
     });
 
@@ -1618,7 +1618,7 @@ fn files_updates_discovered_and_skipped_stats_consistently() {
     let (_dir, root) = make_tree(&[("a.rs", "x\n"), ("b.generated.rs", "x\n"), ("c.py", "x\n")]);
     let config = files_only_config(false, false, &["*.generated.rs"], &["*.rs"]);
     let stats = SearchStats::new();
-    parallel_grep(root, 2, config, stats.clone(), |_| {});
+    parallel_grep([root], 2, config, stats.clone(), |_| {});
 
     assert_eq!(stats.files_discovered.load(Ordering::Relaxed), 3);
     // a.rs passes; b.generated.rs is excluded; c.py fails the --type
@@ -1642,7 +1642,7 @@ fn matched_line_containing_bell_character_is_escaped_in_output() {
     let config = stats_config("needle", &[]);
     let results: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
     let r = Arc::clone(&results);
-    parallel_grep(root, 2, config, SearchStats::new(), move |item| {
+    parallel_grep([root], 2, config, SearchStats::new(), move |item| {
         r.lock().unwrap().push(item.line_content.clone());
     });
 
@@ -1696,7 +1696,7 @@ fn only_matching_output_escapes_control_characters_in_matched_text() {
     });
     let results: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
     let r = Arc::clone(&results);
-    parallel_grep(root, 2, config, SearchStats::new(), move |item| {
+    parallel_grep([root], 2, config, SearchStats::new(), move |item| {
         r.lock().unwrap().push(item.line_content.clone());
     });
 
@@ -1747,7 +1747,7 @@ fn context_lines_with_control_characters_are_also_escaped() {
     });
     let results: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
     let r = Arc::clone(&results);
-    parallel_grep(root, 2, config, SearchStats::new(), move |item| {
+    parallel_grep([root], 2, config, SearchStats::new(), move |item| {
         r.lock().unwrap().push(item.line_content.clone());
     });
 
@@ -1822,7 +1822,7 @@ fn control_characters_do_not_affect_whether_a_line_matches() {
     let config = fixed_string_config("need\\x07le"); // literal backslash-x-0-7 text, NOT the byte
     let results: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
     let r = Arc::clone(&results);
-    parallel_grep(root, 2, config, SearchStats::new(), move |item| {
+    parallel_grep([root], 2, config, SearchStats::new(), move |item| {
         r.lock().unwrap().push(item.line_content.clone());
     });
     assert!(
@@ -1837,7 +1837,7 @@ fn control_characters_do_not_affect_whether_a_line_matches() {
     let config2 = fixed_string_config("need\u{7}le"); // the actual BEL byte, in the pattern itself
     let results2: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
     let r2 = Arc::clone(&results2);
-    parallel_grep(root2, 2, config2, SearchStats::new(), move |item| {
+    parallel_grep([root2], 2, config2, SearchStats::new(), move |item| {
         r2.lock().unwrap().push(item.line_content.clone());
     });
     assert_eq!(
@@ -1905,7 +1905,7 @@ fn multiple_workers_find_same_matches_as_single_worker() {
         let results: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
         let r = Arc::clone(&results);
         parallel_grep(
-            root.clone(),
+            [root.clone()],
             workers,
             config,
             SearchStats::new(),
@@ -1996,7 +1996,7 @@ fn invert_returns_non_matching_lines() {
     });
     let results: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
     let r = Arc::clone(&results);
-    parallel_grep(root, 4, config, SearchStats::new(), move |item| {
+    parallel_grep([root], 4, config, SearchStats::new(), move |item| {
         r.lock()
             .unwrap()
             .push(item.line_content.trim_end().to_string());
@@ -2053,7 +2053,7 @@ fn invert_with_no_matches_returns_all_lines() {
     });
     let results: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
     let r = Arc::clone(&results);
-    parallel_grep(root, 4, config, SearchStats::new(), move |item| {
+    parallel_grep([root], 4, config, SearchStats::new(), move |item| {
         r.lock()
             .unwrap()
             .push(item.line_content.trim_end().to_string());
@@ -2116,7 +2116,7 @@ fn files_with_matches_returns_only_filenames() {
     });
     let results: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
     let r = Arc::clone(&results);
-    parallel_grep(root, 4, config, SearchStats::new(), move |item| {
+    parallel_grep([root], 4, config, SearchStats::new(), move |item| {
         r.lock().unwrap().push(
             item.file_path
                 .file_name()
@@ -2178,7 +2178,7 @@ fn files_with_matches_emits_each_file_once() {
     });
     let results: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
     let r = Arc::clone(&results);
-    parallel_grep(root, 4, config, SearchStats::new(), move |item| {
+    parallel_grep([root], 4, config, SearchStats::new(), move |item| {
         r.lock().unwrap().push(
             item.file_path
                 .file_name()
@@ -2255,7 +2255,7 @@ fn files_without_match_returns_only_unmatched_filenames() {
     });
     let results: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
     let r = Arc::clone(&results);
-    parallel_grep(root, 4, config, SearchStats::new(), move |item| {
+    parallel_grep([root], 4, config, SearchStats::new(), move |item| {
         r.lock().unwrap().push(
             item.file_path
                 .file_name()
@@ -2321,7 +2321,7 @@ fn files_without_match_emits_nothing_when_every_file_matches() {
     });
     let results: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
     let r = Arc::clone(&results);
-    parallel_grep(root, 4, config, SearchStats::new(), move |item| {
+    parallel_grep([root], 4, config, SearchStats::new(), move |item| {
         r.lock().unwrap().push(
             item.file_path
                 .file_name()
@@ -2390,7 +2390,7 @@ fn files_without_match_with_invert_reports_files_where_every_line_matches() {
     });
     let results: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
     let r = Arc::clone(&results);
-    parallel_grep(root, 4, config, SearchStats::new(), move |item| {
+    parallel_grep([root], 4, config, SearchStats::new(), move |item| {
         r.lock().unwrap().push(
             item.file_path
                 .file_name()
@@ -2533,7 +2533,7 @@ fn files_without_match_excludes_unreadable_files() {
     let stats = SearchStats::new();
     let results: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
     let r = Arc::clone(&results);
-    parallel_grep(root, 4, config, stats.clone(), move |item| {
+    parallel_grep([root], 4, config, stats.clone(), move |item| {
         r.lock().unwrap().push(
             item.file_path
                 .file_name()
@@ -2605,7 +2605,7 @@ fn files_without_match_quiet_produces_no_output() {
     let call_count = Arc::new(AtomicUsize::new(0));
     let c = Arc::clone(&call_count);
     let stats = SearchStats::new();
-    parallel_grep(root, 2, config, stats.clone(), move |_item| {
+    parallel_grep([root], 2, config, stats.clone(), move |_item| {
         c.fetch_add(1, Ordering::Relaxed);
     });
 
@@ -2676,7 +2676,7 @@ fn count_per_file_returns_correct_counts() {
     });
     let results: Arc<Mutex<Vec<(String, usize)>>> = Arc::new(Mutex::new(Vec::new()));
     let r = Arc::clone(&results);
-    parallel_grep(root, 4, config, SearchStats::new(), move |item| {
+    parallel_grep([root], 4, config, SearchStats::new(), move |item| {
         r.lock().unwrap().push((
             item.file_path
                 .file_name()
@@ -2747,7 +2747,7 @@ fn count_per_file_emits_result_for_every_file() {
     });
     let results: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
     let r = Arc::clone(&results);
-    parallel_grep(root, 4, config, SearchStats::new(), move |item| {
+    parallel_grep([root], 4, config, SearchStats::new(), move |item| {
         r.lock().unwrap().push(
             item.file_path
                 .file_name()
@@ -2820,7 +2820,7 @@ fn invert_with_count_counts_non_matching_lines() {
     });
     let results: Arc<Mutex<Vec<(String, usize)>>> = Arc::new(Mutex::new(Vec::new()));
     let r = Arc::clone(&results);
-    parallel_grep(root, 4, config, SearchStats::new(), move |item| {
+    parallel_grep([root], 4, config, SearchStats::new(), move |item| {
         r.lock().unwrap().push((
             item.file_path
                 .file_name()
@@ -2895,7 +2895,7 @@ fn invert_with_files_with_matches_returns_files_with_a_non_matching_line() {
     });
     let results: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
     let r = Arc::clone(&results);
-    parallel_grep(root, 4, config, SearchStats::new(), move |item| {
+    parallel_grep([root], 4, config, SearchStats::new(), move |item| {
         r.lock().unwrap().push(
             item.file_path
                 .file_name()
@@ -2968,7 +2968,7 @@ fn invert_with_context_builds_context_around_inverted_matches() {
     });
     let results: Arc<Mutex<Vec<(String, bool)>>> = Arc::new(Mutex::new(Vec::new()));
     let r = Arc::clone(&results);
-    parallel_grep(root, 4, config, SearchStats::new(), move |item| {
+    parallel_grep([root], 4, config, SearchStats::new(), move |item| {
         r.lock()
             .unwrap()
             .push((item.line_content.trim_end().to_string(), item.is_context));
@@ -3048,7 +3048,7 @@ fn include_pattern_searches_only_matching_files() {
     });
     let results: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
     let r = Arc::clone(&results);
-    parallel_grep(root, 4, config, SearchStats::new(), move |item| {
+    parallel_grep([root], 4, config, SearchStats::new(), move |item| {
         r.lock().unwrap().push(
             item.file_path
                 .file_name()
@@ -3107,7 +3107,7 @@ fn include_pattern_no_files_match_returns_empty() {
     });
     let results: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
     let r = Arc::clone(&results);
-    parallel_grep(root, 4, config, SearchStats::new(), move |item| {
+    parallel_grep([root], 4, config, SearchStats::new(), move |item| {
         r.lock().unwrap().push(item.file_path.display().to_string());
     });
     assert!(results.lock().unwrap().is_empty());
@@ -3204,7 +3204,7 @@ fn include_wildcard_matches_all_files() {
     let run = |config: std::sync::Arc<argrep::SearchConfig>| {
         let results: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
         let r = Arc::clone(&results);
-        parallel_grep(root.clone(), 4, config, SearchStats::new(), move |item| {
+        parallel_grep([root.clone()], 4, config, SearchStats::new(), move |item| {
             r.lock().unwrap().push(
                 item.file_path
                     .file_name()
@@ -3275,7 +3275,7 @@ fn before_context_includes_leading_lines() {
 
     let results: Arc<Mutex<Vec<(usize, String, bool)>>> = Arc::new(Mutex::new(Vec::new()));
     let r = Arc::clone(&results);
-    parallel_grep(root, 4, config, SearchStats::new(), move |item| {
+    parallel_grep([root], 4, config, SearchStats::new(), move |item| {
         if !item.is_separator {
             r.lock().unwrap().push((
                 item.line_num,
@@ -3344,7 +3344,7 @@ fn after_context_includes_trailing_lines() {
 
     let results: Arc<Mutex<Vec<(usize, String, bool)>>> = Arc::new(Mutex::new(Vec::new()));
     let r = Arc::clone(&results);
-    parallel_grep(root, 4, config, SearchStats::new(), move |item| {
+    parallel_grep([root], 4, config, SearchStats::new(), move |item| {
         if !item.is_separator {
             r.lock().unwrap().push((
                 item.line_num,
@@ -3416,7 +3416,7 @@ fn context_both_and_group_separator() {
 
     let results: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
     let r = Arc::clone(&results);
-    parallel_grep(root, 4, config, SearchStats::new(), move |item| {
+    parallel_grep([root], 4, config, SearchStats::new(), move |item| {
         if item.is_separator {
             r.lock().unwrap().push("--".to_string());
         } else {
@@ -3494,7 +3494,7 @@ fn query_is_a_regex_by_default() {
 
     let matches: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
     let m = Arc::clone(&matches);
-    parallel_grep(root, 2, config, SearchStats::new(), move |item| {
+    parallel_grep([root], 2, config, SearchStats::new(), move |item| {
         m.lock()
             .unwrap()
             .push(item.line_content.trim_end().to_string());
@@ -3556,7 +3556,7 @@ fn fixed_strings_mode_matches_literally() {
 
     let matches: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
     let m = Arc::clone(&matches);
-    parallel_grep(root, 2, config, SearchStats::new(), move |item| {
+    parallel_grep([root], 2, config, SearchStats::new(), move |item| {
         m.lock()
             .unwrap()
             .push(item.line_content.trim_end().to_string());
@@ -3630,7 +3630,7 @@ fn whole_word_matches_only_word_boundaries() {
 
     let matches: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
     let m = Arc::clone(&matches);
-    parallel_grep(root, 2, config, SearchStats::new(), move |item| {
+    parallel_grep([root], 2, config, SearchStats::new(), move |item| {
         m.lock()
             .unwrap()
             .push(item.line_content.trim_end().to_string());
@@ -3694,7 +3694,7 @@ fn whole_line_matches_only_exact_line() {
 
     let matches: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
     let m = Arc::clone(&matches);
-    parallel_grep(root, 2, config, SearchStats::new(), move |item| {
+    parallel_grep([root], 2, config, SearchStats::new(), move |item| {
         m.lock()
             .unwrap()
             .push(item.line_content.trim_end().to_string());
@@ -3754,7 +3754,7 @@ fn quiet_mode_produces_no_output() {
     let call_count = Arc::new(AtomicUsize::new(0));
     let c = Arc::clone(&call_count);
     let stats = SearchStats::new();
-    parallel_grep(root, 2, config, stats.clone(), move |_item| {
+    parallel_grep([root], 2, config, stats.clone(), move |_item| {
         c.fetch_add(1, Ordering::Relaxed);
     });
 
@@ -3812,7 +3812,7 @@ fn quiet_mode_with_no_matches_reports_zero() {
     let call_count = Arc::new(AtomicUsize::new(0));
     let c = Arc::clone(&call_count);
     let stats = SearchStats::new();
-    parallel_grep(root, 2, config, stats.clone(), move |_item| {
+    parallel_grep([root], 2, config, stats.clone(), move |_item| {
         c.fetch_add(1, Ordering::Relaxed);
     });
 
@@ -3862,7 +3862,7 @@ fn only_matching_emits_one_row_per_occurrence() {
 
     let matches: Arc<Mutex<Vec<(usize, String)>>> = Arc::new(Mutex::new(Vec::new()));
     let m = Arc::clone(&matches);
-    parallel_grep(root, 2, config, SearchStats::new(), move |item| {
+    parallel_grep([root], 2, config, SearchStats::new(), move |item| {
         m.lock()
             .unwrap()
             .push((item.line_num, item.line_content.clone()));
@@ -3920,7 +3920,7 @@ fn count_per_file_takes_priority_over_only_matching() {
 
     let matches: Arc<Mutex<Vec<Option<usize>>>> = Arc::new(Mutex::new(Vec::new()));
     let m = Arc::clone(&matches);
-    parallel_grep(root, 2, config, SearchStats::new(), move |item| {
+    parallel_grep([root], 2, config, SearchStats::new(), move |item| {
         m.lock().unwrap().push(item.count);
     });
 
@@ -3972,7 +3972,7 @@ fn max_count_stops_after_n_matching_lines() {
 
     let matches: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
     let m = Arc::clone(&matches);
-    parallel_grep(root, 2, config, SearchStats::new(), move |item| {
+    parallel_grep([root], 2, config, SearchStats::new(), move |item| {
         m.lock()
             .unwrap()
             .push(item.line_content.trim_end().to_string());
@@ -4023,7 +4023,7 @@ fn max_count_caps_the_count_per_file_total() {
 
     let matches: Arc<Mutex<Vec<Option<usize>>>> = Arc::new(Mutex::new(Vec::new()));
     let m = Arc::clone(&matches);
-    parallel_grep(root, 2, config, SearchStats::new(), move |item| {
+    parallel_grep([root], 2, config, SearchStats::new(), move |item| {
         m.lock().unwrap().push(item.count);
     });
 
@@ -4077,7 +4077,7 @@ fn max_count_with_only_matching_counts_lines_not_occurrences() {
 
     let matches: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
     let m = Arc::clone(&matches);
-    parallel_grep(root, 2, config, SearchStats::new(), move |item| {
+    parallel_grep([root], 2, config, SearchStats::new(), move |item| {
         m.lock().unwrap().push(item.line_content.clone());
     });
 
@@ -4129,7 +4129,7 @@ fn max_count_still_flushes_trailing_context() {
 
     let matches: Arc<Mutex<Vec<(String, bool)>>> = Arc::new(Mutex::new(Vec::new()));
     let m = Arc::clone(&matches);
-    parallel_grep(root, 2, config, SearchStats::new(), move |item| {
+    parallel_grep([root], 2, config, SearchStats::new(), move |item| {
         m.lock()
             .unwrap()
             .push((item.line_content.trim_end().to_string(), item.is_context));
@@ -4186,7 +4186,7 @@ fn exclude_skips_matching_files() {
 
     let results: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
     let r = Arc::clone(&results);
-    parallel_grep(root, 2, config, SearchStats::new(), move |item| {
+    parallel_grep([root], 2, config, SearchStats::new(), move |item| {
         r.lock().unwrap().push(
             item.file_path
                 .file_name()
@@ -4243,7 +4243,7 @@ fn exclude_wins_over_include_on_overlap() {
 
     let results: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
     let r = Arc::clone(&results);
-    parallel_grep(root, 2, config, SearchStats::new(), move |item| {
+    parallel_grep([root], 2, config, SearchStats::new(), move |item| {
         r.lock().unwrap().push(item.file_path.display().to_string());
     });
 
@@ -4295,7 +4295,7 @@ fn exclude_dir_glob_skips_matching_directories() {
 
     let results: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
     let r = Arc::clone(&results);
-    parallel_grep(root, 2, config, SearchStats::new(), move |item| {
+    parallel_grep([root], 2, config, SearchStats::new(), move |item| {
         r.lock().unwrap().push(
             item.file_path
                 .file_name()
@@ -4539,7 +4539,7 @@ fn special_files_count_as_discovered_and_skipped() {
     let config = stats_config("needle", &[]);
     let stats = SearchStats::new();
     let stats_for_run = stats.clone();
-    within_timeout(move || parallel_grep(root, 4, config, stats_for_run, |_| {}));
+    within_timeout(move || parallel_grep([root], 4, config, stats_for_run, |_| {}));
 
     assert_eq!(stats.files_discovered.load(Ordering::Relaxed), 3);
     assert_eq!(stats.total_files.load(Ordering::Relaxed), 2);

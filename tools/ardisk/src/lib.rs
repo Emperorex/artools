@@ -30,7 +30,7 @@ use std::{
     path::{Path, PathBuf},
     sync::{
         Arc, Mutex,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     },
 };
 use types::{TypeAccumulator, TypeTable};
@@ -205,9 +205,32 @@ impl FileCollector {
     }
 }
 
+/// One scanned directory.
+///
+/// A scan lists them in the order their scans started ([`ScanOutput::dirs`]),
+/// so a directory always comes after its parent, and `parent` is a position
+/// in that same list. That is what lets [`roll_up`] total every subtree in
+/// one pass, with no sorting and no path lookups.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DirNode {
+    pub path: PathBuf,
+    /// Position of the parent directory in the list; `None` for the scan
+    /// root.
+    pub parent: Option<usize>,
+    /// Total cost: file bytes + directory inode cost. After a scan, of what
+    /// the directory holds directly; after [`roll_up`], of its whole subtree.
+    pub size: u64,
+    /// File bytes only (filtered by `--include`), no inode. Direct after a
+    /// scan, whole subtree after [`roll_up`], like `size`.
+    pub content: u64,
+}
+
 /// Task sent to workers representing a directory to scan
 pub struct Task {
     pub path: PathBuf,
+    /// Position of the parent directory in the scan's list (see
+    /// [`DirNode`]); `None` for the scan root.
+    pub parent: Option<usize>,
     /// Accumulated .gitignore/.ignore matchers from the root down to this
     /// directory's parent, in order (deepest = highest priority, mirroring
     /// git's own precedence for nested ignore files).
@@ -221,10 +244,13 @@ pub struct Task {
 /// The queue of directories still to scan is the walk's own
 /// ([`arcommon::walk::Queue`]).
 pub struct ScanShared {
-    /// Per-directory total cost: file bytes + directory inode cost.
-    pub raw_sizes: Mutex<HashMap<PathBuf, u64>>,
-    /// Per-directory file bytes only (filtered by `--include`), no inode.
-    pub content_sizes: Mutex<HashMap<PathBuf, u64>>,
+    /// Every directory scanned so far, each with its position in the final
+    /// list. Pushed when a directory's scan ends, so not in position order.
+    pub dirs: Mutex<Vec<(usize, DirNode)>>,
+    /// The position the next directory gets, handed out when its scan
+    /// starts: before any of its subdirectories is queued, so a child's
+    /// position is always greater than its parent's.
+    pub next_dir: AtomicUsize,
     /// Global (dev, ino) dedup set so hard-linked files are only counted once
     /// per invocation, mirroring GNU `du`'s behavior. Shared across all worker
     /// threads for the entire traversal, not just per-directory.
@@ -368,16 +394,16 @@ pub fn parallel_scan_collect(
     mode: Collect,
 ) -> (HashMap<PathBuf, u64>, HashMap<PathBuf, u64>, Vec<FileEntry>) {
     let out = parallel_scan_report(root, workers, config, mode);
-    (out.raw_sizes, out.content_sizes, out.files)
+    (out.raw_sizes(), out.content_sizes(), out.files)
 }
 
 /// Everything a scan produces. See [`parallel_scan_report`].
 #[derive(Debug)]
 pub struct ScanOutput {
-    /// Per-directory total cost: file bytes + directory inode cost.
-    pub raw_sizes: HashMap<PathBuf, u64>,
-    /// Per-directory file bytes only (filtered by `--include`), no inode.
-    pub content_sizes: HashMap<PathBuf, u64>,
+    /// Every directory scanned, parents before children, each with what it
+    /// holds directly (not yet rolled up; see [`roll_up`]). The scan root is
+    /// first. A directory that could not be read is not listed.
+    pub dirs: Vec<DirNode>,
     /// Individual files recorded according to the [`Collect`] mode.
     pub files: Vec<FileEntry>,
     /// Regular files that contributed to the totals: symlinks and paths
@@ -389,6 +415,23 @@ pub struct ScanOutput {
     pub types: TypeTable,
 }
 
+impl ScanOutput {
+    /// Per-directory total cost (file bytes + directory inode cost) as a
+    /// map, for callers that look directories up by path.
+    pub fn raw_sizes(&self) -> HashMap<PathBuf, u64> {
+        self.dirs.iter().map(|d| (d.path.clone(), d.size)).collect()
+    }
+
+    /// Per-directory file bytes only (filtered by `--include`), no inode,
+    /// as a map.
+    pub fn content_sizes(&self) -> HashMap<PathBuf, u64> {
+        self.dirs
+            .iter()
+            .map(|d| (d.path.clone(), d.content))
+            .collect()
+    }
+}
+
 /// Like [`parallel_scan_collect`], but returns a [`ScanOutput`] that also
 /// carries the number of files counted.
 pub fn parallel_scan_report(
@@ -398,8 +441,8 @@ pub fn parallel_scan_report(
     mode: Collect,
 ) -> ScanOutput {
     let shared = ScanShared {
-        raw_sizes: Mutex::new(HashMap::new()),
-        content_sizes: Mutex::new(HashMap::new()),
+        dirs: Mutex::new(Vec::new()),
+        next_dir: AtomicUsize::new(0),
         seen_inodes: Mutex::new(HashSet::new()),
         root_dev: if config.one_file_system {
             device_of(&root)
@@ -410,6 +453,7 @@ pub fn parallel_scan_report(
 
     let root_task = Task {
         path: root,
+        parent: None,
         ignore_stack: Arc::new(Vec::new()),
     };
     // Each worker collects files into its own FileCollector; they are merged
@@ -425,17 +469,28 @@ pub fn parallel_scan_report(
     for c in per_worker {
         collected.merge(c);
     }
-    let raw = shared.raw_sizes.into_inner().unwrap();
-    let content = shared.content_sizes.into_inner().unwrap();
+    let dirs = in_position_order(shared.dirs.into_inner().unwrap());
     let file_count = collected.files;
     let types = std::mem::take(&mut collected.types).into_table();
     ScanOutput {
-        raw_sizes: raw,
-        content_sizes: content,
+        dirs,
         files: collected.into_files(),
         file_count,
         types,
     }
+}
+
+/// Puts each directory at the position it was given when its scan started.
+/// Workers finish in any order, but the positions are exactly `0..len` (one
+/// per directory pushed), so swapping every entry into place is linear.
+fn in_position_order(mut dirs: Vec<(usize, DirNode)>) -> Vec<DirNode> {
+    for i in 0..dirs.len() {
+        while dirs[i].0 != i {
+            let home = dirs[i].0;
+            dirs.swap(i, home);
+        }
+    }
+    dirs.into_iter().map(|(_, dir)| dir).collect()
 }
 
 /// Computes the on-disk contribution of a single metadata entry, honoring
@@ -511,6 +566,11 @@ pub fn scan_directory(
             }
         }
     };
+
+    // This directory's position in the scan's list. Taken only now that it
+    // could be read (an unreadable directory is not listed, so positions
+    // stay gap-free), and before any subdirectory is queued.
+    let position = shared.next_dir.fetch_add(1, Ordering::Relaxed);
 
     // Extend the inherited gitignore stack with this directory's own
     // .gitignore/.ignore, if present. We already have this directory's full
@@ -599,6 +659,7 @@ pub fn scan_directory(
             }
             queue.push(Task {
                 path: entry_path,
+                parent: Some(position),
                 ignore_stack: Arc::clone(&ignore_stack),
             });
         } else {
@@ -670,39 +731,68 @@ pub fn scan_directory(
         progress.add_dir(local_files, local_dir_size);
     }
 
-    shared
-        .raw_sizes
-        .lock()
-        .unwrap()
-        .insert(dir_path.to_path_buf(), local_dir_size);
-    shared
-        .content_sizes
-        .lock()
-        .unwrap()
-        .insert(dir_path.to_path_buf(), local_content_size);
+    // The task's own path is moved into the record: one copy of each
+    // directory path for the whole run.
+    let dir = DirNode {
+        path: task.path,
+        parent: task.parent,
+        size: local_dir_size,
+        content: local_content_size,
+    };
+    shared.dirs.lock().unwrap().push((position, dir));
 }
 
-/// Propagates weights from deeply nested folders up the tree
-/// using a single-pass dynamic programming bottom-up rollup.
+/// Rolls every directory's `size` and `content` up into its ancestors, in
+/// place: afterwards each covers the directory's whole subtree.
+///
+/// One backwards pass. `dirs` must list parents before their children, as
+/// [`ScanOutput::dirs`] does; then by the time a directory is added to its
+/// parent, everything below it has already been added to it.
+pub fn roll_up(dirs: &mut [DirNode]) {
+    for i in (0..dirs.len()).rev() {
+        if let Some(parent) = dirs[i].parent {
+            debug_assert!(parent < i, "a directory must come after its parent");
+            let (size, content) = (dirs[i].size, dirs[i].content);
+            dirs[parent].size += size;
+            dirs[parent].content += content;
+        }
+    }
+}
+
+/// The map form of [`roll_up`], for callers that hold per-directory sizes
+/// keyed by path (see [`ScanOutput::raw_sizes`]): propagates each
+/// directory's size up to every ancestor at or below `base_path`.
+///
+/// It has to sort by depth and look parents up by path, so it is much
+/// slower than [`roll_up`]; the `ardisk` binary does not use it.
 pub fn aggregate_sizes(
     raw_sizes: &HashMap<PathBuf, u64>,
     base_path: &Path,
 ) -> HashMap<PathBuf, u64> {
-    let mut aggregated = HashMap::new();
+    let mut aggregated: HashMap<PathBuf, u64> = HashMap::with_capacity(raw_sizes.len());
 
+    // Deepest first, so a directory is complete before it is added to its
+    // parent. The depth is computed once per path, not once per comparison.
     let mut paths: Vec<&PathBuf> = raw_sizes.keys().collect();
-    paths.sort_by_key(|p| std::cmp::Reverse(p.components().count()));
+    paths.sort_by_cached_key(|p| std::cmp::Reverse(p.components().count()));
 
     for path in paths {
-        let size = raw_sizes[path];
-
-        *aggregated.entry(path.to_path_buf()).or_insert(0u64) += size;
+        let total = {
+            let slot = aggregated.entry(path.clone()).or_insert(0);
+            *slot += raw_sizes[path];
+            *slot
+        };
 
         if let Some(parent) = path.parent()
             && parent.starts_with(base_path)
         {
-            let child_accumulated_size = *aggregated.get(path).unwrap_or(&0u64);
-            *aggregated.entry(parent.to_path_buf()).or_insert(0u64) += child_accumulated_size;
+            // Only a parent seen for the first time needs a path of its own.
+            match aggregated.get_mut(parent) {
+                Some(slot) => *slot += total,
+                None => {
+                    aggregated.insert(parent.to_path_buf(), total);
+                }
+            }
         }
     }
 

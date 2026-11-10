@@ -29,10 +29,9 @@
 //! Compatible additions (new keys) do not change `schema_version`; consumers
 //! must ignore keys they do not know.
 
-use crate::{FileEntry, duplicates::DuplicateReport, format_size_plain, types::TypeTable};
+use crate::{DirNode, FileEntry, duplicates::DuplicateReport, format_size_plain, types::TypeTable};
 use serde::Serialize;
 use std::{
-    collections::HashMap,
     io::{self, Write},
     path::{Path, PathBuf},
 };
@@ -90,52 +89,59 @@ pub struct DirectorySelection {
 }
 
 /// Picks the directories to list: biggest first, ties broken by path so the
-/// result does not depend on hash-map iteration order.
+/// result does not depend on the order the scan found them in.
+///
+/// `dirs` are a scan's directories after [`roll_up`](crate::roll_up), so
+/// `size` and `content` are subtree totals.
 pub fn select_directories(
-    aggregated: &HashMap<PathBuf, u64>,
-    aggregated_content: &HashMap<PathBuf, u64>,
+    dirs: &[DirNode],
     root: &Path,
     query: &DirectoryQuery,
 ) -> DirectorySelection {
-    let mut sorted: Vec<(&PathBuf, u64)> = aggregated.iter().map(|(p, s)| (p, *s)).collect();
-    sorted.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(b.0)));
-
-    let limit = query.limit();
-    let mut entries = Vec::new();
-    let mut truncated = false;
-
-    for (path, size) in sorted {
-        // Suppress directories with no matching file content when --include
-        // is active: they only add noise. The content map (file bytes only,
-        // no inode cost) is checked so directory inode costs don't defeat
-        // the suppression.
-        if query.threshold_bytes.is_none() && query.include_active {
-            let content = aggregated_content.get(path).copied().unwrap_or(0);
-            if content == 0 {
-                continue;
+    // Suppress directories with no matching file content when --include is
+    // active: they only add noise. `content` (file bytes only, no inode
+    // cost) is checked so directory inode costs don't defeat the
+    // suppression.
+    let needs_content = query.threshold_bytes.is_none() && query.include_active;
+    let mut qualifying: Vec<&DirNode> = dirs
+        .iter()
+        .filter(|dir| {
+            if needs_content && dir.content == 0 {
+                return false;
             }
-        }
-        if query.threshold_bytes.is_some_and(|min| size < min) {
-            continue;
-        }
-        let Ok(rel) = path.strip_prefix(root) else {
-            continue;
-        };
-        if query
-            .max_depth
-            .is_some_and(|max| rel.components().count() > max)
-        {
-            continue;
-        }
+            if query.threshold_bytes.is_some_and(|min| dir.size < min) {
+                return false;
+            }
+            let Ok(rel) = dir.path.strip_prefix(root) else {
+                return false;
+            };
+            query
+                .max_depth
+                .is_none_or(|max| rel.components().count() <= max)
+        })
+        .collect();
 
-        if entries.len() == limit {
-            truncated = true;
-            break;
+    let biggest_first =
+        |a: &&DirNode, b: &&DirNode| b.size.cmp(&a.size).then_with(|| a.path.cmp(&b.path));
+    let limit = query.limit();
+    let truncated = qualifying.len() > limit;
+    if truncated {
+        // Only the `limit` biggest are listed: move them to the front
+        // without sorting the (usually far larger) rest.
+        if limit > 0 {
+            qualifying.select_nth_unstable_by(limit - 1, biggest_first);
         }
-        entries.push((path.clone(), size));
+        qualifying.truncate(limit);
     }
+    qualifying.sort_unstable_by(biggest_first);
 
-    DirectorySelection { entries, truncated }
+    DirectorySelection {
+        entries: qualifying
+            .into_iter()
+            .map(|dir| (dir.path.clone(), dir.size))
+            .collect(),
+        truncated,
+    }
 }
 
 // ── JSON ────────────────────────────────────────────────────────────────────

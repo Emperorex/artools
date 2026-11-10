@@ -24,7 +24,7 @@ use std::{
     collections::HashSet,
     fs,
     io::{self, IsTerminal, Write},
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::Arc,
     time::{Instant, SystemTime},
 };
@@ -394,6 +394,18 @@ struct Args {
     diff: Option<Vec<PathBuf>>,
 }
 
+/// Why `root` can't be scanned, if it can't: it doesn't exist, isn't a
+/// directory, or can't be listed (e.g. permission denied).
+fn check_root(root: &Path) -> Result<(), String> {
+    let metadata = fs::metadata(root).map_err(|e| arcommon::fs::error_text(&e))?;
+    if !metadata.is_dir() {
+        return Err("Not a directory".to_string());
+    }
+    fs::read_dir(root)
+        .map(drop)
+        .map_err(|e| arcommon::fs::error_text(&e))
+}
+
 /// Builds the set of directory names to skip, given `--skip-ignored` and
 /// any explicit `--ignore` values. The built-in names (`.git`,
 /// `node_modules`, `__pycache__`) are skipped only with `--skip-ignored`;
@@ -477,6 +489,17 @@ fn main() {
             "ardisk: --one-file-system is only supported on Unix-like systems; scanning normally"
                 .err_yellow()
         );
+    }
+
+    // A PATH that can't be scanned is an error, before anything is printed:
+    // otherwise the scan finds nothing, and an empty report (or a --json
+    // document for a directory that doesn't exist) would pass for success.
+    if let Err(reason) = check_root(Path::new(&args.path)) {
+        eprintln!(
+            "{}",
+            format!("ardisk: {}: {reason}", arcommon::sanitize_name(&args.path)).err_red()
+        );
+        std::process::exit(1);
     }
 
     let scan_progress = args.progress.then(|| Arc::new(ScanProgress::default()));

@@ -3,7 +3,6 @@ use arcommon::jobs::{MAX_JOBS, default_jobs};
 use ardisk::{
     Collect, DEFAULT_IGNORES, ScanConfig, ScanOutput, SizeUnits,
     age::{Age, MtimeFilter, check_window, parse_age},
-    aggregate_sizes,
     bar::render_list_with_bars,
     build_exclude_matcher,
     duplicates::{DuplicateReport, find_duplicates},
@@ -14,6 +13,7 @@ use ardisk::{
         select_directories, top_limit, write_by_type, write_directories, write_duplicates,
         write_inodes, write_largest_files,
     },
+    roll_up,
     tree::{render_tree_text, tree_lines},
 };
 use clap::builder::TypedValueParser as _;
@@ -521,8 +521,7 @@ fn main() {
     // Lets later phases (comparing duplicates) report on stderr, too.
     let status: Option<Status>;
     let ScanOutput {
-        raw_sizes,
-        content_sizes: raw_content_sizes,
+        mut dirs,
         files: collected_files,
         file_count,
         types,
@@ -556,9 +555,9 @@ fn main() {
         (collected_files, None)
     };
 
-    // Phase 2: Aggregation and rollup from bottom to top
-    let aggregated_sizes = aggregate_sizes(&raw_sizes, &target_path);
-    let aggregated_content = aggregate_sizes(&raw_content_sizes, &target_path);
+    // Phase 2: roll each directory's sizes up into its ancestors. One pass
+    // over the scan's list; from here on `dirs` holds subtree totals.
+    roll_up(&mut dirs);
 
     let duration = start_time.elapsed();
 
@@ -579,7 +578,8 @@ fn main() {
         None => None,
     };
 
-    let root_total = aggregated_sizes.get(&target_path).copied().unwrap_or(0);
+    // The scan root is first in the list (absent if it could not be read).
+    let root_total = dirs.first().map_or(0, |root| root.size);
     let query = DirectoryQuery {
         top: args.top,
         max_depth: args.max_depth,
@@ -611,12 +611,11 @@ fn main() {
         let stdout = io::stdout();
         let mut out = io::BufWriter::new(stdout.lock());
         let written = if args.inodes {
-            let selection =
-                select_directories(&aggregated_sizes, &aggregated_content, &target_path, &query);
+            let selection = select_directories(&dirs, &target_path, &query);
             let summary = InodeSummary {
                 total_inodes: root_total,
                 files: file_count,
-                directories: raw_sizes.len() as u64,
+                directories: dirs.len() as u64,
             };
             write_inodes(&mut out, &meta, &query, &selection, summary)
         } else if let Some(report) = &duplicate_report {
@@ -634,12 +633,11 @@ fn main() {
                 &largest_files,
             )
         } else {
-            let selection =
-                select_directories(&aggregated_sizes, &aggregated_content, &target_path, &query);
+            let selection = select_directories(&dirs, &target_path, &query);
             let summary = DirectorySummary {
                 total_bytes: root_total,
                 files: file_count,
-                directories: raw_sizes.len() as u64,
+                directories: dirs.len() as u64,
             };
             write_directories(&mut out, &meta, &query, &selection, summary)
         };
@@ -696,8 +694,7 @@ fn main() {
                 );
             }
         } else if args.tree {
-            let selection =
-                select_directories(&aggregated_sizes, &aggregated_content, &target_path, &query);
+            let selection = select_directories(&dirs, &target_path, &query);
             let lines = tree_lines(&selection, &target_path);
             let text = if args.inodes {
                 render_tree_text(
@@ -725,12 +722,7 @@ fn main() {
                     arcommon::display_path(&target_path)
                 );
             } else {
-                let selection = select_directories(
-                    &aggregated_sizes,
-                    &aggregated_content,
-                    &target_path,
-                    &query,
-                );
+                let selection = select_directories(&dirs, &target_path, &query);
                 if show_bars {
                     arcommon::out!(
                         "{}",
@@ -755,8 +747,7 @@ fn main() {
                 arcommon::display_path(&target_path)
             );
         } else {
-            let selection =
-                select_directories(&aggregated_sizes, &aggregated_content, &target_path, &query);
+            let selection = select_directories(&dirs, &target_path, &query);
             if show_bars {
                 arcommon::out!(
                     "{}",
@@ -782,7 +773,7 @@ fn main() {
     if args.debug {
         eprintln!("\n{}", "=== Operational Metrics ===".err_green().bold());
         eprintln!("Worker threads:        {}", args.jobs);
-        eprintln!("Total scanned folders: {}", raw_sizes.len());
+        eprintln!("Total scanned folders: {}", dirs.len());
         eprintln!("Execution time:        {:.2?}", duration);
         if let Some(report) = &duplicate_report {
             let st = &report.stats;

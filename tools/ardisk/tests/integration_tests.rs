@@ -6,9 +6,9 @@ use ardisk::report::{
 };
 use ardisk::types::{TypeAccumulator, TypeTable};
 use ardisk::{
-    Collect, DEFAULT_IGNORES, FileEntry, aggregate_sizes, build_config, build_config_with_exclude,
-    build_exclude_matcher, format_size, parallel_scan, parallel_scan_collect,
-    parallel_scan_with_files,
+    Collect, DEFAULT_IGNORES, DirNode, FileEntry, aggregate_sizes, build_config,
+    build_config_with_exclude, build_exclude_matcher, format_size, parallel_scan,
+    parallel_scan_collect, parallel_scan_with_files,
 };
 use glob::Pattern;
 use std::{
@@ -1394,6 +1394,21 @@ fn dir_maps(root: &Path, dirs: &[(&str, u64)]) -> HashMap<PathBuf, u64> {
         .collect()
 }
 
+/// Already rolled-up totals keyed by path, as the directory list
+/// `select_directories` takes. Selection only reads each directory's own
+/// values, so no parent links are needed.
+fn nodes(sizes: &HashMap<PathBuf, u64>, content: &HashMap<PathBuf, u64>) -> Vec<DirNode> {
+    sizes
+        .iter()
+        .map(|(path, &size)| DirNode {
+            path: path.clone(),
+            parent: None,
+            size,
+            content: content.get(path).copied().unwrap_or(0),
+        })
+        .collect()
+}
+
 fn selected(root: &Path, sel: &DirectorySelection) -> Vec<(String, u64)> {
     sel.entries
         .iter()
@@ -1427,7 +1442,7 @@ where
 fn select_directories_orders_by_size_then_path() {
     let root = PathBuf::from("/r");
     let all = dir_maps(&root, &[("", 100), ("b", 10), ("a", 10), ("c", 50)]);
-    let sel = select_directories(&all, &all, &root, &query(10));
+    let sel = select_directories(&nodes(&all, &all), &root, &query(10));
     assert_eq!(
         selected(&root, &sel),
         [
@@ -1444,9 +1459,9 @@ fn select_directories_orders_by_size_then_path() {
 fn select_directories_reports_truncation_only_when_something_was_left_out() {
     let root = PathBuf::from("/r");
     let all = dir_maps(&root, &[("", 100), ("a", 10), ("b", 5)]);
-    assert!(select_directories(&all, &all, &root, &query(2)).truncated);
-    assert!(!select_directories(&all, &all, &root, &query(3)).truncated);
-    assert!(!select_directories(&all, &all, &root, &query(4)).truncated);
+    assert!(select_directories(&nodes(&all, &all), &root, &query(2)).truncated);
+    assert!(!select_directories(&nodes(&all, &all), &root, &query(3)).truncated);
+    assert!(!select_directories(&nodes(&all, &all), &root, &query(4)).truncated);
 }
 
 #[test]
@@ -1458,7 +1473,7 @@ fn select_directories_summarize_lists_nothing_but_flags_truncation() {
         summarize: true,
         ..DirectoryQuery::default()
     };
-    let sel = select_directories(&all, &all, &root, &q);
+    let sel = select_directories(&nodes(&all, &all), &root, &q);
     assert!(sel.entries.is_empty());
     assert!(sel.truncated);
 }
@@ -1473,7 +1488,7 @@ fn select_directories_applies_max_depth_and_threshold() {
         threshold_bytes: Some(100),
         ..DirectoryQuery::default()
     };
-    let sel = select_directories(&all, &all, &root, &q);
+    let sel = select_directories(&nodes(&all, &all), &root, &q);
     assert_eq!(
         selected(&root, &sel),
         [(".".into(), 900), ("a".into(), 500)]
@@ -1494,7 +1509,7 @@ fn select_directories_hides_directories_without_matching_content_for_include() {
         include_active: true,
         ..DirectoryQuery::default()
     };
-    let sel = select_directories(&all, &content, &root, &q);
+    let sel = select_directories(&nodes(&all, &content), &root, &q);
     assert_eq!(
         selected(&root, &sel),
         [(".".into(), 9000), ("has".into(), 4100)]
@@ -1506,7 +1521,7 @@ fn json_directories_document_has_the_documented_shape() {
     let (_d, root) = make_sized_tree(&[("a/f", 10), ("a/b/g", 20), ("c", 5)]);
     let all = dir_maps(&root, &[("", 300), ("a", 200), ("a/b", 100)]);
     let q = query(10);
-    let sel = select_directories(&all, &all, &root, &q);
+    let sel = select_directories(&nodes(&all, &all), &root, &q);
     let summary = DirectorySummary {
         total_bytes: 300,
         files: 3,
@@ -1558,7 +1573,7 @@ fn json_echoes_filters_and_apparent_size_mode() {
     };
     let all = dir_maps(&root, &[("", 1)]);
     let q = query(5);
-    let sel = select_directories(&all, &all, &root, &q);
+    let sel = select_directories(&nodes(&all, &all), &root, &q);
     let summary = DirectorySummary {
         total_bytes: 1,
         files: 1,
@@ -1950,7 +1965,7 @@ fn by_type_total_equals_the_directory_content_total() {
     for apparent in [true, false] {
         let config = build_config(HashSet::new(), None, false, apparent, false);
         let out = ardisk::parallel_scan_report(root.clone(), 3, config, Collect::ByType);
-        let content = aggregate_sizes(&out.content_sizes, &root);
+        let content = aggregate_sizes(&out.content_sizes(), &root);
         assert_eq!(out.types.total_bytes, content[&root], "apparent={apparent}");
         assert_eq!(out.types.total_files, out.file_count);
         let per_type: u64 = out.types.rows.iter().map(|r| r.bytes).sum();
@@ -1967,7 +1982,7 @@ fn by_type_does_not_change_directory_totals() {
     };
     let plain = scan(Collect::Nothing);
     let typed = scan(Collect::ByType);
-    assert_eq!(plain.raw_sizes, typed.raw_sizes);
+    assert_eq!(plain.raw_sizes(), typed.raw_sizes());
     assert_eq!(plain.file_count, typed.file_count);
     assert!(plain.types.rows.is_empty());
     assert!(typed.files.is_empty(), "no individual files are kept");
@@ -2395,7 +2410,7 @@ fn skipped_hidden_hard_link_does_not_consume_the_inode() {
         assert_eq!(out.file_count, 1, "workers={workers}");
         assert_eq!(out.files.len(), 1);
         assert_eq!(out.files[0].path, root.join("real.bin"));
-        assert_eq!(out.content_sizes.get(&root).copied(), Some(100));
+        assert_eq!(out.content_sizes().get(&root).copied(), Some(100));
     }
     // Without the flag the pair still counts once.
     let out = ardisk::parallel_scan_report(
@@ -2514,7 +2529,7 @@ fn byte_reports_still_skip_symlinks() {
         Collect::Nothing,
     );
     assert_eq!(out.file_count, 1);
-    assert_eq!(out.content_sizes.values().sum::<u64>(), 10);
+    assert_eq!(out.content_sizes().values().sum::<u64>(), 10);
 }
 
 #[test]
@@ -2585,8 +2600,8 @@ fn one_file_system_changes_nothing_on_a_single_filesystem() {
                 ardisk::parallel_scan_report(root.clone(), 2, xdev_config(false, inodes), mode());
             let on =
                 ardisk::parallel_scan_report(root.clone(), 2, xdev_config(true, inodes), mode());
-            assert_eq!(off.raw_sizes, on.raw_sizes);
-            assert_eq!(off.content_sizes, on.content_sizes);
+            assert_eq!(off.raw_sizes(), on.raw_sizes());
+            assert_eq!(off.content_sizes(), on.content_sizes());
             assert_eq!(off.file_count, on.file_count);
             assert_eq!(off.types, on.types);
             let paths = |v: &[FileEntry]| {
@@ -2637,11 +2652,11 @@ fn one_file_system_does_not_enter_a_mount_point() {
         ardisk::parallel_scan_report(parent.clone(), 2, xdev_config(true, true), Collect::Nothing);
 
     assert!(
-        off.raw_sizes.contains_key(&mount),
+        off.raw_sizes().contains_key(&mount),
         "{mount:?} is scanned without -x"
     );
     assert!(
-        !on.raw_sizes.keys().any(|p| p.starts_with(&mount)),
+        !on.raw_sizes().keys().any(|p| p.starts_with(&mount)),
         "nothing at or below {mount:?} may be scanned with -x"
     );
     // Mount points are not counted either: like `du -x`, the whole entry is
@@ -2649,11 +2664,11 @@ fn one_file_system_does_not_enter_a_mount_point() {
     // must be on another device, and the totals differ by exactly those.
     use std::os::unix::fs::MetadataExt;
     let parent_dev = fs::metadata(&parent).unwrap().dev();
-    let off_agg = aggregate_sizes(&off.raw_sizes, &parent);
-    let on_agg = aggregate_sizes(&on.raw_sizes, &parent);
+    let off_agg = aggregate_sizes(&off.raw_sizes(), &parent);
+    let on_agg = aggregate_sizes(&on.raw_sizes(), &parent);
     let mut skipped = 0;
-    for dir in off.raw_sizes.keys() {
-        if dir.parent() == Some(parent.as_path()) && !on.raw_sizes.contains_key(dir) {
+    for dir in off.raw_sizes().keys() {
+        if dir.parent() == Some(parent.as_path()) && !on.raw_sizes().contains_key(dir) {
             let dev = fs::symlink_metadata(dir).unwrap().dev();
             assert_ne!(
                 dev, parent_dev,
@@ -2676,8 +2691,8 @@ fn one_file_system_still_scans_a_root_that_is_itself_a_mount_point() {
         ardisk::parallel_scan_report(mount.clone(), 2, xdev_config(false, true), Collect::Nothing);
     let on =
         ardisk::parallel_scan_report(mount.clone(), 2, xdev_config(true, true), Collect::Nothing);
-    assert!(on.raw_sizes.contains_key(&mount));
-    assert_eq!(on.raw_sizes, off.raw_sizes);
+    assert!(on.raw_sizes().contains_key(&mount));
+    assert_eq!(on.raw_sizes(), off.raw_sizes());
 }
 
 // ── --older-than / --newer-than ─────────────────────────────────────────────
@@ -2756,7 +2771,7 @@ fn older_than_keeps_only_old_files_in_every_mode() {
     let out = ardisk::parallel_scan_report(root.clone(), 2, cfg(), Collect::Largest(10));
     assert_eq!(listed(&out, &root), ["old/a.zip", "old/b.jpg"]);
     assert_eq!(out.file_count, 2);
-    assert_eq!(out.content_sizes.values().sum::<u64>(), 1500);
+    assert_eq!(out.content_sizes().values().sum::<u64>(), 1500);
 
     let out = ardisk::parallel_scan_report(root.clone(), 2, cfg(), Collect::ByType);
     let exts: Vec<_> = out
@@ -2823,7 +2838,7 @@ fn older_and_newer_with_the_same_age_partition_the_files() {
             all.file_count,
             "days={days}"
         );
-        let sum = |o: &ardisk::ScanOutput| o.content_sizes.values().sum::<u64>();
+        let sum = |o: &ardisk::ScanOutput| o.content_sizes().values().sum::<u64>();
         assert_eq!(sum(&old) + sum(&new), sum(&all), "days={days}");
     }
 }
@@ -2842,12 +2857,12 @@ fn age_filter_never_stops_directory_traversal() {
     );
     for dir in ["old", "mid", "new"] {
         assert!(
-            out.raw_sizes.contains_key(&root.join(dir)),
+            out.raw_sizes().contains_key(&root.join(dir)),
             "{dir} must be scanned"
         );
     }
     // Directories without matching files keep only their own entry cost.
-    assert_eq!(out.content_sizes[&root.join("new")], 0);
+    assert_eq!(out.content_sizes()[&root.join("new")], 0);
 }
 
 #[test]
@@ -2882,7 +2897,7 @@ fn age_filtered_directory_report_hides_directories_without_matching_files() {
         include_active: true,
         ..Default::default()
     };
-    let sel = select_directories(&all, &all_content, &root, &q);
+    let sel = select_directories(&nodes(&all, &all_content), &root, &q);
     let names: Vec<_> = sel
         .entries
         .iter()
@@ -2914,9 +2929,9 @@ fn progress_counters_end_equal_to_the_scan_totals() {
             });
             let out = ardisk::parallel_scan_report(root.clone(), workers, config, Collect::Nothing);
             let snap = progress.snapshot();
-            assert_eq!(snap.dirs, out.raw_sizes.len() as u64);
+            assert_eq!(snap.dirs, out.raw_sizes().len() as u64);
             assert_eq!(snap.files, out.file_count);
-            assert_eq!(snap.amount, aggregate_sizes(&out.raw_sizes, &root)[&root]);
+            assert_eq!(snap.amount, aggregate_sizes(&out.raw_sizes(), &root)[&root]);
         }
     }
 }

@@ -244,9 +244,6 @@ pub struct Task {
 /// The queue of directories still to scan is the walk's own
 /// ([`arcommon::walk::Queue`]).
 pub struct ScanShared {
-    /// Every directory scanned so far, each with its position in the final
-    /// list. Pushed when a directory's scan ends, so not in position order.
-    pub dirs: Mutex<Vec<(usize, DirNode)>>,
     /// The position the next directory gets, handed out when its scan
     /// starts: before any of its subdirectories is queued, so a child's
     /// position is always greater than its parent's.
@@ -441,7 +438,6 @@ pub fn parallel_scan_report(
     mode: Collect,
 ) -> ScanOutput {
     let shared = ScanShared {
-        dirs: Mutex::new(Vec::new()),
         next_dir: AtomicUsize::new(0),
         seen_inodes: Mutex::new(HashSet::new()),
         root_dev: if config.one_file_system {
@@ -456,20 +452,22 @@ pub fn parallel_scan_report(
         parent: None,
         ignore_stack: Arc::new(Vec::new()),
     };
-    // Each worker collects files into its own FileCollector; they are merged
-    // once the walk is done, so collecting needs no locking.
+    // Each worker records its directories and files in its own ScanWorker;
+    // they are merged once the walk is done, so recording needs no locking.
     let per_worker = walk::run(
         [root_task],
         workers,
-        || FileCollector::new(mode),
-        |collector, task, queue| scan_directory(task, &config, &shared, queue, collector),
+        || ScanWorker::new(mode),
+        |worker, task, queue| scan_directory(task, &config, &shared, queue, worker),
     );
 
     let mut collected = FileCollector::new(mode);
-    for c in per_worker {
-        collected.merge(c);
+    let mut dirs = Vec::with_capacity(per_worker.iter().map(|w| w.dirs.len()).sum());
+    for worker in per_worker {
+        collected.merge(worker.files);
+        dirs.extend(worker.dirs);
     }
-    let dirs = in_position_order(shared.dirs.into_inner().unwrap());
+    let dirs = in_position_order(dirs);
     let file_count = collected.files;
     let types = std::mem::take(&mut collected.types).into_table();
     ScanOutput {
@@ -477,6 +475,26 @@ pub fn parallel_scan_report(
         files: collected.into_files(),
         file_count,
         types,
+    }
+}
+
+/// What one scan worker records, merged with the other workers' once the
+/// walk is done (see [`parallel_scan_report`]).
+#[derive(Debug)]
+pub struct ScanWorker {
+    /// Files, as the scan's [`Collect`] mode asks.
+    pub files: FileCollector,
+    /// Each directory this worker scanned, with its position in the final
+    /// list (see [`DirNode`]), in the order this worker finished them.
+    pub dirs: Vec<(usize, DirNode)>,
+}
+
+impl ScanWorker {
+    pub fn new(mode: Collect) -> Self {
+        Self {
+            files: FileCollector::new(mode),
+            dirs: Vec::new(),
+        }
     }
 }
 
@@ -543,8 +561,9 @@ pub fn scan_directory(
     config: &ScanConfig,
     shared: &ScanShared,
     queue: &Queue<Task>,
-    collector: &mut FileCollector,
+    worker: &mut ScanWorker,
 ) {
+    let collector = &mut worker.files;
     let dir_path = task.path.as_path();
 
     // Retry on EINTR — macOS interrupts syscalls with signals from system
@@ -739,7 +758,7 @@ pub fn scan_directory(
         size: local_dir_size,
         content: local_content_size,
     };
-    shared.dirs.lock().unwrap().push((position, dir));
+    worker.dirs.push((position, dir));
 }
 
 /// Rolls every directory's `size` and `content` up into its ancestors, in

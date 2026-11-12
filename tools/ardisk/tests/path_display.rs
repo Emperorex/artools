@@ -1,4 +1,4 @@
-//! Directories are reported under PATH as typed, like du, not under the
+//! Directories are reported under PATH as typed, not under the
 //! canonical (absolute, symlink-free) root the scan walks from. --json
 //! keeps its own format.
 

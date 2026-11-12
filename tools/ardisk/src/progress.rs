@@ -55,6 +55,13 @@ impl ScanProgress {
         self.amount.fetch_add(amount, Ordering::Relaxed);
     }
 
+    /// Files counted after the walk (names of hard-linked files, which are
+    /// credited once all are known), outside any directory's own count.
+    pub fn add_files(&self, files: u64, amount: u64) {
+        self.files.fetch_add(files, Ordering::Relaxed);
+        self.amount.fetch_add(amount, Ordering::Relaxed);
+    }
+
     pub fn snapshot(&self) -> Snapshot {
         Snapshot {
             dirs: self.dirs.load(Ordering::Relaxed),

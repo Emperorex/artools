@@ -73,7 +73,7 @@ fn default_mode_prints_one_directories_document() {
     assert_eq!(entries[0]["path"], ".");
     assert_eq!(entries[0]["depth"], 0);
     assert_eq!(entries[0]["bytes"], doc["summary"]["total_bytes"]);
-    // Everything is counted by default, like du: node_modules too.
+    // Everything is counted by default: node_modules too.
     assert_eq!(doc["summary"]["files"], 4);
     // root + photos, backup, docs, node_modules, node_modules/pkg
     assert_eq!(doc["summary"]["directories"], 6);
@@ -662,7 +662,7 @@ fn no_hidden_and_skip_ignored_are_independent_flags() {
         args.extend(extra);
         json(&args).0["summary"]["total_bytes"].as_u64().unwrap()
     };
-    // Everything by default, like du.
+    // Everything by default.
     assert_eq!(total(&[]), 100 + 200 + 400 + 800);
     assert_eq!(total(&["--no-hidden"]), 200 + 400);
     assert_eq!(total(&["--skip-ignored"]), 400 + 800);

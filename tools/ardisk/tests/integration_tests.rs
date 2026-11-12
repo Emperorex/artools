@@ -301,9 +301,9 @@ fn hard_linked_files_are_only_counted_once_with_apparent_size() {
 
 // A sparse file's logical length (st_size) can be far larger than what is
 // actually allocated on disk — the "holes" in it don't consume blocks.
-// ardisk's default (physical) mode must reflect real disk usage, exactly
-// like `du`, while --apparent-size must reflect the logical length, exactly
-// like `du --apparent-size`. This proves both halves of that contract on the
+// ardisk's default (physical) mode must reflect real disk usage (allocated
+// blocks), while --apparent-size must reflect the logical length. This
+// proves both halves of that contract on the
 // same file: physical < apparent, and apparent == exact logical length. We
 // deliberately do NOT assert an exact physical byte count (e.g. "4096")
 // since block size and hole-filling behavior vary by filesystem — only that
@@ -2659,7 +2659,7 @@ fn one_file_system_does_not_enter_a_mount_point() {
         !on.raw_sizes().keys().any(|p| p.starts_with(&mount)),
         "nothing at or below {mount:?} may be scanned with -x"
     );
-    // Mount points are not counted either: like `du -x`, the whole entry is
+    // Mount points are not counted either: the whole entry is
     // skipped. Every directly nested directory missing from the -x scan
     // must be on another device, and the totals differ by exactly those.
     use std::os::unix::fs::MetadataExt;

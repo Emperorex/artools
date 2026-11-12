@@ -29,7 +29,7 @@ use std::{
     fs,
     path::{Path, PathBuf},
     sync::{
-        Arc, Mutex,
+        Arc,
         atomic::{AtomicBool, AtomicUsize, Ordering},
     },
 };
@@ -248,10 +248,6 @@ pub struct ScanShared {
     /// starts: before any of its subdirectories is queued, so a child's
     /// position is always greater than its parent's.
     pub next_dir: AtomicUsize,
-    /// Global (dev, ino) dedup set so hard-linked files are only counted once
-    /// per invocation, mirroring GNU `du`'s behavior. Shared across all worker
-    /// threads for the entire traversal, not just per-directory.
-    pub seen_inodes: Mutex<HashSet<(u64, u64)>>,
     /// Device of the scan root when `--one-file-system` is on: directories
     /// on any other device are not entered.
     pub root_dev: Option<u64>,
@@ -279,14 +275,14 @@ pub struct ScanConfig {
     /// scanned only if every filter lets it through. The scan root itself is
     /// never skipped, even if its own name starts with a dot.
     pub skip_hidden: bool,
-    /// `--inodes`: count inodes instead of bytes, like `du --inodes`. Every
+    /// `--inodes`: count inodes instead of bytes. Every
     /// entry that passes the filters costs 1: directories (the root
     /// included), regular files, symlinks and special files. A hard-linked
     /// inode is counted once per scan. `apparent_size` has no effect.
     pub inodes: bool,
     /// `-x` / `--one-file-system`: do not enter a directory that lives on a
     /// different device (filesystem, APFS volume, mount) than the scan root,
-    /// like `du -x` and `find -xdev`. Such a directory is skipped entirely,
+    /// like `find -xdev`. Such a directory is skipped entirely,
     /// the mount point included. Unix only; ignored elsewhere.
     pub one_file_system: bool,
     /// `--older-than` / `--newer-than`: only non-directory entries whose
@@ -439,7 +435,6 @@ pub fn parallel_scan_report(
 ) -> ScanOutput {
     let shared = ScanShared {
         next_dir: AtomicUsize::new(0),
-        seen_inodes: Mutex::new(HashSet::new()),
         root_dev: if config.one_file_system {
             device_of(&root)
         } else {
@@ -463,11 +458,19 @@ pub fn parallel_scan_report(
 
     let mut collected = FileCollector::new(mode);
     let mut dirs = Vec::with_capacity(per_worker.iter().map(|w| w.dirs.len()).sum());
+    let mut linked = Vec::new();
     for worker in per_worker {
         collected.merge(worker.files);
         dirs.extend(worker.dirs);
+        linked.extend(worker.linked);
     }
-    let dirs = in_position_order(dirs);
+    let mut dirs = in_position_order(dirs);
+    credit_linked(
+        linked,
+        &mut dirs,
+        &mut collected,
+        config.progress.as_deref(),
+    );
     let file_count = collected.files;
     let types = std::mem::take(&mut collected.types).into_table();
     ScanOutput {
@@ -487,6 +490,9 @@ pub struct ScanWorker {
     /// Each directory this worker scanned, with its position in the final
     /// list (see [`DirNode`]), in the order this worker finished them.
     pub dirs: Vec<(usize, DirNode)>,
+    /// Names of files with more than one link, not yet counted anywhere:
+    /// see [`credit_linked`].
+    pub linked: Vec<LinkedName>,
 }
 
 impl ScanWorker {
@@ -494,7 +500,57 @@ impl ScanWorker {
         Self {
             files: FileCollector::new(mode),
             dirs: Vec::new(),
+            linked: Vec::new(),
         }
+    }
+}
+
+/// One name of a file with more than one hard link, as found by the scan.
+#[derive(Debug, Clone)]
+pub struct LinkedName {
+    /// `(device, inode)`: the same for every name of one file.
+    pub inode: (u64, u64),
+    pub path: PathBuf,
+    /// Position of the directory holding this name (see [`DirNode`]).
+    pub dir: usize,
+    /// What the file costs: blocks, bytes or 1, as for any entry.
+    pub cost: u64,
+    /// Logical length, for `--duplicates`.
+    pub len: u64,
+    /// A regular file (counted in the file total), not e.g. a FIFO.
+    pub is_file: bool,
+}
+
+/// Counts each file with several hard links once, under the name
+/// that sorts first by path.
+///
+/// Workers meet the names of one file in an order that varies from run to
+/// run, so crediting whichever name was seen first would move the file
+/// between directories from one scan to the next (and make `--diff` report
+/// changes that did not happen). Choosing by path gives the same answer
+/// every time, with any number of workers.
+fn credit_linked(
+    mut linked: Vec<LinkedName>,
+    dirs: &mut [DirNode],
+    collected: &mut FileCollector,
+    progress: Option<&progress::ScanProgress>,
+) {
+    // Group the names of each file, smallest path first.
+    linked.sort_unstable_by(|a, b| a.inode.cmp(&b.inode).then_with(|| a.path.cmp(&b.path)));
+    linked.dedup_by_key(|name| name.inode);
+    let (mut files, mut amount) = (0, 0);
+    for name in linked {
+        let dir = &mut dirs[name.dir];
+        dir.size += name.cost;
+        dir.content += name.cost;
+        amount += name.cost;
+        if name.is_file {
+            files += 1;
+            collected.observe(name.cost, name.len, name.path);
+        }
+    }
+    if let Some(progress) = progress {
+        progress.add_files(files, amount);
     }
 }
 
@@ -690,7 +746,7 @@ pub fn scan_directory(
             }
 
             if let Ok(metadata) = entry.metadata() {
-                // --one-file-system: like `du -x`, also drop a non-directory
+                // --one-file-system: also drop a non-directory
                 // that is on another device (e.g. a bind-mounted file).
                 #[cfg(unix)]
                 if shared.root_dev.is_some_and(|dev| metadata.dev() != dev) {
@@ -702,36 +758,28 @@ pub fn scan_directory(
                 if config.mtime.is_active() && !config.mtime.matches(metadata.modified().ok()) {
                     continue;
                 }
-                // Hard-link dedup: if this inode has multiple links, only
-                // count its size the first time we see it across the whole
-                // traversal (GNU `du` semantics for a single invocation).
-                // Skip the lookup entirely for the common case (nlink == 1)
-                // to avoid needless mutex contention.
-                let already_counted = {
-                    #[cfg(unix)]
-                    {
-                        if metadata.nlink() > 1 {
-                            let key = (metadata.dev(), metadata.ino());
-                            let mut seen = shared.seen_inodes.lock().unwrap();
-                            !seen.insert(key)
-                        } else {
-                            false
-                        }
-                    }
-                    #[cfg(not(unix))]
-                    {
-                        false
-                    }
-                };
-
-                if !already_counted {
-                    let file_size = entry_cost(&metadata, config);
-                    local_content_size += file_size;
-                    local_dir_size += file_size;
-                    if metadata.is_file() {
-                        local_files += 1;
-                        collector.observe(file_size, metadata.len(), entry_path);
-                    }
+                let file_size = entry_cost(&metadata, config);
+                // A file with several hard links is counted once,
+                // under the name that sorts first. Which names exist is only
+                // known once the walk is done, so they are set aside and
+                // credited then (see `credit_linked`).
+                #[cfg(unix)]
+                if metadata.nlink() > 1 {
+                    worker.linked.push(LinkedName {
+                        inode: (metadata.dev(), metadata.ino()),
+                        path: entry_path,
+                        dir: position,
+                        cost: file_size,
+                        len: metadata.len(),
+                        is_file: metadata.is_file(),
+                    });
+                    continue;
+                }
+                local_content_size += file_size;
+                local_dir_size += file_size;
+                if metadata.is_file() {
+                    local_files += 1;
+                    collector.observe(file_size, metadata.len(), entry_path);
                 }
             }
         }

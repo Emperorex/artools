@@ -286,7 +286,7 @@ struct Args {
     #[arg(long, value_name = "AGE", value_parser = parse_age)]
     newer_than: Option<Age>,
 
-    /// Stay on the filesystem of PATH, like du -x and find -xdev: do not
+    /// Stay on the filesystem of PATH, like find -xdev: do not
     /// enter directories on other filesystems, mounts or APFS volumes (on
     /// macOS that includes firmlinked locations such as /Users when
     /// scanning /). Works with every mode. Unix only.
@@ -310,8 +310,8 @@ struct Args {
     )]
     bar: BarMode,
 
-    /// Show the directory report as a tree (like dust or ncdu, in plain
-    /// text): each directory under its parent, biggest first, with its share
+    /// Show the directory report as a tree, in plain text: each directory
+    /// under its parent, biggest first, with its share
     /// of the total. Lists the same directories as the flat report, so
     /// --top, --max-depth, --threshold and --include work as usual; combine
     /// with --inodes to draw inode counts. Text only.
@@ -321,7 +321,7 @@ struct Args {
     )]
     tree: bool,
 
-    /// Count inodes instead of bytes, like `du --inodes`: useful when a
+    /// Count inodes instead of bytes: useful when a
     /// filesystem runs out of inodes rather than space. Every directory
     /// (the scanned one included), file, symlink and special file counts as
     /// one; a hard-linked inode counts once. Shows the directories with the
@@ -356,7 +356,7 @@ struct Args {
 
     /// Skip what a repository leaves out: .git, node_modules and
     /// __pycache__ directories, and everything matched by .gitignore and
-    /// .ignore files. Off by default: ardisk counts every file, like du, so
+    /// .ignore files. Off by default: ardisk counts every file, so
     /// its total matches the space actually used.
     #[arg(long)]
     skip_ignored: bool,
@@ -370,7 +370,7 @@ struct Args {
     /// Skip hidden files and directories (names starting with '.'). A hidden
     /// directory is not entered, so everything below it is skipped too. The
     /// path you scan is never skipped, even if it is hidden. Independent of
-    /// --skip-ignored; by default everything is counted, like du.
+    /// --skip-ignored; by default everything is counted.
     #[arg(long = "no-hidden")]
     no_hidden: bool,
 
@@ -443,7 +443,7 @@ fn main() {
         return;
     }
 
-    // Everything is counted, like du, unless --skip-ignored (--no-ignore is
+    // Everything is counted unless --skip-ignored (--no-ignore is
     // the old spelling of the default and changes nothing).
     let ignore_dirs = build_ignore_dirs(args.skip_ignored, args.ignore.clone());
     let target_path = fs::canonicalize(&args.path).unwrap_or_else(|_| PathBuf::from(&args.path));

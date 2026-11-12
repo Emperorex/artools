@@ -22,7 +22,7 @@ ardisk [OPTIONS] [PATH]
 
 `PATH` defaults to `.` (current directory) if not specified.
 
-Directories and files are reported under `PATH` as you typed it, like `du`: `ardisk src` lists `src/lib`, `ardisk .` lists `./src`, and `ardisk` with no `PATH` lists `src` (the root itself is `.`). A symlinked `PATH` is reported under the link. `--json` is unaffected: it records the canonical absolute `root` and paths relative to it, so snapshots compare with `--diff` however `PATH` was spelled.
+Directories and files are reported under `PATH` as you typed it: `ardisk src` lists `src/lib`, `ardisk .` lists `./src`, and `ardisk` with no `PATH` lists `src` (the root itself is `.`). A symlinked `PATH` is reported under the link. `--json` is unaffected: it records the canonical absolute `root` and paths relative to it, so snapshots compare with `--diff` however `PATH` was spelled.
 
 ## Options
 
@@ -39,7 +39,7 @@ Directories and files are reported under `PATH` as you typed it, like `du`: `ard
 | `--by-type`         | —     | —         | Show files and total size per file extension, with each type's share (see [Breakdown by file type](#breakdown-by-file-type)) |
 | `--duplicates`      | —     | —         | Report groups of files with identical content; read-only (see [Finding duplicate files](#finding-duplicate-files)) |
 | `--min-size SIZE`   | —     | `1B`      | With `--duplicates`: ignore files smaller than `SIZE` (e.g. `1MB`) |
-| `--inodes`          | —     | —         | Count inodes instead of bytes, like `du --inodes` (see [Counting inodes](#counting-inodes)) |
+| `--inodes`          | —     | —         | Count inodes instead of bytes (see [Counting inodes](#counting-inodes)) |
 | `--si`              | —     | —         | Use powers of 1000 (`kB`, `MB`) instead of 1024, for output and size arguments (see [Size units](#size-units)) |
 | `--json`            | —     | —         | Print the result as one JSON document on stdout (see [JSON output](#json-output)) |
 | `--color WHEN`      | —     | `auto`    | `auto` (terminal only), `always` or `never`, decided separately for stdout and stderr (see [Colors](#colors)) |
@@ -50,7 +50,7 @@ Directories and files are reported under `PATH` as you typed it, like `du`: `ard
 | `--no-hidden`       | —     | —         | Skip files and directories whose name starts with `.` (see [Hidden files](#hidden-files)) |
 | `--skip-ignored`    | —     | —         | Skip `.git`, `node_modules`, `__pycache__` and `.gitignore`/`.ignore` matches; off by default, so totals match `du` (see [Ignored files](#ignored-files)) |
 | `--ignore NAME`     | —     | —         | Skip directories with this name at any depth; repeatable, applies with or without `--skip-ignored` |
-| `--one-file-system` | `-x`  | —         | Stay on the filesystem of `PATH`; don't enter other mounts or volumes, like `du -x` (see [Staying on one filesystem](#staying-on-one-filesystem)) |
+| `--one-file-system` | `-x`  | —         | Stay on the filesystem of `PATH`; don't enter other mounts or volumes (see [Staying on one filesystem](#staying-on-one-filesystem)) |
 | `--apparent-size`   | —     | —         | Use logical file sizes instead of block allocation — matches `du -sh`  |
 | `--jobs N`          | `-j`  | CPU-aware | Number of parallel worker threads (1–128; default is half the available cores, clamped to 1–16) |
 | `--progress`        | —     | —         | Show a live dirs/files/size counter on stderr while scanning (see [Progress](#progress)) |
@@ -73,7 +73,7 @@ scanning: 214,880 dirs, 1,902,311 files, 182.40 GB, 41.3s
 
 ## Size units
 
-By default sizes use powers of 1024, like `du -h` and `dust`: `1 KB` is 1,024 bytes, `1 MB` is 1,048,576. `--si` switches to powers of 1000, like `du --si` and the sizes drive vendors print: `1 kB` is 1,000 bytes, `1 MB` is 1,000,000.
+By default sizes use powers of 1024: `1 KB` is 1,024 bytes, `1 MB` is 1,048,576. `--si` switches to powers of 1000, as drive vendors print sizes: `1 kB` is 1,000 bytes, `1 MB` is 1,000,000.
 
 ```bash
 ardisk ~/Downloads --largest-files 1          #    1.43 MB  video.mp4
@@ -126,7 +126,7 @@ ardisk /var/log --newer-than 1y --older-than 30d   # a window: 30 days to 1 year
 
 ## Hidden files
 
-Like `du`, ardisk counts hidden files and directories (names starting with `.`) by default, so totals match `du -sh`. Pass `--no-hidden` to leave them out:
+ardisk counts hidden files and directories (names starting with `.`) by default, so totals match `du -sh`. Pass `--no-hidden` to leave them out:
 
 ```bash
 ardisk ~ --no-hidden             # only non-dot entries
@@ -143,7 +143,7 @@ ardisk ~/project --skip-ignored  # also leaves out .git, node_modules, ...
 
 ## Staying on one filesystem
 
-`-x` / `--one-file-system` keeps the scan on the filesystem that `PATH` is on, like `du -x` or `find -xdev`. A directory that belongs to another filesystem (a mount point, an external disk, a network share, another APFS volume) is skipped together with everything inside it, and so is any other entry on a different device. The scanned path itself is always included, even if it is a mount point.
+`-x` / `--one-file-system` keeps the scan on the filesystem that `PATH` is on, like `find -xdev`. A directory that belongs to another filesystem (a mount point, an external disk, a network share, another APFS volume) is skipped together with everything inside it, and so is any other entry on a different device. The scanned path itself is always included, even if it is a mount point.
 
 ```bash
 ardisk / -x                      # only the root filesystem
@@ -165,7 +165,7 @@ Notes:
 
 ## Ignored files
 
-Like `du`, ardisk counts every file by default, including `.git`, `node_modules`, `__pycache__` and anything a `.gitignore` lists, so the total is the space actually used on disk.
+ardisk counts every file by default, including `.git`, `node_modules`, `__pycache__` and anything a `.gitignore` lists, so the total is the space actually used on disk.
 
 To see only what belongs to a project itself, pass `--skip-ignored`. It leaves out:
 
@@ -240,7 +240,7 @@ What counts as a candidate is exactly what counts toward the directory totals:
 
 - **Same filters as the directory report.** `--include`, `--exclude`, `--ignore` and, with `--skip-ignored`, the built-in ignores and `.gitignore`/`.ignore` rules all apply, so `ardisk . --largest-files 10 --include "*.mp4"` finds the biggest videos, and files you excluded can never show up.
 - **Same sizes.** Physical block allocation by default, logical length with `--apparent-size`, so the numbers agree with the directory report.
-- **Hard links are listed once.** A file with several names (hard links) appears as a single entry. Which name is shown depends on which one the parallel scan reached first and can differ between runs; the size and the set of other files are unaffected. A name hidden by `--exclude`/`--include` never "uses up" the file, so another name that passes the filters is still reported.
+- **Hard links are listed once.** A file with several names (hard links) appears as a single entry. The name shown is the one that sorts first by path, so it is the same on every run. A name hidden by `--exclude`/`--include` never "uses up" the file, so another name that passes the filters is still reported.
 - **Symlinks are never listed** (and never followed), and directories are never listed.
 - **Ties** (equal sizes) are ordered by path, so the output is deterministic.
 - If the tree has fewer than `N` files, all of them are printed.
@@ -324,7 +324,7 @@ Groups are formed from the 256-bit hash plus the length. Files are not additiona
 
 - Same filters as the directory report: `--include`, `--exclude`, `--ignore` and `--skip-ignored` apply, so `--include "*.jpg"` looks for duplicate photos only.
 - Only regular files. Symlinks are never followed or listed.
-- **Hard links are not duplicates.** Several names for one file occupy the space once, so they never form a group on their own. If a hard-linked file also has a separate copy, the group holds two entries (one of the hard-link names and the copy); which name is shown can vary between runs.
+- **Hard links are not duplicates.** Several names for one file occupy the space once, so they never form a group on their own. If a hard-linked file also has a separate copy, the group holds two entries: the hard-link name that sorts first by path, and the copy.
 - **Empty files are never reported** (all empty files are trivially identical). `--min-size` can only raise this floor.
 - Sizes in this report are **logical file lengths** (as with `--apparent-size`), because identical content means identical length; physical block allocation is not used.
 - Files that cannot be read (permissions, vanished, changed) are skipped with a one-line warning on stderr; `--debug` lists them.
@@ -339,7 +339,7 @@ Groups are formed from the 256-bit hash plus the length. Files are not additiona
 
 ## Counting inodes
 
-When a filesystem fails with "No space left on device" while `df` still shows free space, it has usually run out of **inodes**, not bytes. `--inodes` counts them per directory, like `du --inodes`:
+When a filesystem fails with "No space left on device" while `df` still shows free space, it has usually run out of **inodes**, not bytes. `--inodes` counts them per directory:
 
 ```bash
 ardisk /var --inodes --top 5
@@ -625,7 +625,7 @@ On **Windows**, logical file size is always used regardless of the flag.
 
 Sizes are rolled up bottom-up in a single pass — parent directories always include the full recursive size of all children. Symlinks are never counted to prevent double-counting.
 
-**Hard links** are also deduplicated: if two directory entries share the same inode (`fs::hard_link`, or `ln` without `-s`), that file is counted once, not once per name — in both physical and `--apparent-size` mode. A file with 100MB of content and two hard-linked names contributes 100MB to the total, matching how `du` itself counts hard links. Which of the two paths gets "credit" for that size in a per-directory breakdown can vary between runs, since scanning is parallel; the grand total is unaffected either way.
+**Hard links** are also deduplicated: if two directory entries share the same inode (`fs::hard_link`, or `ln` without `-s`), that file is counted once, not once per name — in both physical and `--apparent-size` mode. A file with 100MB of content and two hard-linked names contributes 100MB to the total, matching how `du` itself counts hard links. In the per-directory breakdown, the size is credited to the name that sorts first by path (`a/file` before `b/file`), whichever name the parallel scan reaches first, so the numbers are the same on every run and `--diff` never reports a hard-linked file moving between directories. Earlier versions credited whichever name the scan reached first, so comparing with an older snapshot can show such a move once.
 
 ## Colors
 

@@ -1,5 +1,4 @@
-//! `--tree`: the directory report drawn as a hierarchy, like `dust` or a
-//! text-mode `ncdu`.
+//! `--tree`: the directory report drawn as a hierarchy.
 //!
 //! The tree shows exactly the directories the flat report would list (see
 //! [`select_directories`](crate::report::select_directories)); only the

@@ -1,4 +1,4 @@
-//! By default ardisk counts every file, like du: .git, node_modules,
+//! By default ardisk counts every file: .git, node_modules,
 //! __pycache__ and gitignored entries included. --skip-ignored brings back
 //! the filtered view; --ignore, --exclude and --no-hidden apply either way.
 

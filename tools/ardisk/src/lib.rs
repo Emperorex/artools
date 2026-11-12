@@ -82,9 +82,14 @@ impl TopFiles {
         }
     }
 
-    /// Considers a file for inclusion. Takes the path by value so rejected
-    /// candidates cost nothing beyond dropping it.
+    /// Considers a file for inclusion.
     pub fn offer(&mut self, size: u64, path: PathBuf) {
+        self.offer_with(size, || path);
+    }
+
+    /// Like [`offer`](Self::offer), but builds the path only for a file
+    /// that is kept: most files of a big scan are rejected on size alone.
+    pub fn offer_with(&mut self, size: u64, path: impl FnOnce() -> PathBuf) {
         if self.limit == 0 {
             return;
         }
@@ -94,7 +99,7 @@ impl TopFiles {
         {
             return;
         }
-        self.heap.push(Reverse(FileEntry { size, path }));
+        self.heap.push(Reverse(FileEntry { size, path: path() }));
         if self.heap.len() > self.limit {
             self.heap.pop();
         }
@@ -167,22 +172,26 @@ impl FileCollector {
     ///
     /// `size` is the size under the active `--apparent-size` rule, `len` is
     /// the logical length (`metadata.len()`).
-    fn observe(&mut self, size: u64, len: u64, path: PathBuf) {
+    /// Records one file. `path` builds its full path, and is called only
+    /// by the modes that report paths (`--largest-files`, `--duplicates`
+    /// for files big enough): in the default mode a scan of a million
+    /// files would otherwise allocate a million paths only to drop them.
+    fn observe(&mut self, size: u64, len: u64, name: &str, path: impl FnOnce() -> PathBuf) {
         self.files += 1;
         match self.mode {
             Collect::Nothing => {}
-            Collect::Largest(_) => self.top.offer(size, path),
+            Collect::Largest(_) => self.top.offer_with(size, path),
             // Content identity is a property of the logical length, so
             // candidates are keyed by `len`, not by block allocation.
             Collect::Duplicates { min_len } => {
                 if len >= min_len.max(1) {
-                    self.candidates.push(FileEntry { size: len, path });
+                    self.candidates.push(FileEntry {
+                        size: len,
+                        path: path(),
+                    });
                 }
             }
-            Collect::ByType => {
-                let name = path.file_name().map(|n| n.to_string_lossy());
-                self.types.add(name.as_deref().unwrap_or(""), size);
-            }
+            Collect::ByType => self.types.add(name, size),
         }
     }
 
@@ -546,7 +555,9 @@ fn credit_linked(
         amount += name.cost;
         if name.is_file {
             files += 1;
-            collected.observe(name.cost, name.len, name.path);
+            let file_name = name.path.file_name().map(|n| n.to_string_lossy());
+            let file_name = file_name.as_deref().unwrap_or("").to_owned();
+            collected.observe(name.cost, name.len, &file_name, || name.path);
         }
     }
     if let Some(progress) = progress {
@@ -672,6 +683,10 @@ pub fn scan_directory(
     let mut local_files = 0u64; // regular files counted, for --progress
     let mut local_dir_size = 0u64; // files + directory inode cost
 
+    // --exclude and --skip-ignored match full paths, so with either on
+    // every entry's path is built up front.
+    let filters_need_path = config.exclude.is_some() || config.respect_gitignore;
+
     for entry in entries {
         let file_type = match entry.file_type() {
             Ok(ft) => ft,
@@ -686,8 +701,13 @@ pub fn scan_directory(
 
         let os_file_name = entry.file_name();
         let file_name = os_file_name.to_string_lossy();
-        let entry_path = entry.path();
         let is_dir = file_type.is_dir();
+        // The full path, built only when something needs it now: a
+        // directory is queued by its path, and --exclude / --skip-ignored
+        // match on it. A file otherwise builds it later, and only if it is
+        // reported by path (see `FileCollector::observe`) or has several
+        // hard links.
+        let entry_path = (is_dir || filters_need_path).then(|| entry.path());
 
         // --no-hidden: checked on the entry's own name only. Skipping a
         // directory here means it is never queued, so its contents are not
@@ -702,17 +722,21 @@ pub fn scan_directory(
         // The entry is matched on its own path only; a directory that is
         // merely the parent of excluded content (e.g. `target` for
         // `target/**`) is still traversed.
-        if let Some(exclude) = &config.exclude
-            && exclude.matched(&entry_path, is_dir).is_ignore()
+        if let (Some(exclude), Some(path)) = (&config.exclude, &entry_path)
+            && exclude.matched(path, is_dir).is_ignore()
         {
             continue;
         }
 
-        if config.respect_gitignore && is_ignored(&ignore_stack, &entry_path, is_dir) {
+        if config.respect_gitignore
+            && let Some(path) = &entry_path
+            && is_ignored(&ignore_stack, path, is_dir)
+        {
             continue;
         }
 
         if is_dir {
+            let entry_path = entry_path.unwrap_or_else(|| entry.path());
             if config.ignore_dirs.contains(file_name.as_ref()) {
                 continue;
             }
@@ -767,7 +791,7 @@ pub fn scan_directory(
                 if metadata.nlink() > 1 {
                     worker.linked.push(LinkedName {
                         inode: (metadata.dev(), metadata.ino()),
-                        path: entry_path,
+                        path: entry_path.unwrap_or_else(|| entry.path()),
                         dir: position,
                         cost: file_size,
                         len: metadata.len(),
@@ -779,7 +803,9 @@ pub fn scan_directory(
                 local_dir_size += file_size;
                 if metadata.is_file() {
                     local_files += 1;
-                    collector.observe(file_size, metadata.len(), entry_path);
+                    collector.observe(file_size, metadata.len(), &file_name, || {
+                        entry_path.unwrap_or_else(|| entry.path())
+                    });
                 }
             }
         }
@@ -1040,6 +1066,25 @@ mod tests {
             top.offer(size, name.into());
         }
         assert_eq!(tf_names(top), [(50, "b".into()), (20, "d".into())]);
+    }
+
+    #[test]
+    fn top_files_builds_a_path_only_for_a_file_it_keeps() {
+        let built = std::cell::Cell::new(0);
+        let mut top = super::TopFiles::new(2);
+        for (size, name) in [(50, "a"), (40, "b"), (1, "c"), (2, "d"), (45, "e")] {
+            top.offer_with(size, || {
+                built.set(built.get() + 1);
+                name.into()
+            });
+        }
+        // c and d are smaller than both kept files: rejected unbuilt.
+        assert_eq!(built.get(), 3);
+        assert_eq!(tf_names(top), [(50, "a".into()), (45, "e".into())]);
+
+        // Nothing is ever built when nothing is kept.
+        let mut none = super::TopFiles::new(0);
+        none.offer_with(10, || panic!("path built for --largest-files 0"));
     }
 
     #[test]

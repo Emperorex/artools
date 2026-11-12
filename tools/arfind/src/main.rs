@@ -439,6 +439,14 @@ fn main() {
         eprintln!("Execution time:        {:.2?}", duration);
     }
 
+    // As argrep: a directory or entry that could not be read means results
+    // may be missing, so say so and exit 1.
+    let read_errors = stats.read_errors.load(Ordering::Relaxed);
+    if read_errors > 0 {
+        arcommon::fs::print_unreadable_summary("arfind", read_errors, args.debug);
+        exit_code = 1;
+    }
+
     if exit_code != 0 {
         std::process::exit(exit_code);
     }

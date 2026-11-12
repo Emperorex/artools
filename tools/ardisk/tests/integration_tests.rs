@@ -1424,6 +1424,7 @@ fn meta(root: &Path) -> ReportMeta {
         root: root.to_path_buf(),
         apparent_size: false,
         filters: Filters::default(),
+        errors: 0,
     }
 }
 
@@ -1570,6 +1571,7 @@ fn json_echoes_filters_and_apparent_size_mode() {
             older_than: Some("1y".into()),
             newer_than: None,
         },
+        errors: 0,
     };
     let all = dir_maps(&root, &[("", 1)]);
     let q = query(5);

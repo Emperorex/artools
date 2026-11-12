@@ -406,6 +406,9 @@ pub struct ScanOutput {
     /// holds directly (not yet rolled up; see [`roll_up`]). The scan root is
     /// first. A directory that could not be read is not listed.
     pub dirs: Vec<DirNode>,
+    /// Directories that could not be listed and entries whose details
+    /// could not be read: what they hold is missing from the totals.
+    pub read_errors: usize,
     /// Individual files recorded according to the [`Collect`] mode.
     pub files: Vec<FileEntry>,
     /// Regular files that contributed to the totals: symlinks and paths
@@ -468,10 +471,12 @@ pub fn parallel_scan_report(
     let mut collected = FileCollector::new(mode);
     let mut dirs = Vec::with_capacity(per_worker.iter().map(|w| w.dirs.len()).sum());
     let mut linked = Vec::new();
+    let mut read_errors = 0;
     for worker in per_worker {
         collected.merge(worker.files);
         dirs.extend(worker.dirs);
         linked.extend(worker.linked);
+        read_errors += worker.read_errors;
     }
     let mut dirs = in_position_order(dirs);
     credit_linked(
@@ -484,6 +489,7 @@ pub fn parallel_scan_report(
     let types = std::mem::take(&mut collected.types).into_table();
     ScanOutput {
         dirs,
+        read_errors,
         files: collected.into_files(),
         file_count,
         types,
@@ -502,6 +508,8 @@ pub struct ScanWorker {
     /// Names of files with more than one link, not yet counted anywhere:
     /// see [`credit_linked`].
     pub linked: Vec<LinkedName>,
+    /// Read failures this worker met (see [`ScanOutput::read_errors`]).
+    pub read_errors: usize,
 }
 
 impl ScanWorker {
@@ -510,7 +518,16 @@ impl ScanWorker {
             files: FileCollector::new(mode),
             dirs: Vec::new(),
             linked: Vec::new(),
+            read_errors: 0,
         }
+    }
+}
+
+/// Counts one read failure, printing it with `--debug`.
+fn read_error(count: &mut usize, config: &ScanConfig, path: &Path, err: &std::io::Error) {
+    *count += 1;
+    if config.debug {
+        arcommon::fs::print_read_error("ardisk", path, err);
     }
 }
 
@@ -598,17 +615,17 @@ fn size_from_metadata(metadata: &fs::Metadata, apparent_size: bool) -> u64 {
 }
 
 /// Whether a directory entry lives on device `dev`. An entry that cannot be
-/// stat'ed counts as foreign, so `--one-file-system` never wanders into
-/// something it cannot identify.
-fn same_device(entry: &fs::DirEntry, dev: u64) -> bool {
+/// stat'ed is an error: it is not entered, so `--one-file-system` never
+/// wanders into something it cannot identify, and the caller counts it.
+fn same_device(entry: &fs::DirEntry, dev: u64) -> std::io::Result<bool> {
     #[cfg(unix)]
     {
-        entry.metadata().is_ok_and(|m| m.dev() == dev)
+        entry.metadata().map(|m| m.dev() == dev)
     }
     #[cfg(not(unix))]
     {
         let _ = (entry, dev);
-        true
+        Ok(true)
     }
 }
 
@@ -633,23 +650,18 @@ pub fn scan_directory(
     let collector = &mut worker.files;
     let dir_path = task.path.as_path();
 
-    // Retry on EINTR — macOS interrupts syscalls with signals from system
-    // processes (Spotlight, sandboxd, etc.). Safe to retry unconditionally.
-    let entries: Vec<_> = loop {
-        match fs::read_dir(dir_path) {
-            Ok(entries) => break entries.flatten().collect(),
-            Err(err) if err.kind() == std::io::ErrorKind::Interrupted => continue,
-            Err(err) => {
-                if config.debug {
-                    eprintln!(
-                        "{}: {}: {}",
-                        "ardisk".err_red(),
-                        arcommon::display_path(dir_path),
-                        err
-                    );
-                }
-                return;
-            }
+    // A directory that can't be listed, and any entry that fails while it
+    // is listed, counts as unreadable (see ScanOutput::read_errors). The
+    // helper also retries an open interrupted by a signal, which macOS
+    // sends often (Spotlight, sandboxd and the like).
+    let read_errors = &mut worker.read_errors;
+    let entries = match arcommon::fs::read_dir_entries(dir_path, |err| {
+        read_error(read_errors, config, dir_path, &err)
+    }) {
+        Ok(entries) => entries,
+        Err(err) => {
+            read_error(read_errors, config, dir_path, &err);
+            return;
         }
     };
 
@@ -744,17 +756,24 @@ pub fn scan_directory(
             // point (or an APFS volume / firmlink target); skip it whole.
             // `entry.metadata()` does not follow symlinks, and for a mount
             // point it reports the mounted filesystem's device.
-            if let Some(root_dev) = shared.root_dev
-                && !same_device(&entry, root_dev)
-            {
-                if config.debug {
-                    eprintln!(
-                        "{}: {}: on another filesystem, skipped (--one-file-system)",
-                        "ardisk".err_yellow(),
-                        arcommon::display_path(&entry_path)
-                    );
+            if let Some(root_dev) = shared.root_dev {
+                match same_device(&entry, root_dev) {
+                    Ok(true) => {}
+                    Ok(false) => {
+                        if config.debug {
+                            eprintln!(
+                                "{}: {}: on another filesystem, skipped (--one-file-system)",
+                                "ardisk".err_yellow(),
+                                arcommon::display_path(&entry_path)
+                            );
+                        }
+                        continue;
+                    }
+                    Err(err) => {
+                        read_error(&mut worker.read_errors, config, &entry_path, &err);
+                        continue;
+                    }
                 }
-                continue;
             }
             queue.push(Task {
                 path: entry_path,
@@ -769,7 +788,17 @@ pub fn scan_directory(
                 continue;
             }
 
-            if let Ok(metadata) = entry.metadata() {
+            // A file whose details can't be read is left out of the totals,
+            // and counted as unreadable so the user is told.
+            let metadata = match entry.metadata() {
+                Ok(metadata) => metadata,
+                Err(err) => {
+                    let path = entry_path.unwrap_or_else(|| entry.path());
+                    read_error(&mut worker.read_errors, config, &path, &err);
+                    continue;
+                }
+            };
+            {
                 // --one-file-system: also drop a non-directory
                 // that is on another device (e.g. a bind-mounted file).
                 #[cfg(unix)]

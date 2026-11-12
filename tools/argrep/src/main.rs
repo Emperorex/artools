@@ -1000,19 +1000,7 @@ fn main() {
     // grep-like tool, especially in scripts checking $?.
     let io_error_count = stats.io_errors.load(Ordering::Relaxed);
     if io_error_count > 0 {
-        eprintln!(
-            "{}",
-            format!(
-                "argrep: {} file(s)/director(ies) could not be read{}",
-                io_error_count,
-                if args.debug {
-                    ""
-                } else {
-                    " (rerun with --debug for details)"
-                }
-            )
-            .err_red()
-        );
+        arcommon::fs::print_unreadable_summary("argrep", io_error_count, args.debug);
     }
 
     if args.quiet {

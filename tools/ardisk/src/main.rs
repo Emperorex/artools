@@ -545,6 +545,7 @@ fn main() {
     let status: Option<Status>;
     let ScanOutput {
         mut dirs,
+        read_errors,
         files: collected_files,
         file_count,
         types,
@@ -630,6 +631,7 @@ fn main() {
                 older_than: args.older_than.as_ref().map(|a| a.text.clone()),
                 newer_than: args.newer_than.as_ref().map(|a| a.text.clone()),
             },
+            errors: read_errors,
         };
         let stdout = io::stdout();
         let mut out = io::BufWriter::new(stdout.lock());
@@ -811,6 +813,14 @@ fn main() {
             );
         }
     }
+
+    // As in argrep and arfind: a directory or file that could not be read
+    // means the numbers above are missing something, so say so and exit 1.
+    let unreadable = read_errors + duplicate_report.as_ref().map_or(0, |r| r.unreadable.len());
+    if unreadable > 0 {
+        arcommon::fs::print_unreadable_summary("ardisk", unreadable, args.debug);
+        std::process::exit(1);
+    }
 }
 
 /// `--diff BEFORE AFTER`: compares two `--json` snapshots; no scan.
@@ -919,25 +929,18 @@ fn print_duplicates(report: &DuplicateReport, top: usize, summarize: bool) {
 }
 
 /// Warns on stderr about files the duplicate search had to skip.
+/// With `--debug`, prints each file `--duplicates` could not read while
+/// comparing, like any other read failure. They are counted in the summary
+/// at the end of `main`.
 fn warn_unreadable(report: &DuplicateReport, debug: bool) {
-    if !report.unreadable.is_empty() {
-        eprintln!(
-            "{}",
-            format!(
-                "ardisk: skipped {} file(s) that could not be read{}",
-                report.unreadable.len(),
-                if debug {
-                    ":"
-                } else {
-                    " (use --debug to list them)"
-                }
-            )
-            .err_yellow()
-        );
-        if debug {
-            for (path, reason) in &report.unreadable {
-                eprintln!("  {}: {}", arcommon::display_path(path), reason);
-            }
+    if debug {
+        for (path, reason) in &report.unreadable {
+            eprintln!(
+                "{}: {}: {}",
+                "ardisk".err_red(),
+                arcommon::display_path(path),
+                reason
+            );
         }
     }
 }

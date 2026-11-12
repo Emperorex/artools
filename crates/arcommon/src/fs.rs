@@ -1,6 +1,66 @@
 //! Small platform helpers.
 
-use std::{borrow::Cow, fs::Metadata, io, path::Path};
+use std::{
+    borrow::Cow,
+    fs::{self, DirEntry, Metadata},
+    io,
+    path::Path,
+};
+
+use crate::color::ErrPaint;
+
+/// The entries of directory `dir`, for a walk.
+///
+/// Opening is retried when a signal interrupts it (macOS sends these often,
+/// from Spotlight, sandboxd and the like). An entry that fails while the
+/// directory is being listed is passed to `on_error` rather than dropped,
+/// so the caller can count it as unreadable like any other read failure.
+pub fn read_dir_entries(
+    dir: &Path,
+    mut on_error: impl FnMut(io::Error),
+) -> io::Result<Vec<DirEntry>> {
+    let listing = loop {
+        match fs::read_dir(dir) {
+            Ok(listing) => break listing,
+            Err(err) if err.kind() == io::ErrorKind::Interrupted => continue,
+            Err(err) => return Err(err),
+        }
+    };
+    let mut entries = Vec::new();
+    for entry in listing {
+        match entry {
+            Ok(entry) => entries.push(entry),
+            Err(err) => on_error(err),
+        }
+    }
+    Ok(entries)
+}
+
+/// Prints one read failure, as every tool does with `--debug`:
+/// `TOOL: PATH: reason`.
+pub fn print_read_error(tool: &str, path: &Path, err: &io::Error) {
+    eprintln!(
+        "{}: {}: {}",
+        tool.err_red(),
+        crate::display_path(path),
+        error_text(err)
+    );
+}
+
+/// The note every tool prints at the end of a run in which `count` files or
+/// directories could not be read (the run then exits 1, or 2 for
+/// `argrep -q`).
+pub fn print_unreadable_summary(tool: &str, count: usize, debug: bool) {
+    let hint = if debug {
+        ""
+    } else {
+        " (rerun with --debug for details)"
+    };
+    eprintln!(
+        "{}",
+        format!("{tool}: {count} file(s)/director(ies) could not be read{hint}").err_red()
+    );
+}
 
 /// An I/O error as a short message for the user, without the
 /// " (os error N)" that `io::Error`'s `Display` appends: `No such file or
@@ -55,6 +115,22 @@ pub fn device_of_metadata(metadata: &Metadata) -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn read_dir_entries_lists_a_directory_and_reports_open_failures() {
+        let dir = tempfile::TempDir::new().unwrap();
+        std::fs::write(dir.path().join("a"), "").unwrap();
+        std::fs::create_dir(dir.path().join("b")).unwrap();
+        let mut names: Vec<_> = read_dir_entries(dir.path(), |e| panic!("{e}"))
+            .unwrap()
+            .into_iter()
+            .map(|e| e.file_name())
+            .collect();
+        names.sort();
+        assert_eq!(names, ["a", "b"]);
+        let missing = read_dir_entries(&dir.path().join("nope"), |e| panic!("{e}"));
+        assert_eq!(missing.unwrap_err().kind(), io::ErrorKind::NotFound);
+    }
 
     #[test]
     fn error_text_drops_the_os_error_number() {

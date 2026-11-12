@@ -190,15 +190,23 @@ fn unreadable_files_are_warned_about_on_stderr_not_stdout() {
     if fs::File::open(&locked).is_ok() {
         return; // running as root: permissions are not enforced
     }
-    let (doc, stderr) = json(&[p(&root), "--json", "--duplicates"]);
+    let out = ardisk(&[p(&root), "--json", "--duplicates"]);
     fs::set_permissions(&locked, fs::Permissions::from_mode(0o644)).unwrap();
 
+    // Still exactly one JSON document on stdout, with the file counted...
+    let stdout = String::from_utf8(out.stdout).expect("stdout is UTF-8");
+    let doc: Value = serde_json::from_str(&stdout)
+        .unwrap_or_else(|e| panic!("stdout is not exactly one JSON document ({e}):\n{stdout}"));
     assert_eq!(doc["summary"]["unreadable_files"], 1);
     assert_eq!(doc["summary"]["groups"], 1);
+    // ...and, as for any file that could not be read, the summary on
+    // stderr and exit status 1.
+    let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
-        stderr.contains("could not be read"),
+        stderr.contains("ardisk: 1 file(s)/director(ies) could not be read"),
         "stderr was {stderr:?}"
     );
+    assert_eq!(out.status.code(), Some(1));
 }
 
 #[test]

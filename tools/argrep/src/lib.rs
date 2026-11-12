@@ -791,18 +791,18 @@ pub fn scan_and_grep(
 
     stats.total_dirs.fetch_add(1, Ordering::Relaxed);
 
-    let entries: Vec<_> = match fs::read_dir(dir_path) {
-        Ok(entries) => entries.flatten().collect(),
+    // A directory that can't be listed, and any entry that fails while it
+    // is listed, counts as unreadable (see the summary in main).
+    let read_error = |err: std::io::Error| {
+        stats.io_errors.fetch_add(1, Ordering::Relaxed);
+        if config.debug {
+            arcommon::fs::print_read_error("argrep", dir_path, &err);
+        }
+    };
+    let entries = match arcommon::fs::read_dir_entries(dir_path, read_error) {
+        Ok(entries) => entries,
         Err(err) => {
-            stats.io_errors.fetch_add(1, Ordering::Relaxed);
-            if config.debug {
-                eprintln!(
-                    "{}: {}: {}",
-                    "argrep".err_red(),
-                    display_path(dir_path),
-                    err
-                );
-            }
+            read_error(err);
             return;
         }
     };

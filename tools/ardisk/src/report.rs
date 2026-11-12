@@ -178,6 +178,9 @@ pub struct ReportMeta {
     /// `--apparent-size` was given.
     pub apparent_size: bool,
     pub filters: Filters,
+    /// Directories and files that could not be read; what they hold is
+    /// missing from the report.
+    pub errors: usize,
 }
 
 /// Totals of a directory scan.
@@ -201,6 +204,9 @@ struct Header<'a> {
     #[serde(skip_serializing_if = "Option::is_none")]
     size_mode: Option<&'static str>,
     filters: &'a Filters,
+    /// Directories and files that could not be read (0 for a complete
+    /// scan); what they hold is missing from the numbers below.
+    errors: usize,
 }
 
 /// Turns paths into root-relative, `/`-separated strings and counts how many
@@ -269,6 +275,7 @@ fn header<'a>(
         root: fmt.absolute(&meta.root),
         size_mode: Some(size_mode(apparent)),
         filters: &meta.filters,
+        errors: meta.errors,
     }
 }
 
@@ -390,6 +397,7 @@ pub fn write_inodes<W: Write>(
         root: fmt.absolute(&meta.root),
         size_mode: None,
         filters: &meta.filters,
+        errors: meta.errors,
     };
     let entries = selection
         .entries

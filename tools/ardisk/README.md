@@ -427,6 +427,7 @@ Every document is one object with the same header:
 | `root`           | Canonical absolute path that was scanned |
 | `size_mode`      | Absent for `inodes`. `"disk"` (block allocation, the default) or `"apparent"` (logical length, `--apparent-size`). Always `"apparent"` for `duplicates`. |
 | `filters`        | `include` (string or `null`), `exclude` (array), `ignore` (array, extra `--ignore` names only), `no_ignore` (bool: `true` unless `--skip-ignored`, i.e. everything was counted), `no_hidden` (bool), `one_file_system` (bool), `older_than` / `newer_than` (string as given, or `null`) |
+| `errors`         | Directories and files that could not be read (`0` for a complete scan). What they hold is missing from the numbers, and ardisk exits `1`. |
 | `params`         | Options that shape the result, mode-specific (below) |
 | `summary`        | Totals for the **whole scan**, mode-specific (below) |
 | `entries` / `groups` / `types` | The listed items |
@@ -729,7 +730,7 @@ ardisk / -j 8 --top 20
 | Code | Meaning                                                 |
 |------|---------------------------------------------------------|
 | `0`  | Success                                                 |
-| `1`  | `PATH` doesn't exist, isn't a directory or can't be read (reported as `ardisk: PATH: reason`, with no report printed); invalid `--threshold`/`--include`/`--exclude` value or config error; `--diff` snapshots that can't be read or compared |
+| `1`  | `PATH` doesn't exist, isn't a directory or can't be read (reported as `ardisk: PATH: reason`, with no report printed); a directory or file below it could not be read (the report covers the rest, then `ardisk: N file(s)/director(ies) could not be read`; `--debug` names each one); invalid `--threshold`/`--include`/`--exclude` value or config error; `--diff` snapshots that can't be read or compared |
 | `2`  | Invalid CLI usage — bad or missing flag (e.g. `-j 0`, `--largest-files 0`) |
 
 **Closed output.** When the reader of stdout goes away (`ardisk ... | head`), ardisk stops at once and exits with `0`, quietly: that is a normal way to cut output short. If writing fails for another reason (disk full, an I/O error on a redirected file), ardisk prints `error: cannot write output: ...` and exits with `1`.

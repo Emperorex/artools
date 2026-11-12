@@ -395,6 +395,10 @@ pub struct SearchStats {
     pub total_files: Arc<AtomicUsize>,
     pub total_dirs: Arc<AtomicUsize>,
     pub matched_count: Arc<AtomicUsize>,
+    /// Directories that could not be listed, and entries whose details a
+    /// filter or sort needed but could not be read: results may be missing
+    /// for these, so `main` reports them and exits 1.
+    pub read_errors: Arc<AtomicUsize>,
 }
 
 impl SearchStats {
@@ -403,7 +407,49 @@ impl SearchStats {
             total_files: Arc::new(AtomicUsize::new(0)),
             total_dirs: Arc::new(AtomicUsize::new(0)),
             matched_count: Arc::new(AtomicUsize::new(0)),
+            read_errors: Arc::new(AtomicUsize::new(0)),
         }
+    }
+
+    /// Counts one read failure, printing it with `--debug`.
+    fn read_error(&self, config: &SearchConfig, path: &Path, err: &std::io::Error) {
+        self.read_errors.fetch_add(1, Ordering::Relaxed);
+        if config.debug {
+            arcommon::fs::print_read_error("arfind", path, err);
+        }
+    }
+}
+
+/// An entry's metadata (`lstat`), read the first time a filter or sort asks
+/// and reused after that, whether or not the read worked. A failure is
+/// counted once (see [`SearchStats::read_errors`]); the entry then passes
+/// no test that needs metadata.
+struct LazyMetadata<'a> {
+    entry: &'a fs::DirEntry,
+    value: Option<Option<fs::Metadata>>,
+}
+
+impl<'a> LazyMetadata<'a> {
+    fn new(entry: &'a fs::DirEntry) -> Self {
+        Self { entry, value: None }
+    }
+
+    fn get(&mut self, config: &SearchConfig, stats: &SearchStats) -> Option<&fs::Metadata> {
+        let entry = self.entry;
+        self.value
+            .get_or_insert_with(|| match entry.metadata() {
+                Ok(metadata) => Some(metadata),
+                Err(err) => {
+                    stats.read_error(config, &entry.path(), &err);
+                    None
+                }
+            })
+            .as_ref()
+    }
+
+    /// What was read so far, without reading.
+    fn fetched(&self) -> Option<&fs::Metadata> {
+        self.value.as_ref().and_then(Option::as_ref)
     }
 }
 
@@ -832,15 +878,14 @@ pub fn scan_directory(
         require_literal_leading_dot: false,
     };
 
-    let entries: Vec<_> = match fs::read_dir(&task.path) {
-        Ok(entries) => entries.flatten().collect(),
+    // A directory that can't be listed, and any entry that fails while it
+    // is listed, counts as unreadable (see SearchStats::read_errors).
+    let entries = match arcommon::fs::read_dir_entries(&task.path, |err| {
+        stats.read_error(config, &task.path, &err)
+    }) {
+        Ok(entries) => entries,
         Err(err) => {
-            if config.debug {
-                eprintln!(
-                    "{}",
-                    format!("arfind: {}: {}", arcommon::display_path(&task.path), err).err_red()
-                );
-            }
+            stats.read_error(config, &task.path, &err);
             return;
         }
     };
@@ -919,9 +964,8 @@ pub fn scan_directory(
 
             if type_matches {
                 // Metadata is only fetched lazily, at most once per entry, and
-                // reused by both the --empty and --size checks below (they used
-                // to each call entry.metadata() independently).
-                let mut metadata_cache: Option<fs::Metadata> = None;
+                // reused by every check below.
+                let mut metadata = LazyMetadata::new(&entry);
 
                 // --empty: only pay the extra syscall (read_dir/metadata) when
                 // the flag is actually set; previously this ran unconditionally
@@ -933,13 +977,7 @@ pub fn scan_directory(
                             .map(|mut d| d.next().is_none())
                             .unwrap_or(false)
                     } else {
-                        if metadata_cache.is_none() {
-                            metadata_cache = entry.metadata().ok();
-                        }
-                        metadata_cache
-                            .as_ref()
-                            .map(|m| m.len() == 0)
-                            .unwrap_or(false)
+                        metadata.get(config, stats).is_some_and(|m| m.len() == 0)
                     };
 
                     if !is_empty {
@@ -951,10 +989,7 @@ pub fn scan_directory(
                 let size_ok = if !is_dir && !is_symlink {
                     match &config.size_filter {
                         Some(f) => {
-                            if metadata_cache.is_none() {
-                                metadata_cache = entry.metadata().ok();
-                            }
-                            let len = metadata_cache.as_ref().map(|m| m.len()).unwrap_or(0);
+                            let len = metadata.get(config, stats).map_or(0, |m| m.len());
                             f.min.is_none_or(|min| len > min) && f.max.is_none_or(|max| len < max)
                         }
                         None => true,
@@ -966,12 +1001,8 @@ pub fn scan_directory(
                 // --older-than / --newer-than: the entry's own mtime (a
                 // symlink's, not its target's, like find without -L).
                 let age_ok = !config.mtime.is_active() || {
-                    if metadata_cache.is_none() {
-                        metadata_cache = entry.metadata().ok();
-                    }
-                    config
-                        .mtime
-                        .matches(metadata_cache.as_ref().and_then(|m| m.modified().ok()))
+                    let modified = metadata.get(config, stats).and_then(|m| m.modified().ok());
+                    config.mtime.matches(modified)
                 };
 
                 // --owner / --group: the entry's own uid/gid, from the same
@@ -979,10 +1010,7 @@ pub fn scan_directory(
                 // needed it).
                 let owner_ok = !config.ownership.is_active()
                     || (size_ok && age_ok && {
-                        if metadata_cache.is_none() {
-                            metadata_cache = entry.metadata().ok();
-                        }
-                        config.ownership.matches(metadata_cache.as_ref())
+                        config.ownership.matches(metadata.get(config, stats))
                     });
 
                 if size_ok && age_ok && owner_ok {
@@ -990,13 +1018,13 @@ pub fn scan_directory(
                     // --sort size/time: read here, in the workers, and
                     // reuse what the filters above already fetched.
                     // DirEntry::metadata does not follow symlinks.
-                    if config.collect_metadata && metadata_cache.is_none() {
-                        metadata_cache = entry.metadata().ok();
+                    if config.collect_metadata {
+                        metadata.get(config, stats);
                     }
                     let _ = output_tx.send(MatchResult::new(
                         entry_path.clone(),
                         EntryKind::of(file_type),
-                        metadata_cache.as_ref(),
+                        metadata.fetched(),
                         config.collect_metadata,
                     ));
                 }
@@ -1017,7 +1045,10 @@ pub fn scan_directory(
             // APFS volume). It was listed above like any directory; it is
             // just not entered, as with find -xdev.
             if let Some(dev) = task.root.dev
-                && entry.metadata().ok().as_ref().and_then(device_of_metadata) != Some(dev)
+                && LazyMetadata::new(&entry)
+                    .get(config, stats)
+                    .and_then(device_of_metadata)
+                    != Some(dev)
             {
                 if config.debug {
                     eprintln!(

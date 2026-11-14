@@ -233,7 +233,12 @@ fn main() {
         );
     }
 
-    let pattern = Pattern::new(&args.name).expect("Invalid glob pattern");
+    let pattern = Pattern::new(&args.name).unwrap_or_else(|e| {
+        fail(&format!(
+            "Invalid glob pattern for --name: '{}': {}",
+            args.name, e
+        ))
+    });
 
     let size_filter: Option<SizeFilter> = match &args.size {
         Some(s) => match parse_size(s) {

@@ -4582,3 +4582,39 @@ fn explicitly_named_fifo_is_still_read() {
     assert_eq!(names, vec!["pipe".to_string()]);
     writer.join().unwrap();
 }
+
+/// Results go to the printer over a bounded channel: when the printer
+/// stalls (a paused pager), the workers wait instead of holding every match
+/// in memory.
+#[test]
+fn a_stalled_printer_holds_the_workers_back() {
+    use arcommon::walk::RESULT_BUFFER;
+    use std::{sync::mpsc, thread, time::Duration};
+
+    let lines = "needle\n".repeat(50_000);
+    let (_dir, root) = make_tree(&[("big.txt", lines.as_str())]);
+    let (release, released) = mpsc::channel::<()>();
+    let gate = Mutex::new(Some(released));
+    let stats = SearchStats::new();
+    let found = Arc::clone(&stats.matched_lines);
+    let config = default_config("needle", false);
+    let search = thread::spawn(move || {
+        parallel_grep([root], 2, config, stats, move |_| {
+            if let Some(released) = gate.lock().unwrap().take() {
+                let _ = released.recv();
+            }
+        });
+    });
+
+    thread::sleep(Duration::from_millis(500));
+    let while_stalled = found.load(Ordering::Relaxed);
+    release.send(()).unwrap();
+    search.join().unwrap();
+
+    // The full channel, the match being printed and the one being sent.
+    assert!(
+        while_stalled <= RESULT_BUFFER + 2,
+        "{while_stalled} matches found while the printer was stalled"
+    );
+    assert_eq!(found.load(Ordering::Relaxed), 50_000);
+}

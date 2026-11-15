@@ -3,7 +3,7 @@ use arcommon::{
     ignore::{IgnoreStack, is_ignored},
     walk::{self, Queue},
 };
-use crossbeam_channel::unbounded;
+use crossbeam_channel::bounded;
 use flate2::read::GzDecoder;
 use glob::Pattern;
 use regex::{Regex, RegexBuilder};
@@ -710,8 +710,10 @@ pub fn parallel_grep(
     stats: SearchStats,
     on_match: impl Fn(MatchResult) + Send + 'static,
 ) {
-    let (output_tx, output_rx) = unbounded::<MatchResult>();
-    // Results are printed while the walk is still running.
+    // Results are printed while the walk is still running. The channel is
+    // bounded, so workers wait for a printer that has fallen behind (e.g.
+    // `| less`) instead of holding every result in memory.
+    let (output_tx, output_rx) = bounded::<MatchResult>(walk::RESULT_BUFFER);
     let printer = thread::spawn(move || {
         for item in output_rx {
             on_match(item);
@@ -1003,8 +1005,9 @@ fn emit_file_listing(file_path: &Path, output_tx: &crossbeam_channel::Sender<Mat
 }
 
 /// Serializes whole-file result blocks onto the output channel (see
-/// `ResultSink`). Sending on an unbounded channel never blocks, so the lock
-/// is only held for as long as it takes to queue one file's results.
+/// `ResultSink`). The channel is bounded, so a send can wait for the
+/// printer; other workers then wait for this lock. The printer never takes
+/// it, so it always makes progress.
 static FILE_BLOCK_ORDER: Mutex<()> = Mutex::new(());
 
 /// Where `grep_file` puts its results. In text mode each result is sent as

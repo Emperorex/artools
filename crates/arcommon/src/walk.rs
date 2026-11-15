@@ -32,6 +32,20 @@ use std::{
     sync::{Condvar, Mutex, MutexGuard},
 };
 
+/// How many results the workers of a walk may get ahead of the thread
+/// that prints them. When the printer falls behind (a slow terminal, or a
+/// pager the user stopped reading), workers wait for it rather than
+/// piling up every result in memory: memory stays bounded however many
+/// results a search finds. Large enough that the workers rarely wait while
+/// the printer keeps up.
+pub const RESULT_BUFFER: usize = 4096;
+
+/// Results per batch, for a tool that hands results to its printer in
+/// batches (one channel message each) rather than one at a time. With a
+/// bounded channel, a printer that is the bottleneck otherwise wakes a
+/// waiting worker for every single result.
+pub const RESULT_BATCH: usize = 256;
+
 /// Shared state of a running walk, handed to the processing closure so it
 /// can add work or end the walk early.
 pub struct Queue<T> {

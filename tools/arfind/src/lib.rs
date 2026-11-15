@@ -19,7 +19,7 @@ use arcommon::{
 use clap::Parser;
 use clap::builder::TypedValueParser as _;
 use colored::Colorize;
-use crossbeam_channel::{Sender, unbounded};
+use crossbeam_channel::{Sender, bounded};
 use glob::Pattern;
 use ignore::gitignore::Gitignore;
 use std::{
@@ -790,11 +790,17 @@ pub fn parallel_find(
     stats: SearchStats,
     on_match: impl Fn(MatchResult) + Send + 'static,
 ) {
-    let (output_tx, output_rx) = unbounded::<MatchResult>();
-    // Results are printed while the walk is still running.
+    // Results are printed while the walk is still running. They travel in
+    // batches (see `Batch`) over a bounded channel, so workers wait for a
+    // printer that has fallen behind (e.g. `| less`) instead of holding
+    // every result in memory.
+    let (output_tx, output_rx) =
+        bounded::<Vec<MatchResult>>(walk::RESULT_BUFFER / walk::RESULT_BATCH);
     let printer = thread::spawn(move || {
-        for item in output_rx {
-            on_match(item);
+        for batch in output_rx {
+            for item in batch {
+                on_match(item);
+            }
         }
     });
 
@@ -810,7 +816,7 @@ pub fn parallel_find(
 
         if let Some(result) = check_root(&canonical_root, &root, &config, &stats) {
             stats.matched_count.fetch_add(1, Ordering::Relaxed);
-            let _ = output_tx.send(result);
+            let _ = output_tx.send(vec![result]);
         }
 
         let context = Root {
@@ -842,13 +848,47 @@ pub fn parallel_find(
     printer.join().unwrap();
 }
 
+/// The results of one directory on their way to the printer: sent when the
+/// directory is done (on drop, whatever way `scan_directory` returns), or
+/// every [`walk::RESULT_BATCH`] results in a big one. One channel message
+/// per batch rather than per result.
+struct Batch<'a> {
+    tx: &'a Sender<Vec<MatchResult>>,
+    items: Vec<MatchResult>,
+}
+
+impl Batch<'_> {
+    fn push(&mut self, item: MatchResult) {
+        self.items.push(item);
+        if self.items.len() >= walk::RESULT_BATCH {
+            self.send();
+        }
+    }
+
+    fn send(&mut self) {
+        if !self.items.is_empty() {
+            let _ = self.tx.send(std::mem::take(&mut self.items));
+        }
+    }
+}
+
+impl Drop for Batch<'_> {
+    fn drop(&mut self) {
+        self.send();
+    }
+}
+
 pub fn scan_directory(
     task: Task,
     config: &SearchConfig,
     queue: &Queue<Task>,
-    output_tx: &Sender<MatchResult>,
+    output_tx: &Sender<Vec<MatchResult>>,
     stats: &SearchStats,
 ) {
+    let mut found = Batch {
+        tx: output_tx,
+        items: Vec::new(),
+    };
     // `--max-depth N` follows `find`'s semantics: depth 0 is the root itself
     // (already tested by `check_root`, before this function is ever called),
     // depth 1 is the root's direct children, depth 2 their children, and so
@@ -1021,7 +1061,7 @@ pub fn scan_directory(
                     if config.collect_metadata {
                         metadata.get(config, stats);
                     }
-                    let _ = output_tx.send(MatchResult::new(
+                    found.push(MatchResult::new(
                         entry_path.clone(),
                         EntryKind::of(file_type),
                         metadata.fetched(),

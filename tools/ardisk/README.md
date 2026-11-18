@@ -14,6 +14,8 @@ Or build from source:
 cargo build --release --bin ardisk
 ```
 
+The installer also adds the manual page: `man ardisk`. From a build, `ardisk --generate-man > ardisk.1` writes it.
+
 ## Usage
 
 ```

@@ -5,6 +5,9 @@
 /// of threads.
 pub const MAX_JOBS: u16 = 128;
 
+/// The most workers [`default_jobs`] ever picks.
+pub const DEFAULT_JOBS_MAX: usize = 16;
+
 /// CPU-aware default worker count, used as the `-j/--jobs` default.
 ///
 /// Half of `available_parallelism()`, clamped to `[1, 16]`: using every core
@@ -17,7 +20,7 @@ pub fn default_jobs() -> usize {
     let cpus = std::thread::available_parallelism()
         .map(|n| n.get())
         .unwrap_or(1);
-    (cpus / 2).clamp(1, 16)
+    (cpus / 2).clamp(1, DEFAULT_JOBS_MAX)
 }
 
 #[cfg(test)]

@@ -14,6 +14,8 @@ Or build from source:
 cargo build --release --bin argrep
 ```
 
+The installer also adds the manual page: `man argrep`. From a build, `argrep --generate-man > argrep.1` writes it.
+
 ## Usage
 
 ```

@@ -1,3 +1,5 @@
+mod man;
+
 use arcommon::color::ErrPaint;
 use arcommon::jobs::{MAX_JOBS, default_jobs};
 use ardisk::{
@@ -152,6 +154,11 @@ struct Args {
         value_parser = clap::value_parser!(u16).range(1..=i64::from(MAX_JOBS)).map(|v| v as usize)
     )]
     jobs: usize,
+
+    /// Print the manual page in roff format and exit. Used when a release
+    /// is built: `ardisk --generate-man > ardisk.1`.
+    #[arg(long = "generate-man", hide = true, exclusive = true)]
+    generate_man: bool,
 
     /// Show errors and detailed execution metrics
     #[arg(short, long)]
@@ -425,6 +432,10 @@ fn main() {
     // directories are listed without a leading "./".
     let path_typed = matches.value_source("path") != Some(ValueSource::DefaultValue);
     let args = Args::from_arg_matches(&matches).unwrap_or_else(|e| e.exit());
+    if args.generate_man {
+        arcommon::man::print(Args::command(), &man::PAGE);
+        return;
+    }
     // Colors are decided once, separately for stdout and stderr (see
     // arcommon::color), before anything is printed.
     arcommon::color::init(args.color);

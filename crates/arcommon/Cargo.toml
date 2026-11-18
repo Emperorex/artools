@@ -12,6 +12,9 @@ publish = false
 anstream = "1"
 anstyle = "1"
 clap = { version = "4", features = ["derive"] }
+# --generate-man: the manual page, from the same definition as --help.
+clap_mangen = "0.3"
+roff = "1"
 colored = "3.1"
 glob = "0.3"
 ignore = "0.4"

@@ -14,6 +14,8 @@ Or build from source:
 cargo build --release --bin arfind
 ```
 
+The installer also adds the manual page: `man arfind`. From a build, `arfind --generate-man > arfind.1` writes it.
+
 ## Usage
 
 ```

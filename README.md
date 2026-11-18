@@ -61,6 +61,17 @@ INSTALL_DIR=~/.local/bin curl -fsSL https://artools.io/install.sh | bash
 
 **Supported platforms:** macOS arm64, macOS x86_64, Linux x86_64 (musl static binary)
 
+### Manual pages
+
+Each tool comes with a manual page: `man arfind`, `man ardisk`, `man argrep`. `install.sh` puts it next to the binary's directory, where `man` finds it without any setup: `/usr/local/share/man/man1` for the default install, `~/.local/share/man/man1` for `INSTALL_DIR=~/.local/bin`. Set `MAN_DIR` to choose another place (the page goes to `$MAN_DIR/man1`), or `MAN_DIR=""` to skip the pages. If the page can't be installed, the installer says so and carries on: the tool works without it.
+
+The page is generated from the tool's own options, so it always matches `--help`. Each release publishes it as `<tool>.1`, listed in `SHA256SUMS`. To read it without installing, or after building from source:
+
+```bash
+arfind --generate-man > arfind.1
+man ./arfind.1
+```
+
 ### Verifying downloads
 
 Every release publishes a `SHA256SUMS` file alongside the binaries, and `install.sh` checks the downloaded binary against it before installing — the install is aborted, nothing is written to disk, if it doesn't match or `SHA256SUMS` is missing from the release.

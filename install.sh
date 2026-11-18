@@ -5,6 +5,15 @@ set -euo pipefail
 REPO="Emperorex/artools"
 INSTALL_DIR="${INSTALL_DIR:-/usr/local/bin}"
 TOOLS=(arfind ardisk argrep)
+# Manual pages go next to the binaries: /usr/local/bin -> /usr/local/share/man,
+# ~/.local/bin -> ~/.local/share/man, where `man` looks for a bin directory
+# on PATH. MAN_DIR overrides it; MAN_DIR="" skips the manual pages.
+if [ -z "${MAN_DIR+set}" ]; then
+    case "$INSTALL_DIR" in
+        */bin | */bin/) MAN_DIR="${INSTALL_DIR%/}"; MAN_DIR="${MAN_DIR%/bin}/share/man" ;;
+        *)              MAN_DIR="" ;;
+    esac
+fi
 
 # ── Colors ────────────────────────────────────────────────────────────────────
 RED='\033[0;31m'
@@ -161,6 +170,58 @@ install_tool() {
     fi
 
     success "$tool installed → ${INSTALL_DIR}/${tool}"
+
+    install_man_page "$tool" "$tag" "$tmp_dir"
+}
+
+# ── Install the manual page, when the release has one ────────────────────────
+# The page is a convenience: the tool works without it, so nothing here stops
+# the installation. But like the binary, it is only installed when it matches
+# SHA256SUMS (already downloaded and used for the binary by verify_checksum).
+install_man_page() {
+    local tool="$1"
+    local tag="$2"
+    local tmp_dir="$3"
+    local page="${tool}.1"
+
+    if [ -z "$MAN_DIR" ]; then
+        return 0
+    fi
+
+    local sums_file="${tmp_dir}/${tool}.SHA256SUMS"
+    local expected
+    expected=$(awk -v name="$page" '$2 == name { print $1 }' "$sums_file")
+    if [ -z "$expected" ]; then
+        # A release from before manual pages were published.
+        return 0
+    fi
+
+    local tmp_file="${tmp_dir}/${page}"
+    if ! curl -fsSL "https://github.com/${REPO}/releases/download/${tag}/${page}" -o "$tmp_file"; then
+        warn "Could not download the manual page for $tool. Skipping it."
+        return 0
+    fi
+    if [ "$expected" != "$(sha256_of "$tmp_file")" ]; then
+        warn "Checksum mismatch for '$page'. The manual page was not installed."
+        return 0
+    fi
+
+    local dir="${MAN_DIR}/man1"
+    if mkdir -p "$dir" 2>/dev/null && [ -w "$dir" ]; then
+        cp "$tmp_file" "${dir}/${page}" && chmod 644 "${dir}/${page}"
+    elif [ -w "$INSTALL_DIR" ]; then
+        # The binary went in without sudo; don't ask for it just for this.
+        warn "Cannot write to ${dir}. The manual page was not installed."
+        return 0
+    else
+        sudo mkdir -p "$dir" && sudo cp "$tmp_file" "${dir}/${page}" \
+            && sudo chmod 644 "${dir}/${page}"
+    fi || {
+        warn "Could not install the manual page for $tool."
+        return 0
+    }
+
+    success "$tool manual page installed → ${dir}/${page} (man ${tool})"
 }
 
 # ── macOS Gatekeeper quarantine removal ───────────────────────────────────────

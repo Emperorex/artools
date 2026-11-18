@@ -1,4 +1,5 @@
 mod json_output;
+mod man;
 
 use arcommon::color::ErrPaint;
 use arcommon::{
@@ -116,15 +117,15 @@ struct Args {
 
     /// An additional pattern to search for. Repeatable: a line matches
     /// if it matches ANY given pattern (combined via alternation, not
-    /// ANDed together) — same semantics as grep/ripgrep's multiple -e.
+    /// ANDed together) — same semantics as grep's multiple -e.
     /// When -e is given at all, QUERY stops being treated as an
     /// additional pattern (the same "-e overrides the positional
     /// pattern" rule GNU grep follows); every positional is a PATH
-    /// instead, same idea as --files (see paths_from_positionals).
+    /// instead, same idea as --files.
     #[arg(short = 'e', long = "regexp")]
     patterns: Vec<String>,
 
-    /// Read patterns from FILE, one per line, like grep -f / rg -f.
+    /// Read patterns from FILE, one per line, like grep -f.
     /// Repeatable, and combinable with -e: a line matches if it matches
     /// ANY pattern from any source. Blank lines are skipped (unlike grep,
     /// where they match everything); CRLF endings are fine; no comment
@@ -141,10 +142,7 @@ struct Args {
     /// uppercase letter in any one pattern makes the whole search
     /// case-sensitive, since the final compiled regex has one
     /// case-sensitivity setting, not a separate one per pattern.
-    /// Conflicts with -i/--ignore-case, rather than following ripgrep's
-    /// "last flag on the command line wins" rule, to avoid the added
-    /// complexity of order-sensitive flag resolution for what's
-    /// otherwise a simple boolean choice.
+    /// Conflicts with -i/--ignore-case: give one or the other.
     #[arg(short = 'S', long = "smart-case", conflicts_with = "ignore_case")]
     smart_case: bool,
 
@@ -247,15 +245,14 @@ struct Args {
     /// With -l, -L or --files: end each file name with a NUL byte instead
     /// of a newline, and print the name exactly as stored (no escaping,
     /// no color). For safe pipelines with names containing spaces or
-    /// newlines: `argrep -l0 TODO . | xargs -0 sed -i ...`. Same as
-    /// ripgrep's -0/--null.
+    /// newlines: `argrep -l0 TODO . | xargs -0 sed -i ...`.
     #[arg(short = '0', long = "null")]
     null: bool,
 
     /// Print results as JSON Lines (one JSON object per line) for scripts
     /// and CI: begin/match/context/end events per file, file events for
-    /// -l/-L/--files, and a final summary with schema_version. Field names
-    /// follow `rg --json`; see the README for the schema. Text and paths
+    /// -l/-L/--files, and a final summary with schema_version. See the
+    /// README for the schema. Text and paths
     /// are exact (JSON-escaped, never terminal-escaped). With -r, each
     /// submatch carries its replacement; -o adds nothing, since every
     /// match is already listed under "submatches".
@@ -312,6 +309,11 @@ struct Args {
     #[arg(long = "type-list", exclusive = true)]
     type_list: bool,
 
+    /// Print the manual page in roff format and exit. Used when a release
+    /// is built: `argrep --generate-man > argrep.1`.
+    #[arg(long = "generate-man", hide = true, exclusive = true)]
+    generate_man: bool,
+
     /// Show NUM lines of leading context before matching lines
     #[arg(short = 'B', long = "before-context", value_parser = context_lines_parser)]
     before_context: Option<usize>,
@@ -338,7 +340,7 @@ struct Args {
 
     /// Search hidden files and directories (names starting with `.`) that
     /// are skipped by default. Independent of --no-ignore: hidden-ness and
-    /// gitignore rules are separate filters (same as ripgrep), so a hidden
+    /// gitignore rules are separate filters, so a hidden
     /// but not-gitignored file needs only --hidden, and a non-hidden but
     /// gitignored file needs only --no-ignore. To search everything —
     /// including .git's own contents — combine both:
@@ -424,8 +426,8 @@ struct Args {
     )]
     files: bool,
 
-    /// Show matching lines with every match replaced by REPLACEMENT, like
-    /// ripgrep's --replace. Only the output changes: files are never
+    /// Show matching lines with every match replaced by REPLACEMENT.
+    /// Only the output changes: files are never
     /// written. In REPLACEMENT, $0 is the whole match, $1.. the groups,
     /// ${name} a named group, ${1}x a group followed by text, and $$ a
     /// literal $. With -o, each match's replacement is printed on its own
@@ -498,6 +500,10 @@ fn fail(message: &str, code: i32) -> ! {
 
 fn main() {
     let mut args = Args::parse();
+    if args.generate_man {
+        arcommon::man::print(<Args as clap::CommandFactory>::command(), &man::PAGE);
+        return;
+    }
     // Colors are decided once, separately for stdout and stderr (see
     // arcommon::color), before anything is printed.
     arcommon::color::init(args.color);

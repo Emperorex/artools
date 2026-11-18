@@ -1,3 +1,5 @@
+mod man;
+
 use arcommon::color::ErrPaint;
 use arfind::{
     Args, DEFAULT_IGNORES, MatchResult, SearchConfig, SearchStats, SizeFilter, SortKey,
@@ -191,6 +193,10 @@ fn main() {
     // results are listed without a leading "./".
     let path_typed = matches.value_source("paths") != Some(ValueSource::DefaultValue);
     let args = Args::from_arg_matches(&matches).unwrap_or_else(|e| e.exit());
+    if args.generate_man {
+        arcommon::man::print(Args::command(), &man::PAGE);
+        return;
+    }
     // Colors are decided once, separately for stdout and stderr (see
     // arcommon::color), before anything is printed.
     arcommon::color::init(args.color);

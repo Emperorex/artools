@@ -152,6 +152,11 @@ pub struct Args {
     #[arg(long = "type-list", exclusive = true)]
     pub type_list: bool,
 
+    /// Print the manual page in roff format and exit. Used when a release
+    /// is built: `arfind --generate-man > arfind.1`.
+    #[arg(long = "generate-man", hide = true, exclusive = true)]
+    pub generate_man: bool,
+
     /// Only match files with this extension, e.g. rs, .md, tar.gz
     /// (case-insensitive). Repeatable; OR'ed with --type.
     #[arg(long, value_name = "EXT", value_parser = types::extension_parser)]
@@ -173,9 +178,11 @@ pub struct Args {
     #[arg(long, value_name = "GROUP", value_parser = owner::group_parser)]
     pub group: Vec<owner::IdSpec>,
 
+    /// Include hidden files and directories (names starting with `.`)
     #[arg(short = 'H', long)]
     pub hidden: bool,
 
+    /// Print scan statistics and each error on stderr
     #[arg(short, long)]
     pub debug: bool,
 
@@ -218,7 +225,7 @@ pub struct Args {
     pub color: arcommon::color::ColorChoice,
 
     /// Run a command once for each result instead of printing it, like
-    /// find -exec / fd -x. Everything after --exec up to a ';' argument (or
+    /// find -exec. Everything after --exec up to a ';' argument (or
     /// the end of the line) is the command. Placeholders: {} path, {/} file
     /// name, {//} parent directory, {.} path without extension, {/.} file
     /// name without extension; without any, the path is appended. No shell
@@ -251,7 +258,7 @@ pub struct Args {
     )]
     pub execdir: Option<Vec<String>>,
 
-    /// Run a command once with all results as arguments, like fd -X or
+    /// Run a command once with all results as arguments, like
     /// find -exec ... + (split into several runs if the list is very long).
     /// '{}' as a whole argument marks where the paths go; otherwise they are
     /// appended. Nothing runs when there are no results.

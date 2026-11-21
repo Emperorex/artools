@@ -13,7 +13,7 @@ use std::{
     io::{self, BufRead, BufReader, Chain, Cursor, Read},
     path::{Path, PathBuf},
     sync::{
-        Arc, Mutex, OnceLock,
+        Arc, Mutex, MutexGuard, OnceLock,
         atomic::{AtomicUsize, Ordering},
     },
     thread,
@@ -501,11 +501,11 @@ pub struct SearchConfig {
     /// The block search behind grep_file's fast path, built from `regex`
     /// on first use and shared by every worker. See [`LinePrefilter`].
     pub line_prefilter: LinePrefilter,
-    /// --json: results are printed as JSON events. Each file's results
-    /// are then delivered as one contiguous block (see `ResultSink`), so a
-    /// file's begin/match/end events never interleave with another file's,
-    /// and line content is passed on raw instead of terminal-escaped (the
-    /// JSON encoder escapes it).
+    /// --json: results are printed as JSON events. Line content is passed
+    /// on raw instead of terminal-escaped (the JSON encoder escapes it).
+    /// As in text output, each file's results arrive as one contiguous
+    /// block (see `ResultSink`), so a file's begin/match/end events never
+    /// interleave with another file's.
     pub json: bool,
 }
 
@@ -796,25 +796,32 @@ pub fn parallel_grep(
             ignore_stack: Arc::new(Vec::new()),
         })
         .collect();
+    // One named file is the whole search: its results can stream, as
+    // there is nothing for them to interleave with (see ResultSink).
+    let only_root = root_tasks.len() == 1;
     walk::for_each(root_tasks, workers, |task, queue| {
         if config.quiet && stats.matched_lines.load(Ordering::Relaxed) > 0 {
             // -q already has its answer: drop the rest of the walk.
             queue.stop();
             return;
         }
-        scan_and_grep(task, &config, queue, &output_tx, &stats);
+        scan_and_grep(task, &config, queue, &output_tx, &stats, only_root);
     });
 
     drop(output_tx);
     printer.join().unwrap();
 }
 
+/// Searches one task: a named file, or a directory, whose files are
+/// searched here and whose subdirectories are queued as new tasks.
+/// `only_root`: `task` is the only PATH of the search.
 pub fn scan_and_grep(
     task: Task,
     config: &SearchConfig,
     queue: &Queue<Task>,
     output_tx: &crossbeam_channel::Sender<MatchResult>,
     stats: &SearchStats,
+    only_root: bool,
 ) {
     let dir_path = task.path.as_path();
 
@@ -854,7 +861,12 @@ pub fn scan_and_grep(
         if config.files_only {
             emit_file_listing(dir_path, output_tx);
         } else {
-            grep_file(dir_path, config, output_tx, stats);
+            // Streamed when it's the only file, or when it may never end
+            // (a FIFO, a device): grouped, nothing of it would be shown
+            // until it did.
+            let grouped = !only_root && meta.is_file();
+            let sink = ResultSink::new(output_tx, grouped);
+            grep_file_to(dir_path, config, sink, stats);
         }
         return;
     }
@@ -1078,45 +1090,80 @@ fn emit_file_listing(file_path: &Path, output_tx: &crossbeam_channel::Sender<Mat
 /// it, so it always makes progress.
 static FILE_BLOCK_ORDER: Mutex<()> = Mutex::new(());
 
-/// Where `grep_file` puts its results. In text mode each result is sent as
-/// soon as it exists, so output streams. In JSON mode the results of one
-/// file are kept until the file is done and then sent together, holding
-/// `FILE_BLOCK_ORDER`, so they arrive at the printer as one block even
-/// though several workers send concurrently (ripgrep buffers per file in
-/// parallel mode for the same reason).
+/// How much of one file's output (roughly, in bytes) a worker collects
+/// before it starts sending it while holding `FILE_BLOCK_ORDER`. Bounds the
+/// memory each worker holds; the file's results stay together either way.
+pub const FILE_BLOCK_BYTES: usize = 1024 * 1024;
+
+/// Where `grep_file` puts its results.
+///
+/// When several files are searched in parallel, the results of each file
+/// are kept together, so they come out as one block instead of mixed with
+/// lines of the files other workers are searching (`-C`, `--json` and
+/// plain `file:line` output alike). They are collected until the file is
+/// done, then sent holding `FILE_BLOCK_ORDER`. A file with more output than
+/// `FILE_BLOCK_BYTES` takes the lock at that point and sends the rest as it
+/// is found, keeping memory bounded; other workers' blocks wait for it.
+///
+/// Otherwise (`grouped` false) each result is sent as soon as it exists,
+/// so output streams: for a single named file, where there is nothing to
+/// interleave with, and for a FIFO or device, which may never end.
 struct ResultSink<'a> {
     tx: &'a crossbeam_channel::Sender<MatchResult>,
-    block: Option<Vec<MatchResult>>,
+    grouped: bool,
+    block: Vec<MatchResult>,
+    block_bytes: usize,
+    /// Held once the block has outgrown `FILE_BLOCK_BYTES`, until the file
+    /// is done.
+    order: Option<MutexGuard<'static, ()>>,
 }
 
 impl<'a> ResultSink<'a> {
-    fn new(tx: &'a crossbeam_channel::Sender<MatchResult>, per_file_blocks: bool) -> Self {
+    fn new(tx: &'a crossbeam_channel::Sender<MatchResult>, grouped: bool) -> Self {
         ResultSink {
             tx,
-            block: per_file_blocks.then(Vec::new),
+            grouped,
+            block: Vec::new(),
+            block_bytes: 0,
+            order: None,
         }
     }
 
     fn send(&mut self, result: MatchResult) {
-        match &mut self.block {
-            Some(block) => block.push(result),
-            None => {
-                let _ = self.tx.send(result);
-            }
+        if !self.grouped || self.order.is_some() {
+            let _ = self.tx.send(result);
+            return;
+        }
+        // The line, the path and the rest of the struct.
+        self.block_bytes += result.line_content.len()
+            + result.file_path.as_os_str().len()
+            + std::mem::size_of::<MatchResult>();
+        self.block.push(result);
+        if self.block_bytes > FILE_BLOCK_BYTES {
+            self.order = Some(lock_file_block_order());
+            self.send_block();
         }
     }
+
+    fn send_block(&mut self) {
+        for result in self.block.drain(..) {
+            let _ = self.tx.send(result);
+        }
+        self.block_bytes = 0;
+    }
+}
+
+fn lock_file_block_order() -> MutexGuard<'static, ()> {
+    FILE_BLOCK_ORDER.lock().unwrap_or_else(|e| e.into_inner())
 }
 
 impl Drop for ResultSink<'_> {
     fn drop(&mut self) {
-        if let Some(block) = self.block.take()
-            && !block.is_empty()
-        {
-            let _order = FILE_BLOCK_ORDER.lock().unwrap_or_else(|e| e.into_inner());
-            for result in block {
-                let _ = self.tx.send(result);
-            }
+        if !self.block.is_empty() {
+            let _order = lock_file_block_order();
+            self.send_block();
         }
+        // `self.order`, if held, is released after this.
     }
 }
 
@@ -1274,7 +1321,16 @@ pub fn grep_file(
     output_tx: &crossbeam_channel::Sender<MatchResult>,
     stats: &SearchStats,
 ) {
-    let mut sink = ResultSink::new(output_tx, config.json);
+    grep_file_to(file_path, config, ResultSink::new(output_tx, true), stats);
+}
+
+/// [`grep_file`], with the results going to `sink`.
+fn grep_file_to(
+    file_path: &Path,
+    config: &SearchConfig,
+    mut sink: ResultSink,
+    stats: &SearchStats,
+) {
     let file = match File::open(file_path) {
         Ok(f) => f,
         Err(err) => {

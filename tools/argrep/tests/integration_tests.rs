@@ -4583,9 +4583,10 @@ fn explicitly_named_fifo_is_still_read() {
     writer.join().unwrap();
 }
 
-/// Results go to the printer over a bounded channel: when the printer
-/// stalls (a paused pager), the workers wait instead of holding every match
-/// in memory.
+/// Results go to the printer over a bounded channel, and a worker collects
+/// a bounded part of a file's results before sending them: when the
+/// printer stalls (a paused pager), the workers wait instead of holding
+/// every match in memory.
 #[test]
 fn a_stalled_printer_holds_the_workers_back() {
     use arcommon::walk::RESULT_BUFFER;
@@ -4611,9 +4612,12 @@ fn a_stalled_printer_holds_the_workers_back() {
     release.send(()).unwrap();
     search.join().unwrap();
 
-    // The full channel, the match being printed and the one being sent.
+    // The full channel, the match being printed, the one being sent, and
+    // what the worker collects of the file before it sends (each result
+    // counts at least its own size there).
+    let collected = argrep::FILE_BLOCK_BYTES / std::mem::size_of::<argrep::MatchResult>() + 1;
     assert!(
-        while_stalled <= RESULT_BUFFER + 2,
+        while_stalled <= RESULT_BUFFER + 2 + collected,
         "{while_stalled} matches found while the printer was stalled"
     );
     assert_eq!(found.load(Ordering::Relaxed), 50_000);

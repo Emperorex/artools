@@ -374,7 +374,7 @@ Event and field names follow `rg --json` where they overlap, so filters carry ov
 - `submatches` lists every match on the line: `start` and `end` are byte offsets into `lines.text`, `match.text` is the matched text. With `-r`, each submatch also has `replacement.text`, and `lines.text` stays the original line, so nothing is lost.
 - `mode` is `content` (default), `count` (`-c`: a `begin`/`end` pair per file with its count in `matched_lines`, no `match` events), `files_with_matches` (`-l`), `files_without_match` (`-L`) or `files` (`--files`).
 - `files_with_matches` is `null` with `-L` and `--files`, which never list the files that matched.
-- A file's events always appear together, from its `begin` to its `end`, even with many workers; files appear in no particular order.
+- A file's events always appear together, from its `begin` to its `end`, even with many workers; files appear in no particular order (see [Output order](#output-order)).
 - Text and paths are exact: control characters are escaped by JSON (`\u001b`), never terminal-escaped, so a decoder gets the real bytes back. Invalid UTF-8 becomes U+FFFD. stdin is reported with the path `<stdin>`.
 - `schema_version` changes only for incompatible changes; new fields may be added without a bump.
 
@@ -464,7 +464,7 @@ argrep 'error' /var/log --max-filesize 50M --max-line-size 4M
 - Skipping is not an error: files found while walking are skipped quietly (with `--debug`, each is reported), counted under "Files skipped" in `--stats` (`Files skipped: 3 (2 over --max-filesize)`) and as `files_skipped_size` in the `--json` summary. A file you name explicitly (`argrep TODO big.log --max-filesize 1M`) is skipped with a one-line warning on stderr, so it can't be mistaken for "no match". A named symlink is measured by its target, as it is searched.
 - Only regular files are measured; an explicitly named FIFO or device is read as before. `0` means no limit, as for the other size flags.
 
-argrep never holds more than one line per worker thread in memory, and that line is capped:
+While reading, argrep never holds more than one line per worker thread in memory, and that line is capped (results waiting to be printed take up to about 1 MiB more per worker, see [Output order](#output-order)):
 
 - `--max-line-size SIZE` (default `4M`): a line longer than this is skipped (its bytes are read and discarded, never stored) and a warning is printed once per file. Without this cap, a single newline-free file would be buffered entirely in memory.
 - `--max-decompressed-size SIZE` (default `1G`): under `-z`, reading stops once a file has produced this many decompressed bytes. gzip compresses repetitive data roughly 1000:1, so a ~2 MB `.gz` can otherwise expand to gigabytes. Applies only to compressed files.
@@ -652,6 +652,12 @@ argrep -z 'OutOfMemoryError' /var/log/app/*.log.gz
 Each worker reads a file in 256 KiB blocks and runs the regex over a whole block of complete lines at once, which lets the regex engine use its fast literal scanning (SIMD where the CPU has it). Lines before the first hit in a block are skipped after only counting their newlines (for line numbers); the line with a hit, and the ones after it, go through the per-line search, so every output mode behaves exactly as before. Searches with few matches are several times faster than line by line (on an 850 MB tree, 2.9 s became 0.6 s).
 
 The per-line search is still used for the whole file with `-v` and with context (`-A`/`-B`/`-C`), with `--max-line-size` set below 256K, and for patterns using `\A`, `\z` or `(?-m)`. Within a block, skipping also stops before a line with invalid UTF-8, and, if the pattern has `$`, before a line ending in `\r\n`, since those lines are matched slightly differently on their own.
+
+### Output order
+
+Files are searched in parallel, but each file's results are printed together, as one block: lines of different files are never mixed, in text output (with or without `-C`/`-A`/`-B`) as in `--json`. Within a file, lines come out in order; the files themselves come out in no particular order (`argrep ... | sort` for a stable order).
+
+To keep them together, a worker holds a file's results until the file is done, up to about 1 MiB of output. A file with more output than that is then printed as it is searched, while the other workers' files wait for it. A single file is always printed as it is searched, as is a FIFO or device named as a `PATH`, which may never end.
 
 ### Output buffering
 

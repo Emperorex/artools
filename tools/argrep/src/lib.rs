@@ -4,13 +4,13 @@ use arcommon::{
     walk::{self, Queue},
 };
 use crossbeam_channel::bounded;
-use flate2::read::GzDecoder;
+use flate2::bufread::GzDecoder;
 use glob::Pattern;
 use regex::{Regex, RegexBuilder};
 use std::{
     collections::{HashSet, VecDeque},
     fs::{self, File},
-    io::{BufRead, BufReader, Cursor, Read},
+    io::{self, BufRead, BufReader, Chain, Cursor, Read},
     path::{Path, PathBuf},
     sync::{
         Arc, Mutex, OnceLock,
@@ -283,6 +283,74 @@ pub fn is_gzip_target(path: &Path) -> bool {
         path.extension().and_then(|e| e.to_str()),
         Some("gz") | Some("tgz")
     )
+}
+
+/// The two bytes every gzip member starts with.
+const GZIP_MAGIC: [u8; 2] = [0x1f, 0x8b];
+
+/// Decompresses every member of a gzip file, one after another, as
+/// `gzip -d` does. A file can hold several members: `gzip -c b >> a.gz`
+/// appends one, and log rotation and parallel compressors write them.
+///
+/// After each member (its CRC and size checked) the next one is decoded
+/// only if the next bytes start a gzip header. Anything else after the
+/// last member, such as the zero padding some tools write to fill a
+/// block, ends the stream without an error, again as `gzip -d` does. A
+/// member that starts with a gzip header but is damaged is an error.
+struct GzMembers<R: BufRead> {
+    /// The member being decoded. Its input is the bytes already read to
+    /// recognize its header, then the rest of the file.
+    member: Option<GzDecoder<Chain<Cursor<Vec<u8>>, R>>>,
+}
+
+impl<R: BufRead> GzMembers<R> {
+    fn new(input: R) -> Self {
+        GzMembers {
+            member: Some(GzDecoder::new(Cursor::new(Vec::new()).chain(input))),
+        }
+    }
+}
+
+impl<R: BufRead> Read for GzMembers<R> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        if buf.is_empty() {
+            return Ok(0);
+        }
+        while let Some(member) = &mut self.member {
+            let n = member.read(buf)?;
+            if n > 0 {
+                return Ok(n);
+            }
+            // The member is complete. The decoder has read exactly its
+            // bytes, so the input is now at whatever follows it.
+            let (_, mut rest) = self
+                .member
+                .take()
+                .expect("just used")
+                .into_inner()
+                .into_inner();
+            let next = read_up_to(&mut rest, GZIP_MAGIC.len())?;
+            if next == GZIP_MAGIC {
+                self.member = Some(GzDecoder::new(Cursor::new(next).chain(rest)));
+            }
+        }
+        Ok(0)
+    }
+}
+
+/// Reads and consumes up to `n` bytes: fewer only at the end of `input`.
+fn read_up_to(input: &mut impl BufRead, n: usize) -> io::Result<Vec<u8>> {
+    let mut bytes = Vec::with_capacity(n);
+    while bytes.len() < n {
+        let available = input.fill_buf()?;
+        if available.is_empty() {
+            break;
+        }
+        let take = available.len().min(n - bytes.len());
+        bytes.extend_from_slice(&available[..take]);
+        input.consume(take);
+    }
+    Ok(bytes)
 }
 
 /// Task sent to workers representing a directory or file to scan
@@ -1234,7 +1302,7 @@ pub fn grep_file(
     let decompress = config.search_compressed && is_gzip_target(file_path);
     let decompressed_cap = config.max_decompressed_bytes;
     let content: Box<dyn Read> = if decompress {
-        let decoder = GzDecoder::new(file);
+        let decoder = GzMembers::new(BufReader::new(file));
         if decompressed_cap > 0 {
             Box::new(decoder.take(decompressed_cap.saturating_add(1)))
         } else {
@@ -1247,7 +1315,7 @@ pub fn grep_file(
     let mut buffered = BufReader::with_capacity(BLOCK_SIZE, content);
 
     // Fast binary file sniffing: check the first 1024 bytes for a null
-    // byte. A decompressed stream generally isn't seekable (GzDecoder
+    // byte. A decompressed stream generally isn't seekable (GzMembers
     // doesn't implement Seek), so rather than rewinding back to the start
     // after sniffing — which also happens to make this handle pipes/FIFOs
     // that were never seekable to begin with — the sniffed bytes are held

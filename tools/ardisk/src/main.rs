@@ -494,6 +494,24 @@ fn main() {
         std::process::exit(1);
     }
 
+    // --threshold is checked here, before the scan, like the other values:
+    // a typo must not cost a walk of the whole tree first. clap can't check
+    // it, as it is a plain count with --inodes and a size otherwise.
+    let threshold_bytes: Option<u64> = match &args.threshold {
+        Some(t) => match if args.inodes {
+            parse_count(t)
+        } else {
+            parse_size_in(t, units)
+        } {
+            Ok(bytes) => Some(bytes),
+            Err(e) => {
+                eprintln!("{}", format!("error: {}", e).err_red());
+                std::process::exit(1);
+            }
+        },
+        None => None,
+    };
+
     if args.one_file_system && !cfg!(unix) {
         eprintln!(
             "{}",
@@ -595,23 +613,6 @@ fn main() {
     roll_up(&mut dirs);
 
     let duration = start_time.elapsed();
-
-    // Parse --threshold if provided, exit early on invalid input. With
-    // --inodes it is a plain count, otherwise a size.
-    let threshold_bytes: Option<u64> = match &args.threshold {
-        Some(t) => match if args.inodes {
-            parse_count(t)
-        } else {
-            parse_size_in(t, units)
-        } {
-            Ok(bytes) => Some(bytes),
-            Err(e) => {
-                eprintln!("{}", format!("error: {}", e).err_red());
-                std::process::exit(1);
-            }
-        },
-        None => None,
-    };
 
     // The scan root is first in the list (absent if it could not be read).
     let root_total = dirs.first().map_or(0, |root| root.size);

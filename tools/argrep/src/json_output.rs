@@ -312,7 +312,7 @@ mod tests {
 
     fn result(path: &str, line: usize, text: &str, context: bool) -> MatchResult {
         MatchResult {
-            file_path: PathBuf::from(path),
+            file_path: std::sync::Arc::from(std::path::Path::new(path)),
             line_num: line,
             line_content: text.to_string(),
             count: None,

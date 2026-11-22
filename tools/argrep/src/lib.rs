@@ -87,7 +87,7 @@ fn read_line_capped<R: BufRead>(
             if avail.is_empty() {
                 return Ok((total, overflow));
             }
-            let (chunk, done) = match avail.iter().position(|&b| b == b'\n') {
+            let (chunk, done) = match memchr::memchr(b'\n', avail) {
                 Some(i) => (&avail[..=i], true),
                 None => (avail, false),
             };
@@ -583,7 +583,8 @@ impl Default for SearchStats {
 
 /// Result payload containing a single text match
 pub struct MatchResult {
-    pub file_path: PathBuf,
+    /// Shared by all results of a file: made once per file, not per line.
+    pub file_path: Arc<Path>,
     pub line_num: usize,
     pub line_content: String,
     /// Set when --count is active: total matching lines in this file
@@ -776,15 +777,22 @@ pub fn parallel_grep(
     workers: usize,
     config: Arc<SearchConfig>,
     stats: SearchStats,
-    on_match: impl Fn(MatchResult) + Send + 'static,
+    mut on_match: impl FnMut(MatchResult) + Send + 'static,
 ) {
     // Results are printed while the walk is still running. The channel is
     // bounded, so workers wait for a printer that has fallen behind (e.g.
     // `| less`) instead of holding every result in memory.
-    let (output_tx, output_rx) = bounded::<MatchResult>(walk::RESULT_BUFFER);
+    //
+    // Results travel in batches (see ResultSink): one channel operation per
+    // batch instead of per line. The bound is in batches, so the channel
+    // holds at most RESULT_BUFFER results, as one result per slot did.
+    let (output_tx, output_rx) =
+        bounded::<Vec<MatchResult>>(walk::RESULT_BUFFER / walk::RESULT_BATCH);
     let printer = thread::spawn(move || {
-        for item in output_rx {
-            on_match(item);
+        for batch in output_rx {
+            for item in batch {
+                on_match(item);
+            }
         }
     });
 
@@ -819,7 +827,7 @@ pub fn scan_and_grep(
     task: Task,
     config: &SearchConfig,
     queue: &Queue<Task>,
-    output_tx: &crossbeam_channel::Sender<MatchResult>,
+    output_tx: &crossbeam_channel::Sender<Vec<MatchResult>>,
     stats: &SearchStats,
     only_root: bool,
 ) {
@@ -865,7 +873,7 @@ pub fn scan_and_grep(
             // (a FIFO, a device): grouped, nothing of it would be shown
             // until it did.
             let grouped = !only_root && meta.is_file();
-            let sink = ResultSink::new(output_tx, grouped);
+            let sink = ResultSink::new(Destination::Batches(output_tx), grouped);
             grep_file_to(dir_path, config, sink, stats);
         }
         return;
@@ -1051,7 +1059,8 @@ pub fn scan_and_grep(
             if config.files_only {
                 emit_file_listing(&entry_path, output_tx);
             } else {
-                grep_file(&entry_path, config, output_tx, stats);
+                let sink = ResultSink::new(Destination::Batches(output_tx), true);
+                grep_file_to(&entry_path, config, sink, stats);
             }
         }
     }
@@ -1072,16 +1081,16 @@ fn too_large(meta: &fs::Metadata, config: &SearchConfig) -> bool {
 /// output shape as -l's own bare-filename MatchResult (line_num 0, no
 /// content), which is what lets print_result in main.rs reuse that exact
 /// print branch for --files too.
-fn emit_file_listing(file_path: &Path, output_tx: &crossbeam_channel::Sender<MatchResult>) {
-    let _ = output_tx.send(MatchResult {
-        file_path: file_path.to_path_buf(),
+fn emit_file_listing(file_path: &Path, output_tx: &crossbeam_channel::Sender<Vec<MatchResult>>) {
+    let _ = output_tx.send(vec![MatchResult {
+        file_path: Arc::from(file_path),
         line_num: 0,
         line_content: String::new(),
         count: None,
         is_context: false,
         is_separator: false,
         highlights: None,
-    });
+    }]);
 }
 
 /// Serializes whole-file result blocks onto the output channel (see
@@ -1095,6 +1104,15 @@ static FILE_BLOCK_ORDER: Mutex<()> = Mutex::new(());
 /// memory each worker holds; the file's results stay together either way.
 pub const FILE_BLOCK_BYTES: usize = 1024 * 1024;
 
+/// Where a [`ResultSink`] sends results.
+enum Destination<'a> {
+    /// One result per message: [`grep_file`]'s public interface.
+    Results(&'a crossbeam_channel::Sender<MatchResult>),
+    /// Up to `walk::RESULT_BATCH` results per message: the channel of
+    /// [`parallel_grep`].
+    Batches(&'a crossbeam_channel::Sender<Vec<MatchResult>>),
+}
+
 /// Where `grep_file` puts its results.
 ///
 /// When several files are searched in parallel, the results of each file
@@ -1105,51 +1123,95 @@ pub const FILE_BLOCK_BYTES: usize = 1024 * 1024;
 /// `FILE_BLOCK_BYTES` takes the lock at that point and sends the rest as it
 /// is found, keeping memory bounded; other workers' blocks wait for it.
 ///
-/// Otherwise (`grouped` false) each result is sent as soon as it exists,
-/// so output streams: for a single named file, where there is nothing to
-/// interleave with, and for a FIFO or device, which may never end.
+/// Otherwise (`grouped` false) results stream: for a single named file,
+/// where there is nothing to interleave with, and for a FIFO or device,
+/// which may never end.
+///
+/// Either way results are sent in batches, which costs one channel
+/// operation per batch instead of one per line. A streaming batch is sent
+/// when it is full, and before every read that may have to wait for input
+/// (see [`ResultSink::before_read`]), so a FIFO's matches still show as
+/// soon as they are found.
 struct ResultSink<'a> {
-    tx: &'a crossbeam_channel::Sender<MatchResult>,
+    to: Destination<'a>,
     grouped: bool,
-    block: Vec<MatchResult>,
-    block_bytes: usize,
+    /// Results not sent yet: the file's block so far, while it is
+    /// collected; otherwise the batch being filled.
+    pending: Vec<MatchResult>,
+    pending_bytes: usize,
     /// Held once the block has outgrown `FILE_BLOCK_BYTES`, until the file
     /// is done.
     order: Option<MutexGuard<'static, ()>>,
 }
 
 impl<'a> ResultSink<'a> {
-    fn new(tx: &'a crossbeam_channel::Sender<MatchResult>, grouped: bool) -> Self {
+    fn new(to: Destination<'a>, grouped: bool) -> Self {
         ResultSink {
-            tx,
+            to,
             grouped,
-            block: Vec::new(),
-            block_bytes: 0,
+            pending: Vec::new(),
+            pending_bytes: 0,
             order: None,
         }
     }
 
+    /// Whether results go out as they are found (rather than collected
+    /// until the file is done).
+    fn streaming(&self) -> bool {
+        !self.grouped || self.order.is_some()
+    }
+
     fn send(&mut self, result: MatchResult) {
-        if !self.grouped || self.order.is_some() {
-            let _ = self.tx.send(result);
+        if self.streaming() {
+            self.pending.push(result);
+            if self.pending.len() >= walk::RESULT_BATCH {
+                self.flush();
+            }
             return;
         }
         // The line, the path and the rest of the struct.
-        self.block_bytes += result.line_content.len()
+        self.pending_bytes += result.line_content.len()
             + result.file_path.as_os_str().len()
             + std::mem::size_of::<MatchResult>();
-        self.block.push(result);
-        if self.block_bytes > FILE_BLOCK_BYTES {
+        self.pending.push(result);
+        if self.pending_bytes > FILE_BLOCK_BYTES {
             self.order = Some(lock_file_block_order());
-            self.send_block();
+            self.flush();
         }
     }
 
-    fn send_block(&mut self) {
-        for result in self.block.drain(..) {
-            let _ = self.tx.send(result);
+    /// Called before a read that may wait for input (the reader's buffer
+    /// is empty): what is streaming must not wait with it.
+    fn before_read(&mut self) {
+        if self.streaming() && !self.pending.is_empty() {
+            self.flush();
         }
-        self.block_bytes = 0;
+    }
+
+    /// Sends everything pending, in batches.
+    fn flush(&mut self) {
+        self.pending_bytes = 0;
+        match self.to {
+            Destination::Results(tx) => {
+                for result in self.pending.drain(..) {
+                    let _ = tx.send(result);
+                }
+            }
+            Destination::Batches(tx) => {
+                if self.pending.len() <= walk::RESULT_BATCH {
+                    let _ = tx.send(std::mem::take(&mut self.pending));
+                    return;
+                }
+                let mut rest = std::mem::take(&mut self.pending).into_iter();
+                loop {
+                    let batch: Vec<MatchResult> = rest.by_ref().take(walk::RESULT_BATCH).collect();
+                    if batch.is_empty() {
+                        break;
+                    }
+                    let _ = tx.send(batch);
+                }
+            }
+        }
     }
 }
 
@@ -1159,9 +1221,9 @@ fn lock_file_block_order() -> MutexGuard<'static, ()> {
 
 impl Drop for ResultSink<'_> {
     fn drop(&mut self) {
-        if !self.block.is_empty() {
-            let _order = lock_file_block_order();
-            self.send_block();
+        if !self.pending.is_empty() {
+            let _order = (!self.streaming()).then(lock_file_block_order);
+            self.flush();
         }
         // `self.order`, if held, is released after this.
     }
@@ -1292,6 +1354,50 @@ fn skippable_prefix(
     (skip, count_newlines(&lines[..skip]))
 }
 
+/// Updates the before-context after the fast path skipped `skipped`
+/// (whole lines, valid UTF-8; the last one is line `last_line_num`) as if
+/// each line had been read: `before` keeps the last `keep` lines, each
+/// without its line ending and made safe for display (except for JSON,
+/// which escapes text itself).
+fn keep_before_context(
+    before: &mut VecDeque<(usize, String)>,
+    keep: usize,
+    skipped: &[u8],
+    last_line_num: usize,
+    json: bool,
+) {
+    // Start offsets of the last `keep` lines, last first.
+    let body = skipped.strip_suffix(b"\n").unwrap_or(skipped);
+    let mut starts = Vec::with_capacity(keep);
+    let mut end = body.len();
+    while starts.len() < keep {
+        let start = memchr::memrchr(b'\n', &body[..end]).map_or(0, |i| i + 1);
+        starts.push(start);
+        if start == 0 {
+            break;
+        }
+        end = start - 1;
+    }
+    let lines = starts.len();
+    if lines >= keep {
+        before.clear();
+    }
+    for (i, &start) in starts.iter().rev().enumerate() {
+        let end = memchr::memchr(b'\n', &body[start..]).map_or(body.len(), |i| start + i);
+        let raw = String::from_utf8_lossy(&body[start..end]);
+        let line = raw.strip_suffix('\r').unwrap_or(&raw);
+        let shown = if json {
+            line.to_string()
+        } else {
+            sanitize_for_display(line).into_owned()
+        };
+        if before.len() == keep {
+            before.pop_front();
+        }
+        before.push_back((last_line_num + 1 + i - lines, shown));
+    }
+}
+
 /// Counts `\n` bytes. Summed per 255-byte chunk into a `u8`, which cannot
 /// overflow and which the compiler turns into SIMD code: about 4× the speed
 /// of a plain `filter().count()` (5.8 vs 1.5 GB/s), and this runs over
@@ -1321,7 +1427,8 @@ pub fn grep_file(
     output_tx: &crossbeam_channel::Sender<MatchResult>,
     stats: &SearchStats,
 ) {
-    grep_file_to(file_path, config, ResultSink::new(output_tx, true), stats);
+    let sink = ResultSink::new(Destination::Results(output_tx), true);
+    grep_file_to(file_path, config, sink, stats);
 }
 
 /// [`grep_file`], with the results going to `sink`.
@@ -1410,6 +1517,14 @@ fn grep_file_to(
     }
 
     let mut reader = Cursor::new(sniffer_buffer[..sniffed].to_vec()).chain(buffered);
+    // One copy of the path for all of this file's results.
+    let shared_path: Arc<Path> = Arc::from(file_path);
+    // Whether a read may have to wait for input: nothing is left in the
+    // sniffed bytes or the reader's buffer.
+    let input_drained = |reader: &std::io::Chain<Cursor<Vec<u8>>, BufReader<Box<dyn Read>>>| {
+        let (sniffed, rest) = reader.get_ref();
+        sniffed.position() >= sniffed.get_ref().len() as u64 && rest.buffer().is_empty()
+    };
 
     // Process file line by line, reusing a single heap allocation.
     //
@@ -1453,19 +1568,49 @@ fn grep_file_to(
     // per line.
     let mut bytes_read = 0usize;
 
-    // The block fast path (see LinePrefilter). Not with -v (every line not
-    // matching is output) or context (lines around a hit are needed), and
-    // only if no line in a block can exceed --max-line-size, which must
-    // still be reported by the line reader.
-    let fast_path = if !config.invert
-        && !has_context
-        && (config.max_line_bytes == 0 || config.max_line_bytes >= BLOCK_SIZE)
-    {
+    // The block fast path (see LinePrefilter): it finds lines that cannot
+    // match. Only if no line in a block can exceed --max-line-size, which
+    // must still be reported by the line reader. What is done with those
+    // lines depends on the mode:
+    //
+    // - normally they are skipped, only counted for line numbers; with
+    //   context, not while after-context lines are still to be printed,
+    //   and the last of them are kept as before-context;
+    // - with -v they are the output: they are read the normal way, but
+    //   known not to match, without running the regex on each (with -c
+    //   and no -m, just counted).
+    let fast_path = if config.max_line_bytes == 0 || config.max_line_bytes >= BLOCK_SIZE {
         config.line_prefilter.get(&config.regex)
     } else {
         None
     };
+    // Whether lines around matches are printed (context in a mode that
+    // prints lines at all).
+    let keeps_context = has_context
+        && !config.count_per_file
+        && !config.files_with_matches
+        && !config.files_without_match;
+    // -v -c without -m: lines known not to match only need counting.
+    let counts_known_lines = config.invert
+        && config.count_per_file
+        && config.max_count.is_none()
+        && !config.quiet
+        && !config.files_with_matches
+        && !config.files_without_match;
+    // -v: lines up to this number are known not to match.
+    let mut known_clear_until = 0usize;
     let pattern_has_dollar = config.regex.as_str().contains('$');
+    // When nearly every line matches, a block search mostly finds a hit in
+    // the very next line, which is then matched again on its own: two regex
+    // runs for one line. So once two block searches in a row skip nothing,
+    // the next `fast_path_pause` lines are read the normal way, the pause
+    // doubling (up to 64 lines) while that keeps happening and ending as
+    // soon as a block search skips something. (A hit every few lines
+    // alternates hits and skips, and never pauses: there the block search
+    // still saves more than it costs.)
+    let mut fast_path_misses = 0usize;
+    let mut fast_path_pause = 0usize;
+    let mut fast_path_wait = 0usize;
 
     loop {
         if reached_max_count && after_remaining == 0 {
@@ -1480,13 +1625,58 @@ fn grep_file_to(
             break;
         }
 
-        if let Some(block_regex) = fast_path {
+        if input_drained(&reader) {
+            sink.before_read();
+        }
+
+        // Not inside lines already known not to match (-v), nor while
+        // after-context lines are owed.
+        let fast_path_now = fast_path.filter(|_| {
+            line_num >= known_clear_until
+                && !(keeps_context && !config.invert && after_remaining > 0)
+        });
+        if let Some(block_regex) = fast_path_now.filter(|_| {
+            fast_path_wait = fast_path_wait.saturating_sub(1);
+            fast_path_wait == 0
+        }) {
             let step = match reader.fill_buf() {
                 Ok(buf) => skippable_prefix(buf, block_regex, pattern_has_dollar),
                 // Leave errors (and retries) to the line reader below.
                 Err(_) => (0, 0),
             };
-            if let (skip @ 1.., skipped_lines) = step {
+            if step.0 == 0 {
+                fast_path_misses += 1;
+                if fast_path_misses >= 2 {
+                    fast_path_pause = (fast_path_pause * 2 + 1).min(64);
+                    fast_path_wait = fast_path_pause + 1;
+                }
+            } else {
+                fast_path_misses = 0;
+                fast_path_pause = 0;
+            }
+            if config.invert && !counts_known_lines && step.0 > 0 {
+                // -v: these lines are output; read them the normal way.
+                known_clear_until = line_num + step.1;
+            } else if let (skip @ 1.., skipped_lines) = step {
+                if keeps_context && before_ctx > 0 {
+                    // The last skipped lines are the before-context of
+                    // whatever matches next. Still in the reader's buffer.
+                    if let Ok(buf) = reader.fill_buf() {
+                        keep_before_context(
+                            &mut before_buffer,
+                            before_ctx,
+                            &buf[..skip],
+                            line_num + skipped_lines,
+                            config.json,
+                        );
+                    }
+                }
+                if counts_known_lines {
+                    match_count += skipped_lines;
+                    stats
+                        .matched_lines
+                        .fetch_add(skipped_lines, Ordering::Relaxed);
+                }
                 reader.consume(skip);
                 bytes_read += skip;
                 line_num += skipped_lines;
@@ -1571,7 +1761,12 @@ fn grep_file_to(
             continue;
         }
 
-        let raw_line = String::from_utf8_lossy(&line_bytes);
+        // Valid UTF-8 is by far the common case, and checking for it is
+        // much cheaper than the lossy conversion, which handles the rest.
+        let raw_line = match std::str::from_utf8(&line_bytes) {
+            Ok(text) => std::borrow::Cow::Borrowed(text),
+            Err(_) => String::from_utf8_lossy(&line_bytes),
+        };
         // Strip the trailing line terminator (read_until keeps it, unlike
         // stdin's `BufRead::lines()`, which already strips it). This matters
         // beyond cosmetics: the regex crate's `$` anchor (without multi-line
@@ -1586,7 +1781,7 @@ fn grep_file_to(
             .map(|s| s.strip_suffix('\r').unwrap_or(s))
             .unwrap_or(&raw_line);
 
-        let line_matches = config.regex.is_match(line);
+        let line_matches = line_num > known_clear_until && config.regex.is_match(line);
 
         // The line as it is printed: only computed for lines that are
         // printed or kept as context, not for every line read. Matching
@@ -1624,7 +1819,7 @@ fn grep_file_to(
             if config.files_with_matches {
                 // -l: emit the file once and stop reading further
                 sink.send(MatchResult {
-                    file_path: file_path.to_path_buf(),
+                    file_path: Arc::clone(&shared_path),
                     line_num: 0,
                     line_content: String::new(),
                     count: None,
@@ -1654,7 +1849,7 @@ fn grep_file_to(
                         for text in replaced_matches(&config.regex, line, replacement) {
                             let len = text.len();
                             sink.send(MatchResult {
-                                file_path: file_path.to_path_buf(),
+                                file_path: Arc::clone(&shared_path),
                                 line_num,
                                 line_content: text,
                                 count: None,
@@ -1666,7 +1861,7 @@ fn grep_file_to(
                     } else {
                         for m in config.regex.find_iter(line) {
                             sink.send(MatchResult {
-                                file_path: file_path.to_path_buf(),
+                                file_path: Arc::clone(&shared_path),
                                 line_num,
                                 line_content: sanitize_for_display(m.as_str()).to_string(),
                                 count: None,
@@ -1688,7 +1883,7 @@ fn grep_file_to(
 
                         if has_printed_anything && first_line_to_print > last_printed_line + 1 {
                             sink.send(MatchResult {
-                                file_path: file_path.to_path_buf(),
+                                file_path: Arc::clone(&shared_path),
                                 line_num: 0,
                                 line_content: String::new(),
                                 count: None,
@@ -1701,7 +1896,7 @@ fn grep_file_to(
                         while let Some((b_num, b_content)) = before_buffer.pop_front() {
                             if b_num > last_printed_line {
                                 sink.send(MatchResult {
-                                    file_path: file_path.to_path_buf(),
+                                    file_path: Arc::clone(&shared_path),
                                     line_num: b_num,
                                     line_content: b_content,
                                     count: None,
@@ -1724,7 +1919,7 @@ fn grep_file_to(
                         None => (clean_line().into_owned(), None),
                     };
                     sink.send(MatchResult {
-                        file_path: file_path.to_path_buf(),
+                        file_path: Arc::clone(&shared_path),
                         line_num,
                         line_content,
                         count: None,
@@ -1755,7 +1950,7 @@ fn grep_file_to(
         {
             if after_remaining > 0 {
                 sink.send(MatchResult {
-                    file_path: file_path.to_path_buf(),
+                    file_path: Arc::clone(&shared_path),
                     line_num,
                     line_content: clean_line().into_owned(),
                     count: None,
@@ -1781,7 +1976,7 @@ fn grep_file_to(
     // -c: emit one result per file with the total count
     if config.count_per_file {
         sink.send(MatchResult {
-            file_path: file_path.to_path_buf(),
+            file_path: Arc::clone(&shared_path),
             line_num: 0,
             line_content: String::new(),
             count: Some(match_count),
@@ -1802,7 +1997,7 @@ fn grep_file_to(
     // else, so -q + -L needs no special-cased exit code.
     if config.files_without_match && !config.quiet && match_count == 0 && !had_io_error {
         sink.send(MatchResult {
-            file_path: file_path.to_path_buf(),
+            file_path: Arc::clone(&shared_path),
             line_num: 0,
             line_content: String::new(),
             count: None,
@@ -2341,7 +2536,61 @@ mod size_limit_tests {
 
 #[cfg(test)]
 mod fast_path_tests {
-    use super::{block_search_is_safe, count_newlines, skippable_prefix};
+    use super::{block_search_is_safe, count_newlines, keep_before_context, skippable_prefix};
+    use std::collections::VecDeque;
+
+    fn context(
+        keep: usize,
+        start: &[(usize, &str)],
+        skipped: &str,
+        last: usize,
+    ) -> Vec<(usize, String)> {
+        let mut before: VecDeque<(usize, String)> =
+            start.iter().map(|&(n, s)| (n, s.to_string())).collect();
+        keep_before_context(&mut before, keep, skipped.as_bytes(), last, false);
+        before.into_iter().collect()
+    }
+
+    fn lines(v: &[(usize, &str)]) -> Vec<(usize, String)> {
+        v.iter().map(|&(n, s)| (n, s.to_string())).collect()
+    }
+
+    #[test]
+    fn before_context_keeps_the_last_skipped_lines() {
+        // More skipped lines than kept: only the last ones, numbered.
+        assert_eq!(
+            context(2, &[(1, "old")], "a\nb\nc\nd\n", 5),
+            lines(&[(4, "c"), (5, "d")])
+        );
+        // Fewer: appended to what was kept, the oldest dropped.
+        assert_eq!(
+            context(3, &[(1, "x"), (2, "y"), (3, "z")], "a\n", 4),
+            lines(&[(2, "y"), (3, "z"), (4, "a")])
+        );
+        assert_eq!(
+            context(3, &[(7, "x")], "a\nb\n", 9),
+            lines(&[(7, "x"), (8, "a"), (9, "b")])
+        );
+        // Exactly as many.
+        assert_eq!(
+            context(2, &[(1, "x")], "a\nb\n", 3),
+            lines(&[(2, "a"), (3, "b")])
+        );
+    }
+
+    #[test]
+    fn before_context_lines_are_shown_as_when_read() {
+        // Without the line ending (\r\n too), empty lines kept, control
+        // characters escaped.
+        assert_eq!(
+            context(3, &[], "a\r\n\n\x1b[2Jb\n", 3),
+            lines(&[(1, "a"), (2, ""), (3, "\\x1b[2Jb")])
+        );
+        // JSON escapes text itself: kept as is.
+        let mut before = VecDeque::new();
+        keep_before_context(&mut before, 1, b"\x1bz\n", 1, true);
+        assert_eq!(before, [(1, "\x1bz".to_string())]);
+    }
 
     #[test]
     fn count_newlines_matches_a_plain_count() {

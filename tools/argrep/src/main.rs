@@ -871,24 +871,24 @@ fn main() {
             },
         );
     } else {
-        let regex = config.regex.clone();
-        let mode = OutputMode {
-            names_only: config.files_with_matches
-                || config.files_without_match
-                || config.files_only,
-            count_per_file: config.count_per_file,
-            line_number: config.line_number,
-            null: args.null,
-        };
+        let mut printer = Printer::new(
+            OutputMode {
+                names_only: config.files_with_matches
+                    || config.files_without_match
+                    || config.files_only,
+                count_per_file: config.count_per_file,
+                line_number: config.line_number,
+                null: args.null,
+            },
+            config.regex.clone(),
+        );
 
         parallel_grep(
             roots.clone(),
             args.jobs,
             config,
             stats.clone(),
-            move |result| {
-                print_result(&result, mode, &regex);
-            },
+            move |result| printer.print(result),
         );
     }
 
@@ -1051,7 +1051,7 @@ impl StdinOut<'_> {
         count: Option<usize>,
     ) -> argrep::MatchResult {
         argrep::MatchResult {
-            file_path: PathBuf::from(Self::NAME),
+            file_path: Arc::from(Path::new(Self::NAME)),
             line_num,
             line_content: text.to_string(),
             count,
@@ -1415,59 +1415,135 @@ struct OutputMode {
     null: bool,
 }
 
-/// Shared output formatter for parallel_grep results.
-fn print_result(result: &argrep::MatchResult, mode: OutputMode, regex: &Regex) {
-    let OutputMode {
-        names_only,
-        count_per_file,
-        line_number,
-        null,
-    } = mode;
-    if result.is_separator {
-        arcommon::outln!("{}", "--".cyan());
-        return;
+/// Appends `n` in decimal to `out`.
+fn push_decimal(out: &mut Vec<u8>, mut n: usize) {
+    let mut digits = [0u8; 20];
+    let mut at = digits.len();
+    loop {
+        at -= 1;
+        digits[at] = b'0' + (n % 10) as u8;
+        n /= 10;
+        if n == 0 {
+            break;
+        }
+    }
+    out.extend_from_slice(&digits[at..]);
+}
+
+/// Prints parallel_grep results.
+///
+/// A file's results arrive together (see argrep's `ResultSink`), so its
+/// name, which takes more work to show than most lines (made relative to
+/// the PATH as typed, escaped, colored), is prepared once per file and
+/// reused for each of its lines.
+struct Printer {
+    mode: OutputMode,
+    regex: Regex,
+    /// Whether stdout is colored. Without color, a match looks like the
+    /// rest of the line, so lines are printed without searching them again
+    /// for highlighting.
+    colored: bool,
+    /// The file of the last result, and its name as printed.
+    file: Option<(Arc<Path>, String)>,
+    /// Reused to put an uncolored line together, written in one call.
+    line: Vec<u8>,
+}
+
+impl Printer {
+    fn new(mode: OutputMode, regex: Regex) -> Self {
+        Printer {
+            mode,
+            regex,
+            colored: colored::control::SHOULD_COLORIZE.should_colorize(),
+            file: None,
+            line: Vec::new(),
+        }
     }
 
-    if names_only {
-        // -l, -L, and --files all emit the same bare filename result
-        // (line_num: 0, no content) — what distinguishes them is entirely
-        // *which files ever produced a result at all* (see grep_file/
-        // emit_file_listing/grep_stdin), not how that result prints.
-        print_file_name(&result.file_path, null);
-    } else if count_per_file {
-        arcommon::outln!(
-            "{}: {}",
-            display_path(&result.file_path).magenta(),
-            result.count.unwrap_or(0).to_string().green()
-        );
-    } else {
-        let sep = if result.is_context { "-" } else { ":" };
-        let prefix = if line_number {
-            format!(
-                "{}{}{}",
-                display_path(&result.file_path).magenta(),
-                sep,
-                result.line_num.to_string().green()
-            )
-        } else {
-            display_path(&result.file_path).magenta().to_string()
-        };
+    /// The name of `path` as printed, prepared again only for a new file.
+    fn name(&mut self, path: Arc<Path>) -> &str {
+        // Results of one file share their path, so this is usually a
+        // pointer comparison.
+        let same = matches!(&self.file,
+            Some((last, _)) if Arc::ptr_eq(last, &path) || last.as_os_str() == path.as_os_str());
+        if !same {
+            let name = display_path(&path).magenta().to_string();
+            self.file = Some((path, name));
+        }
+        &self.file.as_ref().expect("just set").1
+    }
 
-        let content = if result.is_context {
-            result.line_content.trim_end().to_string()
+    fn print(&mut self, result: argrep::MatchResult) {
+        let OutputMode {
+            names_only,
+            count_per_file,
+            line_number,
+            null,
+        } = self.mode;
+        if result.is_separator {
+            arcommon::outln!("{}", "--".cyan());
+            return;
+        }
+
+        if names_only {
+            // -l, -L, and --files all emit the same bare filename result
+            // (line_num: 0, no content) — what distinguishes them is entirely
+            // *which files ever produced a result at all* (see grep_file/
+            // emit_file_listing/grep_stdin), not how that result prints.
+            print_file_name(&result.file_path, null);
+            return;
+        }
+        let colored = self.colored;
+        if count_per_file {
+            let count = result.count.unwrap_or(0).to_string();
+            let name = self.name(result.file_path);
+            arcommon::outln!("{}: {}", name, count.green());
+            return;
+        }
+
+        let sep = if result.is_context { "-" } else { ":" };
+        let highlighted;
+        let content: &str = if result.is_context {
+            result.line_content.trim_end()
         } else if let Some(spans) = &result.highlights {
             // --replace: highlight the inserted text, not regex matches
             // (the pattern may not even match the replaced line).
             // Not trimmed, unlike normal output: the replaced line is shown
             // exactly as it would read.
-            highlight_spans(&result.line_content, spans)
+            highlighted = highlight_spans(&result.line_content, spans);
+            &highlighted
+        } else if colored {
+            highlighted = highlight_matches(&result.line_content, &self.regex);
+            highlighted.trim_end()
         } else {
-            highlight_matches(&result.line_content, regex)
-                .trim_end()
-                .to_string()
+            result.line_content.trim_end()
         };
-
-        arcommon::outln!("{}{}{}", prefix, sep, content);
+        let line_num = result.line_num;
+        self.name(result.file_path);
+        let name = &self.file.as_ref().expect("set by name()").1;
+        if colored {
+            if line_number {
+                let num = line_num.to_string();
+                arcommon::outln!("{name}{sep}{}{sep}{content}", num.green());
+            } else {
+                arcommon::outln!("{name}{sep}{content}");
+            }
+            return;
+        }
+        // Uncolored output is what goes into pipes and files, often many
+        // lines: put the line together as bytes, without the formatting
+        // machinery, and write it in one call.
+        let line = &mut self.line;
+        line.clear();
+        line.extend_from_slice(name.as_bytes());
+        line.extend_from_slice(sep.as_bytes());
+        if line_number {
+            push_decimal(line, line_num);
+            line.extend_from_slice(sep.as_bytes());
+        }
+        line.extend_from_slice(content.as_bytes());
+        line.push(b'\n');
+        arcommon::out::check(arcommon::out::Out.write_all(line));
     }
 }
 
@@ -1479,6 +1555,15 @@ mod tests {
     };
     use arcommon::filetypes::TYPE_TABLE;
     use clap::Parser;
+
+    #[test]
+    fn push_decimal_writes_numbers_as_display_does() {
+        for n in [0, 1, 9, 10, 99, 100, 12_345, usize::MAX] {
+            let mut out = b"x".to_vec();
+            super::push_decimal(&mut out, n);
+            assert_eq!(out, format!("x{n}").into_bytes());
+        }
+    }
 
     // ── -f / --file ──────────────────────────────────────────────────────────
 

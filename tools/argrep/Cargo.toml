@@ -11,6 +11,8 @@ clap = { version = "4.0", features = ["derive"] }
 crossbeam-channel = "0.5"
 colored = "3.1"
 glob = "0.3"
+# Finds line ends in the line reader (already in the tree through regex).
+memchr = "2"
 ignore = "0.4"
 regex = "1"
 # --json output (both already in the workspace via ardisk)

@@ -4589,7 +4589,7 @@ fn explicitly_named_fifo_is_still_read() {
 /// every match in memory.
 #[test]
 fn a_stalled_printer_holds_the_workers_back() {
-    use arcommon::walk::RESULT_BUFFER;
+    use arcommon::walk::{RESULT_BATCH, RESULT_BUFFER};
     use std::{sync::mpsc, thread, time::Duration};
 
     let lines = "needle\n".repeat(50_000);
@@ -4612,12 +4612,13 @@ fn a_stalled_printer_holds_the_workers_back() {
     release.send(()).unwrap();
     search.join().unwrap();
 
-    // The full channel, the match being printed, the one being sent, and
-    // what the worker collects of the file before it sends (each result
-    // counts at least its own size there).
+    // The full channel (results travel in batches of up to RESULT_BATCH,
+    // and the channel holds RESULT_BUFFER results' worth), the batch being
+    // printed, the batch being sent, and what the worker collects of the
+    // file before it sends (each result counts at least its own size there).
     let collected = argrep::FILE_BLOCK_BYTES / std::mem::size_of::<argrep::MatchResult>() + 1;
     assert!(
-        while_stalled <= RESULT_BUFFER + 2 + collected,
+        while_stalled <= RESULT_BUFFER + 2 * RESULT_BATCH + collected,
         "{while_stalled} matches found while the printer was stalled"
     );
     assert_eq!(found.load(Ordering::Relaxed), 50_000);

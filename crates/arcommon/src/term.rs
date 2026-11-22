@@ -29,6 +29,19 @@ fn is_control(c: char) -> bool {
 /// input borrowed, with no allocation and no char decoding.
 fn may_need_escaping(s: &str, keep_tab: bool) -> bool {
     let b = s.as_bytes();
+    // First a pass the compiler can vectorize, as it looks at one byte at
+    // a time and never stops early: most text has none of these bytes,
+    // and this settles it at a fraction of the cost of the exact check.
+    // A tab is suspect only when it is escaped; 0xFF never occurs in UTF-8.
+    let tab = if keep_tab { b'\t' } else { 0xFF };
+    let suspect = b.chunks(64).any(|chunk| {
+        chunk.iter().fold(false, |found, &x| {
+            found | ((x < 0x20) & (x != tab)) | (x == 0x7F) | (x == 0xC2)
+        })
+    });
+    if !suspect {
+        return false;
+    }
     b.iter().enumerate().any(|(i, &x)| match x {
         b'\t' => !keep_tab,
         0x00..=0x1F | 0x7F => true,

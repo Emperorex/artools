@@ -699,6 +699,9 @@ pub fn scan_directory(
     // every entry's path is built up front.
     let filters_need_path = config.exclude.is_some() || config.respect_gitignore;
 
+    // Subdirectories are queued together after the listing: one step
+    // under the queue's lock instead of one per subdirectory.
+    let mut subdirs = Vec::new();
     for entry in entries {
         let file_type = match entry.file_type() {
             Ok(ft) => ft,
@@ -775,7 +778,7 @@ pub fn scan_directory(
                     }
                 }
             }
-            queue.push(Task {
+            subdirs.push(Task {
                 path: entry_path,
                 parent: Some(position),
                 ignore_stack: Arc::clone(&ignore_stack),
@@ -839,6 +842,7 @@ pub fn scan_directory(
             }
         }
     }
+    queue.push_all(subdirs);
 
     // Count the directory's own inode/entry size, if possible.
     // This goes only into the total map, NOT the content map, so that

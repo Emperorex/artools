@@ -173,3 +173,24 @@ fn a_fifo_streams_while_it_is_still_open() {
     assert!(found, "the FIFO's match was held back until it closed");
     assert!(status.success());
 }
+
+#[test]
+fn large_blocks_stay_whole_among_many_small_files() {
+    // Files with several messages' worth of output (sent holding the order
+    // lock) next to many files with a line or two each (sent as single
+    // messages, several files per message): nothing may come between the
+    // messages of a large block.
+    let d = tree(6, 4000, 1);
+    for f in 0..300 {
+        let sub = d.path().join(format!("s{f:03}"));
+        fs::create_dir(&sub).unwrap();
+        fs::write(sub.join("f.txt"), "needle\nhay\n").unwrap();
+    }
+    let path_of = |line: &str| {
+        (line != "--").then(|| line.split_once(':').map_or(line, |(p, _)| p).to_string())
+    };
+    for args in [&["-j8", "-n", "needle", "."][..], &["-j8", "needle", "."]] {
+        let out = text(&argrep(d.path(), args));
+        assert_eq!(switches(out.lines(), path_of), (306, 306), "{args:?}");
+    }
+}

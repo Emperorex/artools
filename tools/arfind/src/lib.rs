@@ -958,6 +958,9 @@ pub fn scan_directory(
         Arc::clone(&task.ignore_stack)
     };
 
+    // Subdirectories are queued together after the listing: one step
+    // under the queue's lock instead of one per subdirectory.
+    let mut subdirs = Vec::new();
     for entry in entries {
         let file_type = match entry.file_type() {
             Ok(ft) => ft,
@@ -1111,7 +1114,7 @@ pub fn scan_directory(
             }
 
             if config.max_depth.is_none_or(|d| task.depth < d) {
-                queue.push(Task {
+                subdirs.push(Task {
                     path: entry_path,
                     depth: task.depth + 1,
                     ignore_stack: Arc::clone(&ignore_stack),
@@ -1120,6 +1123,7 @@ pub fn scan_directory(
             }
         }
     }
+    queue.push_all(subdirs);
 }
 
 #[cfg(test)]

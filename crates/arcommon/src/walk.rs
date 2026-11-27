@@ -5,6 +5,12 @@
 //! nothing is queued and no worker is still processing an item, since only
 //! a running item can add new ones.
 //!
+//! Workers take the newest item first, so the walk goes depth first: the
+//! queue holds about depth × fan-out items, where taking the oldest first
+//! (breadth first) would hold a whole level of the tree, hundreds of
+//! thousands of items in a wide one. The starting items, and the items of
+//! one [`Queue::push_all`], are still taken in the order given.
+//!
 //! Workers that run out of queued items while others are still busy sleep
 //! on a condition variable until new work arrives or the walk ends, rather
 //! than spinning. Workers run on scoped threads, so the processing closure
@@ -27,10 +33,7 @@
 //! assert_eq!(visited.into_inner(), 1 + 2 + 4 + 8);
 //! ```
 
-use std::{
-    collections::VecDeque,
-    sync::{Condvar, Mutex, MutexGuard},
-};
+use std::sync::{Condvar, Mutex, MutexGuard};
 
 /// How many results the workers of a walk may get ahead of the thread
 /// that prints them. When the printer falls behind (a slow terminal, or a
@@ -54,9 +57,13 @@ pub struct Queue<T> {
 }
 
 struct State<T> {
-    items: VecDeque<T>,
+    /// Taken from the back: the newest item first.
+    items: Vec<T>,
     /// Items queued plus items being processed. The walk ends at zero.
     pending: usize,
+    /// Workers waiting for an item. Waking one costs a system call, so new
+    /// items wake only as many as there are, and none when all are busy.
+    idle: usize,
     stopped: bool,
 }
 
@@ -70,14 +77,32 @@ impl<T> Queue<T> {
 
     /// Adds an item to process. Ignored once the walk has been stopped.
     pub fn push(&self, item: T) {
+        self.push_all([item]);
+    }
+
+    /// Adds several items at once, in one step under the lock (a directory's
+    /// subdirectories, say), waking as many idle workers as there are new
+    /// items. They are taken in the order given, before anything queued
+    /// earlier. Ignored once the walk has been stopped.
+    pub fn push_all<I>(&self, items: I)
+    where
+        I: IntoIterator<Item = T>,
+        I::IntoIter: DoubleEndedIterator,
+    {
         let mut st = self.lock();
         if st.stopped {
             return;
         }
-        st.items.push_back(item);
-        st.pending += 1;
+        let before = st.items.len();
+        // Reversed: the first item ends up at the back, taken first.
+        st.items.extend(items.into_iter().rev());
+        let added = st.items.len() - before;
+        st.pending += added;
+        let wake = added.min(st.idle);
         drop(st);
-        self.changed.notify_one();
+        for _ in 0..wake {
+            self.changed.notify_one();
+        }
     }
 
     /// Ends the walk early: queued items are dropped, later pushes are
@@ -90,8 +115,11 @@ impl<T> Queue<T> {
         let dropped = st.items.len();
         st.items.clear();
         st.pending -= dropped;
+        let wake = st.pending == 0 && st.idle > 0;
         drop(st);
-        self.changed.notify_all();
+        if wake {
+            self.changed.notify_all();
+        }
     }
 
     /// Whether [`stop`](Self::stop) has been called.
@@ -104,20 +132,22 @@ impl<T> Queue<T> {
     fn next(&self) -> Option<T> {
         let mut st = self.lock();
         loop {
-            if let Some(item) = st.items.pop_front() {
+            if let Some(item) = st.items.pop() {
                 return Some(item);
             }
             if st.pending == 0 {
                 return None;
             }
+            st.idle += 1;
             st = self.changed.wait(st).unwrap_or_else(|e| e.into_inner());
+            st.idle -= 1;
         }
     }
 
     fn finish_one(&self) {
         let mut st = self.lock();
         st.pending -= 1;
-        let done = st.pending == 0;
+        let done = st.pending == 0 && st.idle > 0;
         drop(st);
         if done {
             self.changed.notify_all();
@@ -149,11 +179,14 @@ where
     T: Send,
     S: Send,
 {
-    let items: VecDeque<T> = initial.into_iter().collect();
+    // Reversed, so the first starting item is taken first.
+    let mut items: Vec<T> = initial.into_iter().collect();
+    items.reverse();
     let queue = Queue {
         state: Mutex::new(State {
             pending: items.len(),
             items,
+            idle: 0,
             stopped: false,
         }),
         changed: Condvar::new(),
@@ -234,6 +267,80 @@ mod tests {
                 assert_eq!(seen.into_inner(), tree_size(6, 3), "workers={workers}");
             });
         }
+    }
+
+    /// The order one worker takes items in, for a tree where item `n` has
+    /// children `n*10+1 ..= n*10+fanout` down to `depth` digits.
+    fn order(start: &[u32], fanout: u32, depth: u32, batch: bool) -> Vec<u32> {
+        let seen = Mutex::new(Vec::new());
+        for_each(start.to_vec(), 1, |n, q| {
+            seen.lock().unwrap().push(n);
+            if n < 10u32.pow(depth - 1) {
+                let children = (1..=fanout).map(|c| n * 10 + c);
+                if batch {
+                    q.push_all(children.collect::<Vec<_>>());
+                } else {
+                    // One at a time: each push is taken before the last.
+                    for c in children {
+                        q.push(c);
+                    }
+                }
+            }
+        });
+        seen.into_inner().unwrap()
+    }
+
+    #[test]
+    fn the_walk_is_depth_first_in_the_order_given() {
+        // Starting items first to last, a batch first to last, each item's
+        // children before its next sibling.
+        assert_eq!(
+            order(&[1, 2], 2, 3, true),
+            [1, 11, 111, 112, 12, 121, 122, 2, 21, 211, 212, 22, 221, 222]
+        );
+        // Separate pushes: the newest first.
+        assert_eq!(order(&[1], 2, 2, false), [1, 12, 11]);
+    }
+
+    #[test]
+    fn the_queue_holds_about_depth_times_fanout_items() {
+        // Breadth first, a tree with fan-out 10 queued a whole level (1000
+        // items at the last level here); depth first, about 10 per level.
+        let most = AtomicUsize::new(0);
+        let state = Mutex::new(0usize);
+        for_each([0u32], 1, |depth, q| {
+            let mut queued = state.lock().unwrap();
+            *queued = queued.saturating_sub(1); // this one, taken
+            if depth < 4 {
+                q.push_all(vec![depth + 1; 10]);
+                *queued += 10;
+            }
+            most.fetch_max(*queued, Ordering::Relaxed);
+        });
+        let most = most.into_inner();
+        assert!(most <= 4 * 10, "{most} items queued at once");
+    }
+
+    #[test]
+    fn push_all_wakes_enough_workers() {
+        // One item adds 8 slow ones at once: all 8 workers must get one
+        // and run at the same time, not one after another.
+        within(10, || {
+            let running = AtomicUsize::new(0);
+            let most = AtomicUsize::new(0);
+            for_each([0u32], 8, |d, q| {
+                if d == 0 {
+                    std::thread::sleep(Duration::from_millis(50)); // all idle
+                    q.push_all(vec![1; 8]);
+                    return;
+                }
+                let now = running.fetch_add(1, Ordering::SeqCst) + 1;
+                most.fetch_max(now, Ordering::SeqCst);
+                std::thread::sleep(Duration::from_millis(200));
+                running.fetch_sub(1, Ordering::SeqCst);
+            });
+            assert!(most.into_inner() >= 7, "workers ran one after another");
+        });
     }
 
     #[test]

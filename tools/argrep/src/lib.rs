@@ -13,7 +13,7 @@ use std::{
     io::{self, BufRead, BufReader, Chain, Cursor, Read},
     path::{Path, PathBuf},
     sync::{
-        Arc, Mutex, MutexGuard, OnceLock,
+        Arc, OnceLock, RwLock, RwLockWriteGuard,
         atomic::{AtomicUsize, Ordering},
     },
     thread,
@@ -361,6 +361,21 @@ pub struct Task {
     /// git's own precedence for nested ignore files).
     pub ignore_stack: IgnoreStack,
 }
+
+/// A unit of work for the walk's workers.
+enum Work {
+    /// A directory to list and search, or a file named as a PATH.
+    Dir(Task),
+    /// Files of one directory to search, split off a large directory (see
+    /// `FILES_PER_TASK`).
+    Files(Vec<PathBuf>),
+}
+
+/// The most files of one directory a single task searches. A directory
+/// with more (a log folder, build output, a cache) is split into tasks of
+/// this many, so all workers search it rather than only the one that
+/// listed it.
+const FILES_PER_TASK: usize = 128;
 
 /// Shared runtime configuration
 pub struct SearchConfig {
@@ -797,36 +812,42 @@ pub fn parallel_grep(
     });
 
     // Each root starts with an empty .gitignore stack of its own.
-    let root_tasks: Vec<Task> = roots
+    let root_tasks: Vec<Work> = roots
         .into_iter()
-        .map(|path| Task {
-            path,
-            ignore_stack: Arc::new(Vec::new()),
+        .map(|path| {
+            Work::Dir(Task {
+                path,
+                ignore_stack: Arc::new(Vec::new()),
+            })
         })
         .collect();
     // One named file is the whole search: its results can stream, as
     // there is nothing for them to interleave with (see ResultSink).
     let only_root = root_tasks.len() == 1;
-    walk::for_each(root_tasks, workers, |task, queue| {
+    walk::for_each(root_tasks, workers, |work, queue| {
         if config.quiet && stats.matched_lines.load(Ordering::Relaxed) > 0 {
             // -q already has its answer: drop the rest of the walk.
             queue.stop();
             return;
         }
-        scan_and_grep(task, &config, queue, &output_tx, &stats, only_root);
+        match work {
+            Work::Dir(task) => scan_and_grep(task, &config, queue, &output_tx, &stats, only_root),
+            Work::Files(files) => search_files(files, &config, &output_tx, &stats),
+        }
     });
 
     drop(output_tx);
     printer.join().unwrap();
 }
 
-/// Searches one task: a named file, or a directory, whose files are
-/// searched here and whose subdirectories are queued as new tasks.
+/// Searches one task: a named file, or a directory. A directory's
+/// subdirectories are queued as new tasks, and so are its files beyond the
+/// first `FILES_PER_TASK`, which are searched here.
 /// `only_root`: `task` is the only PATH of the search.
-pub fn scan_and_grep(
+fn scan_and_grep(
     task: Task,
     config: &SearchConfig,
-    queue: &Queue<Task>,
+    queue: &Queue<Work>,
     output_tx: &crossbeam_channel::Sender<Vec<MatchResult>>,
     stats: &SearchStats,
     only_root: bool,
@@ -918,14 +939,14 @@ pub fn scan_and_grep(
         Arc::clone(&task.ignore_stack)
     };
 
+    // The whole listing is sorted out first, and the subdirectories and
+    // the files beyond the first FILES_PER_TASK are queued together, before
+    // any file is searched: idle workers can start on them right away
+    // instead of waiting for this worker to search the files listed before
+    // them.
+    let mut subdirs = Vec::new();
+    let mut files = Vec::new();
     for entry in entries {
-        if config.quiet && stats.matched_lines.load(Ordering::Relaxed) > 0 {
-            // Don't enqueue more subdirectories or scan more files in this
-            // directory once -q already has its answer — the rest of this
-            // listing would just be wasted I/O.
-            return;
-        }
-
         let file_type = match entry.file_type() {
             Ok(ft) => ft,
             Err(_) => continue,
@@ -992,10 +1013,10 @@ pub fn scan_and_grep(
             {
                 continue;
             }
-            queue.push(Task {
+            subdirs.push(Work::Dir(Task {
                 path: entry_path,
                 ignore_stack: Arc::clone(&ignore_stack),
-            });
+            }));
         } else {
             // --exclude / --type-not: skip files matching any exclude
             // glob, whether it came from --exclude directly or from
@@ -1033,35 +1054,70 @@ pub fn scan_and_grep(
                 continue;
             }
 
-            // --max-filesize: one stat, only when the flag is set, after
-            // the name filters so excluded files cost nothing. Symlinks
-            // were skipped above, so this is the file itself. If the stat
-            // fails, grep_file's open reports the error as usual.
-            if config.max_filesize > 0
-                && !config.files_only
-                && let Ok(meta) = entry.metadata()
-                && too_large(&meta, config)
-            {
-                stats.files_skipped.fetch_add(1, Ordering::Relaxed);
-                stats.files_too_large.fetch_add(1, Ordering::Relaxed);
-                if config.debug {
-                    eprintln!(
-                        "{}: {}: {} bytes, over --max-filesize, skipped",
-                        "argrep".err_red(),
-                        display_path(&entry_path),
-                        meta.len()
-                    );
-                }
-                continue;
-            }
+            files.push(entry_path);
+        }
+    }
 
-            stats.total_files.fetch_add(1, Ordering::Relaxed);
-            if config.files_only {
-                emit_file_listing(&entry_path, output_tx);
-            } else {
-                let sink = ResultSink::new(Destination::Batches(output_tx), true);
-                grep_file_to(&entry_path, config, sink, stats);
+    // This worker searches the first FILES_PER_TASK files; the rest go to
+    // the queue in tasks of that many, with the subdirectories, in one step.
+    let rest = files.split_off(files.len().min(FILES_PER_TASK));
+    let mut work = Vec::with_capacity(rest.len().div_ceil(FILES_PER_TASK) + subdirs.len());
+    let mut rest = rest.into_iter();
+    loop {
+        let chunk: Vec<PathBuf> = rest.by_ref().take(FILES_PER_TASK).collect();
+        if chunk.is_empty() {
+            break;
+        }
+        work.push(Work::Files(chunk));
+    }
+    work.extend(subdirs);
+    queue.push_all(work);
+    search_files(files, config, output_tx, stats);
+}
+
+/// Searches files of one directory that passed the name filters.
+fn search_files(
+    files: Vec<PathBuf>,
+    config: &SearchConfig,
+    output_tx: &crossbeam_channel::Sender<Vec<MatchResult>>,
+    stats: &SearchStats,
+) {
+    // Sent when full, and when dropped at the end.
+    let mut outbox = Outbox::new(output_tx);
+    for path in files {
+        if config.quiet && stats.matched_lines.load(Ordering::Relaxed) > 0 {
+            // -q already has its answer: the rest would be wasted I/O.
+            return;
+        }
+
+        // --max-filesize: one stat, only when the flag is set, after the
+        // name filters so excluded files cost nothing. Symlinks were
+        // skipped while listing, so this is the file itself. If the stat
+        // fails, grep_file's open reports the error as usual.
+        if config.max_filesize > 0
+            && !config.files_only
+            && let Ok(meta) = fs::metadata(&path)
+            && too_large(&meta, config)
+        {
+            stats.files_skipped.fetch_add(1, Ordering::Relaxed);
+            stats.files_too_large.fetch_add(1, Ordering::Relaxed);
+            if config.debug {
+                eprintln!(
+                    "{}: {}: {} bytes, over --max-filesize, skipped",
+                    "argrep".err_red(),
+                    display_path(&path),
+                    meta.len()
+                );
             }
+            continue;
+        }
+
+        stats.total_files.fetch_add(1, Ordering::Relaxed);
+        if config.files_only {
+            outbox.add(&mut vec![file_listing(&path)]);
+        } else {
+            let sink = ResultSink::new(Destination::Outbox(&mut outbox), true);
+            grep_file_to(&path, config, sink, stats);
         }
     }
 }
@@ -1082,7 +1138,12 @@ fn too_large(meta: &fs::Metadata, config: &SearchConfig) -> bool {
 /// content), which is what lets print_result in main.rs reuse that exact
 /// print branch for --files too.
 fn emit_file_listing(file_path: &Path, output_tx: &crossbeam_channel::Sender<Vec<MatchResult>>) {
-    let _ = output_tx.send(vec![MatchResult {
+    let _ = output_tx.send(vec![file_listing(file_path)]);
+}
+
+/// The result `--files` reports for a file.
+fn file_listing(file_path: &Path) -> MatchResult {
+    MatchResult {
         file_path: Arc::from(file_path),
         line_num: 0,
         line_content: String::new(),
@@ -1090,14 +1151,57 @@ fn emit_file_listing(file_path: &Path, output_tx: &crossbeam_channel::Sender<Vec
         is_context: false,
         is_separator: false,
         highlights: None,
-    }]);
+    }
 }
 
-/// Serializes whole-file result blocks onto the output channel (see
-/// `ResultSink`). The channel is bounded, so a send can wait for the
-/// printer; other workers then wait for this lock. The printer never takes
+/// Complete result blocks of several files, sent to the printer together
+/// as one message: a worker searching many small files (with -c, -l or
+/// --files, one result each) then sends a message per `RESULT_BATCH`
+/// results instead of one per file. A message is delivered whole, so the
+/// files' blocks stay apart.
+struct Outbox {
+    tx: crossbeam_channel::Sender<Vec<MatchResult>>,
+    blocks: Vec<MatchResult>,
+}
+
+impl Outbox {
+    fn new(tx: &crossbeam_channel::Sender<Vec<MatchResult>>) -> Self {
+        Outbox {
+            tx: tx.clone(),
+            blocks: Vec::new(),
+        }
+    }
+
+    /// Adds a file's complete block (at most `RESULT_BATCH` results),
+    /// sending what is collected first if the message would grow past that.
+    fn add(&mut self, block: &mut Vec<MatchResult>) {
+        if self.blocks.len() + block.len() > walk::RESULT_BATCH {
+            self.send();
+        }
+        self.blocks.append(block);
+    }
+
+    fn send(&mut self) {
+        if !self.blocks.is_empty() {
+            send_whole(&self.tx, std::mem::take(&mut self.blocks));
+        }
+    }
+}
+
+impl Drop for Outbox {
+    fn drop(&mut self) {
+        self.send();
+    }
+}
+
+/// Keeps a file's results together on the output channel (see
+/// `ResultSink`). A block sent as one message is whole anyway: it is sent
+/// holding this lock shared, so such sends never wait for each other. A
+/// block that takes several messages holds it exclusively, so no other
+/// message can come between them. The channel is bounded, so a send can
+/// wait for the printer, and others for the lock; the printer never takes
 /// it, so it always makes progress.
-static FILE_BLOCK_ORDER: Mutex<()> = Mutex::new(());
+static FILE_BLOCK_ORDER: RwLock<()> = RwLock::new(());
 
 /// How much of one file's output (roughly, in bytes) a worker collects
 /// before it starts sending it while holding `FILE_BLOCK_ORDER`. Bounds the
@@ -1111,6 +1215,9 @@ enum Destination<'a> {
     /// Up to `walk::RESULT_BATCH` results per message: the channel of
     /// [`parallel_grep`].
     Batches(&'a crossbeam_channel::Sender<Vec<MatchResult>>),
+    /// The same channel, through an [`Outbox`] that a small file's
+    /// complete block joins.
+    Outbox(&'a mut Outbox),
 }
 
 /// Where `grep_file` puts its results.
@@ -1119,9 +1226,12 @@ enum Destination<'a> {
 /// are kept together, so they come out as one block instead of mixed with
 /// lines of the files other workers are searching (`-C`, `--json` and
 /// plain `file:line` output alike). They are collected until the file is
-/// done, then sent holding `FILE_BLOCK_ORDER`. A file with more output than
-/// `FILE_BLOCK_BYTES` takes the lock at that point and sends the rest as it
-/// is found, keeping memory bounded; other workers' blocks wait for it.
+/// done, then sent: in one message when they fit (a message can't be
+/// split), joining other small files' blocks in an [`Outbox`] when there
+/// is one; otherwise in several, holding `FILE_BLOCK_ORDER` exclusively.
+/// A file with more output than `FILE_BLOCK_BYTES` takes the lock at that
+/// point and sends the rest as it is found, keeping memory bounded; other
+/// workers' blocks wait for it.
 ///
 /// Otherwise (`grouped` false) results stream: for a single named file,
 /// where there is nothing to interleave with, and for a FIFO or device,
@@ -1141,7 +1251,7 @@ struct ResultSink<'a> {
     pending_bytes: usize,
     /// Held once the block has outgrown `FILE_BLOCK_BYTES`, until the file
     /// is done.
-    order: Option<MutexGuard<'static, ()>>,
+    order: Option<RwLockWriteGuard<'static, ()>>,
 }
 
 impl<'a> ResultSink<'a> {
@@ -1191,41 +1301,71 @@ impl<'a> ResultSink<'a> {
     /// Sends everything pending, in batches.
     fn flush(&mut self) {
         self.pending_bytes = 0;
-        match self.to {
+        let tx = match &self.to {
             Destination::Results(tx) => {
                 for result in self.pending.drain(..) {
                     let _ = tx.send(result);
                 }
+                return;
             }
-            Destination::Batches(tx) => {
-                if self.pending.len() <= walk::RESULT_BATCH {
-                    let _ = tx.send(std::mem::take(&mut self.pending));
-                    return;
-                }
-                let mut rest = std::mem::take(&mut self.pending).into_iter();
-                loop {
-                    let batch: Vec<MatchResult> = rest.by_ref().take(walk::RESULT_BATCH).collect();
-                    if batch.is_empty() {
-                        break;
-                    }
-                    let _ = tx.send(batch);
-                }
+            Destination::Batches(tx) => *tx,
+            Destination::Outbox(outbox) => &outbox.tx,
+        };
+        if self.pending.len() <= walk::RESULT_BATCH {
+            let _ = tx.send(std::mem::take(&mut self.pending));
+            return;
+        }
+        let mut rest = std::mem::take(&mut self.pending).into_iter();
+        loop {
+            let batch: Vec<MatchResult> = rest.by_ref().take(walk::RESULT_BATCH).collect();
+            if batch.is_empty() {
+                break;
             }
+            let _ = tx.send(batch);
         }
     }
 }
 
-fn lock_file_block_order() -> MutexGuard<'static, ()> {
-    FILE_BLOCK_ORDER.lock().unwrap_or_else(|e| e.into_inner())
+/// For a block of several messages: nothing else is sent meanwhile.
+fn lock_file_block_order() -> RwLockWriteGuard<'static, ()> {
+    FILE_BLOCK_ORDER.write().unwrap_or_else(|e| e.into_inner())
+}
+
+/// Sends a block that is one message, which can't be split: it only has to
+/// stay out from between the messages of a block holding the lock.
+fn send_whole(tx: &crossbeam_channel::Sender<Vec<MatchResult>>, block: Vec<MatchResult>) {
+    let _shared = FILE_BLOCK_ORDER.read().unwrap_or_else(|e| e.into_inner());
+    let _ = tx.send(block);
 }
 
 impl Drop for ResultSink<'_> {
     fn drop(&mut self) {
-        if !self.pending.is_empty() {
-            let _order = (!self.streaming()).then(lock_file_block_order);
-            self.flush();
+        if self.pending.is_empty() {
+            return;
         }
-        // `self.order`, if held, is released after this.
+        if self.streaming() {
+            self.flush();
+            return;
+        }
+        // The file's complete block. One that fits in one message needs no
+        // lock: a message is delivered whole, so nothing can come between
+        // its results. Only a block of several messages takes the lock, to
+        // keep other workers' messages out from between them.
+        if self.pending.len() <= walk::RESULT_BATCH {
+            match &mut self.to {
+                Destination::Outbox(outbox) => {
+                    outbox.add(&mut self.pending);
+                    return;
+                }
+                Destination::Batches(tx) => {
+                    send_whole(tx, std::mem::take(&mut self.pending));
+                    return;
+                }
+                Destination::Results(_) => {}
+            }
+        }
+        let _order = lock_file_block_order();
+        self.flush();
     }
 }
 
